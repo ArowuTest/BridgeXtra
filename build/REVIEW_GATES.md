@@ -92,3 +92,15 @@ Reviewed BUILD_PLAN Rev 2, ADR-0001 (with amendments), ASSUMPTIONS.md line-by-li
 - VR-1b: BUILD_PLAN §10.3 says local Postgres "port TBD" while ASSUMPTIONS A-14 decides 5434 — align §10.3 to A-14.
 
 **Next checkpoint: G0** (foundation exit). Builder notifies at M0 candidate; reviewer verifies fresh-DB migration, tenant middleware negatives, config maker-checker, idempotency crash-replay, SF-1 CI naming, SF-3 pack, SF-4 dispatcher SQL — at source.
+
+### VR-2 — 17 Jul 2026: G0 gate review (M0 commits 0889b82 + 86843d5)
+Full source read + independent `-race` run in golang:1.25 vs telco-credit-postgres. Record: `build/reviews/REVIEW-1-M0.md`.
+**Verdict: G0 CONDITIONAL PASS.** Builder suite all green; SF-1..6 verified implemented at source (not just referenced); suspected audit-RLS-rejection cleared (NULLIF guards it, test proves the row lands).
+- **G0-F2 (HIGH, must-fix before G1):** outbox head-of-line starvation. Unhandled-type or max-attempts-parked events re-fill the claim batch every cycle; 50 poison events on distinct aggregates stall all dispatch. Reviewer reproducer `outboxdispatch/reviewer_starvation_test.go` FAILS (delivered=0/10 cycles). Confirmed real. Blast radius opens at M1 (ledger/recovery/fulfilment events ride this backbone; V2-EVT-012). Fix = filter claim by registered event types + dead-letter at max-attempts; keep per-aggregate FIFO guard. G1 gated on this + reproducer green.
+- **G0-F3 (LOW):** VR-1a bare ARC-002 in ADR, VR-1b plan §10.3 "port TBD" — still open; opportunistic.
+
+### VR-3 — 17 Jul 2026: Elevated to best-in-class standard (owner directive)
+Owner directive: build correctly + best-in-class + better than competition, from the ground up. Created **build/ENGINEERING_STANDARD.md** (BC-1..8) — binding at ADR authority, enforced at every gate alongside SRS MUSTs + SF findings. Selection rule = retrofit-expensive × competitively-differentiating. Two urgent foundational gaps confirmed at source (both pre-M1):
+- **BC-GAP-1 (HIGH, pre-M1):** no typed `Money` value object — money is bare `int64 + currency string`. No floats yet (good) but nothing enforces it. Must land `Money` type + rounding-policy ADR as the FIRST M1 primitive, before the saga/ledger/recovery/settlement pass raw int64 (retrofit = multi-week rewrite across the money path). Compile-time currency safety + single rounding site + CI float-ban = the ledger differentiator.
+- **BC-GAP-2 (HIGH, immediate/G0-amend):** CI has vet/build/migrate/test but NO golangci-lint, govulncheck, gosec, gofmt-check, go mod verify, or coverage floor. Clean static/security baseline is free at ~30 files, unachievable at 3000. Add the quality+security merge-blocking stage NOW; commit .golangci.yml; drive tree to zero warnings (trivial at current size).
+Gate criteria upgraded: G0 now also requires BC-2; G1 requires BC-1/BC-3/BC-6/BC-7; G2 requires BC-4; BC-5/BC-8 continuous. A BC regression is a gate finding at the severity of what it protects.

@@ -26,16 +26,26 @@ func (Outbox) Append(ctx context.Context, tx pgx.Tx, e entity.OutboxEvent) error
 }
 
 // ClaimBatch (worker pool, BYPASSRLS role): claims up to limit dispatchable
-// events. An event is dispatchable only if NO older unpublished event exists
-// for the same aggregate — per-aggregate FIFO (ADR-0001 SF-4). SKIP LOCKED
-// lets concurrent workers proceed on other aggregates.
-// Indexes: outbox_unpublished_ix, outbox_agg_unpublished_ix.
-func (Outbox) ClaimBatch(ctx context.Context, tx pgx.Tx, limit int) ([]entity.OutboxEvent, error) {
+// events of the given REGISTERED event types (G0-F2 fix part 1: an event type
+// nobody consumes never occupies a claim slot). An event is dispatchable only
+// if NO older unpublished event exists for the same aggregate — per-aggregate
+// FIFO (ADR-0001 SF-4). The inner guard deliberately ignores BOTH the type
+// filter AND the dead-letter marker: a quarantined or unconsumed head still
+// blocks its own aggregate's successors (ordering is never silently skipped);
+// it just stops blocking other aggregates and stops consuming batch slots.
+// SKIP LOCKED lets concurrent workers proceed on other aggregates.
+// Indexes: outbox_unpublished_ix (claim window), outbox_agg_unpublished_ix (FIFO guard).
+func (Outbox) ClaimBatch(ctx context.Context, tx pgx.Tx, limit int, eventTypes []string) ([]entity.OutboxEvent, error) {
+	if len(eventTypes) == 0 {
+		return nil, nil // no registered consumers: nothing is claimable
+	}
 	rows, err := tx.Query(ctx, `
 		SELECT seq, id, telco_id, aggregate_type, aggregate_id, event_type, schema_version,
 		       payload, occurred_at, attempts
 		FROM outbox o
 		WHERE o.published_at IS NULL
+		  AND o.dead_lettered_at IS NULL
+		  AND o.event_type = ANY($2)
 		  AND NOT EXISTS (
 		        SELECT 1 FROM outbox o2
 		        WHERE o2.aggregate_id = o.aggregate_id
@@ -43,7 +53,7 @@ func (Outbox) ClaimBatch(ctx context.Context, tx pgx.Tx, limit int) ([]entity.Ou
 		          AND o2.published_at IS NULL)
 		ORDER BY o.seq
 		LIMIT $1
-		FOR UPDATE OF o SKIP LOCKED`, limit)
+		FOR UPDATE OF o SKIP LOCKED`, limit, eventTypes)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +80,39 @@ func (Outbox) MarkFailed(ctx context.Context, tx pgx.Tx, seq int64, cause string
 	_, err := tx.Exec(ctx,
 		`UPDATE outbox SET attempts = attempts + 1, last_error = $2 WHERE seq = $1`, seq, cause)
 	return err
+}
+
+// MarkDeadLettered (G0-F2 fix part 2) removes a permanently-failed event from
+// the claim window. It stays unpublished — so it keeps blocking its own
+// aggregate's successors — and becomes explicit operator backlog (V2-EVT-008).
+func (Outbox) MarkDeadLettered(ctx context.Context, tx pgx.Tx, seq int64, cause string) error {
+	_, err := tx.Exec(ctx,
+		`UPDATE outbox SET dead_lettered_at = now(), last_error = $2 WHERE seq = $1 AND published_at IS NULL`,
+		seq, cause)
+	return err
+}
+
+// Requeue is the authorised operator-replay action (V2-EVT-009): clears the
+// dead-letter marker and resets the attempt budget.
+func (Outbox) Requeue(ctx context.Context, tx pgx.Tx, seq int64) error {
+	ct, err := tx.Exec(ctx,
+		`UPDATE outbox SET dead_lettered_at = NULL, attempts = 0, last_error = NULL
+		 WHERE seq = $1 AND dead_lettered_at IS NOT NULL`, seq)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DeadLetteredCount is the DLQ health metric (V2-EVT-013 / V3-SRE-006).
+func (Outbox) DeadLetteredCount(ctx context.Context, pool *pgxpool.Pool) (int64, error) {
+	var n int64
+	err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM outbox WHERE dead_lettered_at IS NOT NULL`).Scan(&n)
+	return n, err
 }
 
 // UnpublishedCount is a worker-pool health metric (V2-EVT-013).

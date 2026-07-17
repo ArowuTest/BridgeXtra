@@ -44,6 +44,17 @@ type tuning struct {
 	RetryBackoffSeconds int `json:"retry_backoff_seconds"`
 }
 
+// registeredTypes returns the event types this dispatcher can consume; only
+// these are claimable (G0-F2 fix part 1 — an unconsumed type never occupies a
+// claim slot, but still blocks its own aggregate via the FIFO guard).
+func (d *Dispatcher) registeredTypes() []string {
+	out := make([]string, 0, len(d.handlers))
+	for t := range d.handlers {
+		out = append(out, t)
+	}
+	return out
+}
+
 // RunOnce claims and dispatches one batch; returns events processed.
 func (d *Dispatcher) RunOnce(ctx context.Context) (int, error) {
 	cfg, err := d.Config.ActiveAt(ctx, "platform.outbox", entity.ScopeGlobal, time.Now().UTC())
@@ -57,20 +68,28 @@ func (d *Dispatcher) RunOnce(ctx context.Context) (int, error) {
 
 	n := 0
 	err = repo.WithPlatformTx(ctx, d.Pool, func(tx pgx.Tx) error {
-		events, err := d.outbox.ClaimBatch(ctx, tx, t.ClaimBatchSize)
+		events, err := d.outbox.ClaimBatch(ctx, tx, t.ClaimBatchSize, d.registeredTypes())
 		if err != nil {
 			return err
 		}
 		for _, e := range events {
 			h, ok := d.handlers[e.EventType]
 			if !ok {
-				// leave unclaimed; skip inside this batch
+				// Unreachable given the type filter; defensive only.
 				continue
 			}
 			if e.Attempts >= t.MaxAttempts {
-				d.Log.Error("outbox event exceeded max attempts; parked for operator replay",
-					"event_id", e.ID, "event_type", e.EventType, "attempts", e.Attempts)
-				continue // stays unpublished: visible backlog, operator-controlled replay (V2-EVT-008/009)
+				// G0-F2 fix part 2: leave the claim window permanently — explicit
+				// operator backlog (V2-EVT-008), not per-cycle drag. The event
+				// stays unpublished and keeps blocking its own aggregate.
+				if dlErr := d.outbox.MarkDeadLettered(ctx, tx, e.Seq,
+					fmt.Sprintf("max attempts (%d) exhausted; last_error retained", t.MaxAttempts)); dlErr != nil {
+					return dlErr
+				}
+				d.Log.Error("outbox event dead-lettered; operator requeue required",
+					"event_id", e.ID, "event_type", e.EventType, "aggregate_id", e.AggregateID,
+					"attempts", e.Attempts)
+				continue
 			}
 			if err := h(ctx, e); err != nil {
 				if mErr := d.outbox.MarkFailed(ctx, tx, e.Seq, err.Error()); mErr != nil {

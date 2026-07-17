@@ -52,7 +52,7 @@ func TestV2_EVT_004_PerAggregateFIFO_AndSkipLockedAcrossAggregates(t *testing.T)
 		t.Fatal(err)
 	}
 	defer tx1.Rollback(ctx)
-	claimed1, err := outbox.ClaimBatch(ctx, tx1, 10)
+	claimed1, err := outbox.ClaimBatch(ctx, tx1, 10, []string{"M0.Ping"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestV2_EVT_004_PerAggregateFIFO_AndSkipLockedAcrossAggregates(t *testing.T)
 			return
 		}
 		defer tx2.Rollback(ctx)
-		claimed2, err2 = outbox.ClaimBatch(ctx, tx2, 10)
+		claimed2, err2 = outbox.ClaimBatch(ctx, tx2, 10, []string{"M0.Ping"})
 	}()
 	select {
 	case <-done:
@@ -107,7 +107,7 @@ func TestV2_EVT_004_PerAggregateFIFO_AndSkipLockedAcrossAggregates(t *testing.T)
 		t.Fatal(err)
 	}
 	defer tx3.Rollback(ctx)
-	claimed3, err := outbox.ClaimBatch(ctx, tx3, 10)
+	claimed3, err := outbox.ClaimBatch(ctx, tx3, 10, []string{"M0.Ping"})
 	if err != nil {
 		t.Fatal(err)
 	}
