@@ -15,10 +15,14 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/handler"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/ledger"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/migrations"
 )
 
@@ -80,6 +84,14 @@ func main() {
 	adminAuth := &handler.AdminAuth{Admins: &repo.Admins{Pool: appPool}, Log: log}
 	cfgAdmin := &handler.ConfigAdmin{Svc: configsvc.New(workerPool), Log: log}
 	cfgAdmin.Mount(mux, adminAuth)
+
+	// Channel + recovery surface (M1 walking skeleton).
+	appCfg := configsvc.New(appPool)
+	led := ledger.New(appCfg)
+	orig := origination.New(appPool, appCfg, led, mno.NewHTTPAdapter(appCfg), log)
+	rec := recovery.New(appPool, appCfg, led, log)
+	channel := &handler.Channel{Origination: orig, Recovery: rec, Log: log}
+	channel.Mount(mux, auth)
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var out []entity.Programme

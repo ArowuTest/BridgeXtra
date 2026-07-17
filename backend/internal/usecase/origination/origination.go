@@ -388,6 +388,18 @@ func cmdHasExistingAdvance(ctx context.Context, s *Service, cmd ConfirmCmd) bool
 	return found
 }
 
+// GetAdvance is the status-route accessor (EDG-004: the durable status
+// enquiry a customer uses after a dropped session). Tenant-scoped by RLS.
+func (s *Service) GetAdvance(ctx context.Context, advanceID string) (entity.Advance, error) {
+	var adv entity.Advance
+	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var e error
+		adv, e = s.advances.Get(ctx, tx, advanceID)
+		return e
+	})
+	return adv, err
+}
+
 func (s *Service) replayByIdemKey(ctx context.Context, idemKey string) (ConfirmResult, error) {
 	var adv entity.Advance
 	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {

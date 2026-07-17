@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.1.0  # M1a — admin config API
+  version: 0.1.1  # M1b — channel (offers/advances) + recovery events surface
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -71,6 +71,158 @@ paths:
           $ref: "#/components/responses/TenantMismatch"
         "500":
           $ref: "#/components/responses/Unavailable"
+
+  /v1/offers:
+    get:
+      operationId: listOffers
+      summary: Current valid offers for a subscriber (V2-OFR-009 reuse)
+      description: >
+        Every value derives from governed product config + the pinned decision
+        snapshot. Generation is serialized per subscriber/programme — repeated
+        or concurrent enquiries return the same ladder.
+      parameters:
+        - { name: programme_id, in: query, required: true, schema: { type: string } }
+        - { name: msisdn_token, in: query, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/CorrelationId"
+      responses:
+        "200":
+          description: Offer ladder (may be empty when nothing is offerable)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Offer" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Unknown subscriber token (OFFER_NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/advances:
+    post:
+      operationId: confirmAdvance
+      summary: Confirm an offer — the origination saga (V2 §13)
+      description: >
+        Requires Idempotency-Key (V2-API-002): a retry with the same key
+        returns the ORIGINAL outcome (200), never a second advance. 201 =
+        credited (ACTIVE). 202 = PROCESSING — the outcome is being resolved
+        (never blind-retried); poll status_route (EDG-004/005). 422 = telco
+        definitively rejected. Customer-safe statuses only (V2-ADV-016).
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/CorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [programme_id, offer_id, msisdn_token]
+              properties:
+                programme_id: { type: string }
+                offer_id: { type: string }
+                msisdn_token: { type: string }
+      responses:
+        "201":
+          description: Advance ACTIVE — value credited
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Advance" }
+        "200":
+          description: Idempotent replay of the original outcome (EDG-001)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Advance" }
+        "202":
+          description: PROCESSING — resolution in progress, poll status_route
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Advance" }
+        "400":
+          description: Missing/invalid Idempotency-Key or malformed body
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: Subscriber not eligible (SUBSCRIBER_INACTIVE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Offer not found (OFFER_NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: >
+            OFFER_EXPIRED | OFFER_SNAPSHOT_MISMATCH |
+            CONCURRENT_ADVANCE_BLOCK | FUNDING_POOL_EXHAUSTED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Telco definitively rejected fulfilment (status FAILED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Advance" }
+
+  /v1/advances/{id}:
+    get:
+      operationId: getAdvanceStatus
+      summary: Durable advance status (EDG-004 — survives dropped sessions)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - $ref: "#/components/parameters/CorrelationId"
+      responses:
+        "200":
+          description: Customer-safe advance status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Advance" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Unknown advance (tenant-scoped visibility)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /v1/recovery/events:
+    post:
+      operationId: ingestRecoveryEvent
+      summary: Canonical recharge-recovery event (V2-COL-001, EDG-018/020)
+      description: >
+        Idempotent by source_event_id — a telco replay returns the original
+        outcome and changes nothing. Allocation follows the governed waterfall;
+        over-recovery quarantines to suspense as an explicit liability;
+        unmatched tokens are preserved, never discarded.
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_event_id, msisdn_token, amount, occurred_at]
+              properties:
+                source_event_id: { type: string }
+                msisdn_token: { type: string }
+                amount: { $ref: "#/components/schemas/Money" }
+                occurred_at: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Event outcome (allocated / quarantined / unmatched / replayed)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecoveryEventResult" }
+        "400":
+          description: Malformed event (RECOVERY_BAD_REQUEST)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 
   /v1/admin/config/drafts:
     post:
@@ -234,8 +386,59 @@ components:
         type: string
         minLength: 8
         maxLength: 128
+    CorrelationId:
+      name: X-Correlation-Id
+      in: header
+      required: false
+      description: >
+        BC-6 lineage id. Accepted if provided, minted otherwise; always echoed
+        on the response and carried through every command, event, journal and
+        audit row this request causes.
+      schema:
+        type: string
 
   schemas:
+    Money:
+      type: object
+      description: Integer minor units + ISO 4217 currency (ADR-0002; never floats).
+      required: [amount_minor, currency]
+      properties:
+        amount_minor: { type: integer, format: int64 }
+        currency: { type: string, minLength: 3, maxLength: 3, example: NGN }
+    Offer:
+      type: object
+      required: [offer_id, face_value, fee, disbursed, repayment, fee_model, expires_at]
+      properties:
+        offer_id: { type: string }
+        face_value: { $ref: "#/components/schemas/Money" }
+        fee: { $ref: "#/components/schemas/Money" }
+        disbursed: { $ref: "#/components/schemas/Money" }
+        repayment: { $ref: "#/components/schemas/Money" }
+        fee_model: { type: string, enum: [DEDUCTED_UPFRONT, ADDED_TO_REPAYMENT] }
+        expires_at: { type: string, format: date-time }
+    Advance:
+      type: object
+      description: Customer-safe advance view (V2-ADV-016 — internal ambiguity never exposed).
+      required: [advance_id, status, face_value, disbursed, outstanding, status_route]
+      properties:
+        advance_id: { type: string }
+        status:
+          type: string
+          enum: [PROCESSING, ACTIVE, PARTIALLY_RECOVERED, CLOSED, FAILED]
+        face_value: { $ref: "#/components/schemas/Money" }
+        disbursed: { $ref: "#/components/schemas/Money" }
+        outstanding: { $ref: "#/components/schemas/Money" }
+        status_route: { type: string, example: /v1/advances/adv_01J... }
+    RecoveryEventResult:
+      type: object
+      required: [recovery_event_id, state, advance_closed, replayed]
+      properties:
+        recovery_event_id: { type: string }
+        state: { type: string, enum: [ALLOCATED, QUARANTINED, UNMATCHED, PENDING] }
+        applied: { $ref: "#/components/schemas/Money" }
+        excess: { $ref: "#/components/schemas/Money" }
+        advance_closed: { type: boolean }
+        replayed: { type: boolean }
     ConfigVersion:
       type: object
       description: Immutable, effective-dated configuration version (V2-CFG-004).

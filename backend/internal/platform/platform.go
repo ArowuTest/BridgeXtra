@@ -57,6 +57,26 @@ func TenantFrom(ctx context.Context) (string, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Correlation context (BC-6: one correlation_id from the channel edge through
+// every command, event, journal and audit row).
+// ---------------------------------------------------------------------------
+
+type correlationKey struct{}
+
+func WithCorrelation(ctx context.Context, correlationID string) context.Context {
+	return context.WithValue(ctx, correlationKey{}, correlationID)
+}
+
+// CorrelationFrom returns the request's correlation id, or generates one —
+// a financial event without lineage is a defect, so absence never propagates.
+func CorrelationFrom(ctx context.Context) string {
+	if v, _ := ctx.Value(correlationKey{}).(string); v != "" {
+		return v
+	}
+	return NewID("cor")
+}
+
+// ---------------------------------------------------------------------------
 // DB pools
 // ---------------------------------------------------------------------------
 

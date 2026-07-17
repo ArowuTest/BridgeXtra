@@ -32,6 +32,10 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 	served := map[string]bool{
 		"/healthz":                       true,
 		"/v1/programmes":                 true,
+		"/v1/offers":                     true,
+		"/v1/advances":                   true,
+		"/v1/advances/{id}":              true,
+		"/v1/recovery/events":            true,
 		"/v1/admin/config/drafts":        true,
 		"/v1/admin/config/{id}/submit":   true,
 		"/v1/admin/config/{id}/approve":  true,
