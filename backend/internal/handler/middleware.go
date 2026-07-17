@@ -5,6 +5,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 
@@ -14,6 +15,16 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
+
+// mustJSON marshals audit detail maps; the inputs are our own string fields,
+// so a marshal error is impossible — but never build JSON by concatenation.
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return []byte(`{}`)
+	}
+	return b
+}
 
 // #nosec G101 -- these are HTTP header NAMES, not credential values.
 const (
@@ -55,7 +66,7 @@ func (m *TenantAuth) Wrap(next http.Handler) http.Handler {
 				TargetType: "telco",
 				TargetID:   claimed,
 				Reason:     "credential tenant does not match claimed tenant",
-				Detail:     []byte(`{"credential_telco":"` + telcoID + `","claimed_telco":"` + claimed + `"}`),
+				Detail:     mustJSON(map[string]string{"credential_telco": telcoID, "claimed_telco": claimed}),
 				SourceIP:   r.RemoteAddr,
 			})
 			m.Log.Warn("tenant context mismatch rejected",
@@ -70,7 +81,9 @@ func (m *TenantAuth) Wrap(next http.Handler) http.Handler {
 func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(`{"error_code":"` + code + `","message":"` + msg + `","retryable":false}`))
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error_code": code, "message": msg, "retryable": false,
+	})
 }
 
 // Health is the unauthenticated liveness endpoint (V2-SRV-008).

@@ -28,6 +28,28 @@ func (r *Telcos) Get(ctx context.Context, telcoID string) (entity.Telco, error) 
 	return t, err
 }
 
+// ListActive returns every ACTIVE telco — the worker's resolver loop iterates
+// this rather than hardcoding tenant ids. Index: telcos PK scan (registry is
+// small by nature; a status index arrives if that ever stops being true).
+func (r *Telcos) ListActive(ctx context.Context) ([]entity.Telco, error) {
+	rows, err := r.Pool.Query(ctx,
+		`SELECT telco_id, name, country, status, created_at FROM telcos
+		 WHERE status = 'ACTIVE' ORDER BY telco_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []entity.Telco
+	for rows.Next() {
+		var t entity.Telco
+		if err := rows.Scan(&t.TelcoID, &t.Name, &t.Country, &t.Status, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 func (r *Telcos) Create(ctx context.Context, t entity.Telco) error {
 	_, err := r.Pool.Exec(ctx,
 		`INSERT INTO telcos (telco_id, name, country, status) VALUES ($1,$2,$3,$4)`,
