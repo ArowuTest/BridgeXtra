@@ -100,6 +100,23 @@ Partitioning: `recovery_events`, `journal_entries`, `audit_events` are designed 
 - **Migration test:** fresh empty DB apply + seeded-defaults assertions every CI run (from-zero lesson).
 - **Golden reconciliation test:** known transaction set → expected statement totals to the kobo.
 
+## 7a. M1 config-first inventory (owner directive Jul 17: no hardcoding, no stubs, admin-managed)
+
+The admin config API ships **at the start of M1** (drafts → submit → approve → activate → active-lookup over HTTP with admin credentials), so configuration is operable without SQL or deploys from the first saga onward; the M4 portal UI sits on this same API. Every M1 feature reads its knobs from these seeded, validator-guarded domains — a constant where a config read belongs is a review-blocking defect, and a domain without a validator is a review finding:
+
+| Domain | Scope | Seeded content (conservative) | Read by |
+|---|---|---|---|
+| `product.airtime` | programme | denominations ladder (minor units), fee_bps, fee model (deducted vs added), offer_expiry_minutes | offer generation, disclosure |
+| `product.concurrency` | global/programme | max_concurrent_advances=1 (SF-2 guarded) | origination |
+| `advance.reservation` | global | reservation_ttl_minutes, repair policy | exposure reservation |
+| `advance.fulfilment` | telco | status_enquiry_delays (backoff schedule), unknown_escalation_minutes | FULFILMENT_UNKNOWN worker |
+| `recovery.allocation` | programme | waterfall order (fee-first vs principal-first), over-recovery policy | recovery allocation |
+| `telco.adapter` | telco | endpoint URL, timeouts, retry budget, circuit-breaker thresholds | simulator/telco adapter |
+| `recon.tolerance` | programme | matching tolerances, break-aging thresholds | reconciliation |
+| `platform.idempotency` / `platform.outbox` | global | (seeded at M0) | idempotency sweep, dispatcher |
+
+"No stubs" clarification (binding): every milestone feature is real end-to-end. The simulator is a real external service implementing the canonical telco contract — the thing production adapters are certified against — not a stub of business logic. Anything that cannot be real yet goes to ASSUMPTIONS.md or §9 deferred, never a silent placeholder.
+
 ## 8. Configuration-first discipline (owner standing rule)
 
 Every threshold in this plan — tier tables, spike caps, offer expiry, delinquency buckets, guardrail deviations, allocation waterfall, reservation TTLs, SLA timers — is a **config record with a seeded conservative default**, never a constant. Seeds land in migrations; the config service pins versions to every decision (V1-CFG-007). Legal-entity identity (names, licence refs, contacts, sender IDs) is config (V1-BUS-003).

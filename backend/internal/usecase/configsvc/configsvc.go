@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -22,6 +23,13 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+)
+
+// Typed domain errors (BC-7): mapped once at the HTTP boundary to stable
+// error codes; never stringly-matched.
+var (
+	ErrMakerChecker = errors.New("configsvc: maker-checker violation (V2-CFG-002)")
+	ErrValidation   = errors.New("configsvc: domain validation failed")
 )
 
 type Service struct {
@@ -97,11 +105,11 @@ func (s *Service) Approve(ctx context.Context, id, approver string) error {
 		}
 		if c.CreatedBy == approver {
 			// The DB CHECK constraint backs this, but reject with a clear error first.
-			return fmt.Errorf("maker-checker violation: %q created this version and cannot approve it (V2-CFG-002)", approver)
+			return fmt.Errorf("%w: %q created this version and cannot approve it", ErrMakerChecker, approver)
 		}
 		if v, ok := validators[c.Domain]; ok && v != nil {
 			if err := v(ctx, tx, c.Content); err != nil {
-				return fmt.Errorf("validation failed for domain %s: %w", c.Domain, err)
+				return fmt.Errorf("%w: domain %s: %s", ErrValidation, c.Domain, err)
 			}
 		}
 		if err := s.configs.TransitionState(ctx, tx, id, entity.ConfigSubmitted, entity.ConfigApproved, approver); err != nil {
@@ -122,7 +130,7 @@ func (s *Service) Activate(ctx context.Context, id, actor string, at time.Time) 
 		}
 		if v, ok := validators[c.Domain]; ok && v != nil {
 			if err := v(ctx, tx, c.Content); err != nil {
-				return fmt.Errorf("activation validation failed for domain %s: %w", c.Domain, err)
+				return fmt.Errorf("%w: activation, domain %s: %s", ErrValidation, c.Domain, err)
 			}
 		}
 		if err := s.configs.Activate(ctx, tx, id, at); err != nil {

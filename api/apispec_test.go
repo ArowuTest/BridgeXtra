@@ -30,8 +30,13 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 	// Route pinning: every path the API serves must be documented, and every
 	// documented path must exist in code. Update BOTH in the same commit.
 	served := map[string]bool{
-		"/healthz":       true,
-		"/v1/programmes": true,
+		"/healthz":                       true,
+		"/v1/programmes":                 true,
+		"/v1/admin/config/drafts":        true,
+		"/v1/admin/config/{id}/submit":   true,
+		"/v1/admin/config/{id}/approve":  true,
+		"/v1/admin/config/{id}/activate": true,
+		"/v1/admin/config/active":        true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

@@ -18,6 +18,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/migrations"
 )
 
@@ -34,6 +35,7 @@ func main() {
 
 	adminDSN := env("TCP_ADMIN_DSN", "postgres://postgres:devlocal@localhost:5434/telco_credit")
 	appDSN := env("TCP_APP_DSN", "postgres://tcp_app:devlocal_app@localhost:5434/telco_credit")
+	workerDSN := env("TCP_WORKER_DSN", "postgres://tcp_worker:devlocal_worker@localhost:5434/telco_credit")
 	addr := env("TCP_API_ADDR", ":8090")
 
 	// Boot-time self-migration (project lesson: never depend on an external
@@ -58,12 +60,26 @@ func main() {
 	}
 	defer appPool.Close()
 
+	// Config writes run under the worker role (INSERT/UPDATE on config_versions
+	// granted there in M0; dedicated admin role arrives with M4 RBAC).
+	workerPool, err := platform.NewPool(ctx, workerDSN)
+	if err != nil {
+		log.Error("worker db connect failed", "err", err)
+		os.Exit(1)
+	}
+	defer workerPool.Close()
+
 	telcos := &repo.Telcos{Pool: appPool}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: appPool, Log: log}
 	programmes := repo.Programmes{}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.Health(appPool))
+
+	// Admin config API (owner directive: admin manages configuration).
+	adminAuth := &handler.AdminAuth{Admins: &repo.Admins{Pool: appPool}, Log: log}
+	cfgAdmin := &handler.ConfigAdmin{Svc: configsvc.New(workerPool), Log: log}
+	cfgAdmin.Mount(mux, adminAuth)
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var out []entity.Programme
