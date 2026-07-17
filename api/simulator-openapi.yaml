@@ -1,0 +1,131 @@
+# Telco Simulator — canonical telco contract (V2-SIM-001/007, ADR-0001).
+# This spec doubles as the CANONICAL FULFILMENT CONTRACT (V2 §5.2): real telco
+# adapters translate operator-specific APIs into exactly this shape, so the
+# simulator and production adapters are certified against the same schema
+# (V2-SIM-012).
+openapi: 3.0.3
+info:
+  title: Telco Simulator API (canonical telco contracts)
+  description: |
+    Standing simulator implementing the canonical telco-side operations before
+    live telco connectivity exists. Deterministic: outcomes derive from a
+    stable hash of (seed, platform_request_id), so any failure is reproducible
+    (V2-SIM-006). The fault catalogue (timeout-after-success, duplicate
+    callbacks, out-of-order reversals) arrives with M1.
+  version: 0.0.1  # M0 — happy path + idempotent replay
+servers:
+  - url: http://localhost:8091
+    description: Local development
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Simulator healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, seed]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  seed: { type: string }
+
+  /v1/telcos/{telcoId}/fulfilments:
+    post:
+      operationId: submitFulfilment
+      summary: Submit an airtime/data fulfilment instruction (canonical contract, V2 §5.2)
+      description: |
+        NO BLIND RETRY: a timeout on this call is NOT a confirmed failure — the
+        platform must move the advance to FULFILMENT_UNKNOWN and resolve via
+        status enquiry or reconciliation before any repeat instruction (INV-009).
+        Duplicate submissions with the same Idempotency-Key return the original
+        outcome (V2-TEL-003).
+      parameters:
+        - name: telcoId
+          in: path
+          required: true
+          schema: { type: string }
+          example: SIM_NG
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FulfilmentRequest"
+      responses:
+        "200":
+          description: Outcome (or replayed original outcome for a duplicate key)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FulfilmentResponse"
+        "400":
+          description: Missing Idempotency-Key or malformed request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
+components:
+  schemas:
+    FulfilmentRequest:
+      type: object
+      required:
+        - platform_request_id
+        - subscriber_account_id
+        - msisdn_token
+        - product_type
+        - face_value_minor
+        - currency
+        - offer_snapshot_id
+      properties:
+        platform_request_id:
+          type: string
+          description: Platform correlation ID; pairs with the telco transaction reference (V2-ADV-005).
+          example: ADVREQ-01J2ZK8QF3ANEXAMPLE000000
+        subscriber_account_id:
+          type: string
+          example: SUB-01J2ZK8QF3ANEXAMPLE000000
+        msisdn_token:
+          type: string
+          description: Tokenised MSISDN — raw numbers never cross this boundary (V2-API-007).
+        product_type:
+          type: string
+          enum: [AIRTIME_ADVANCE, DATA_ADVANCE]
+        face_value_minor:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Integer minor units (kobo); never floats (V2-API-005).
+          example: 10000
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+          example: NGN
+        offer_snapshot_id:
+          type: string
+        callback_url:
+          type: string
+          format: uri
+          description: Where asynchronous fulfilment callbacks are delivered (M1+).
+    FulfilmentResponse:
+      type: object
+      required: [telco_transaction_reference, status]
+      properties:
+        telco_transaction_reference:
+          type: string
+          example: SIM-8f3a2c01
+        status:
+          type: string
+          enum: [SUCCESS, PENDING, FAILED]

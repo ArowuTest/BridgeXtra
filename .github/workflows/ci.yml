@@ -41,6 +41,9 @@ jobs:
       # V2-TST-016 wiring starts here: merge is blocked when this job fails.
       # Includes the SF-3 tenant-isolation negative pack, which provisions its
       # own fresh databases per test package.
+      - name: OpenAPI spec validation (V2-API-001)
+        run: go test -count=1 ./api/...
+
       - name: Race-enabled test suite
         env:
           CI: "true"

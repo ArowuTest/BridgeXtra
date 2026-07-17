@@ -1,0 +1,171 @@
+# Platform API — OpenAPI 3.0 specification (V2-API-001).
+# RULE: every endpoint change updates this file IN THE SAME COMMIT; CI validates
+# the spec and fails the build on parse/validation errors (api/apispec_test.go).
+# Version tracks milestones: 0.<milestone>.<increment>.
+openapi: 3.0.3
+info:
+  title: Telco Digital Credit Platform API
+  description: |
+    Platform-facing API. Tenant context is resolved from the authenticated
+    credential (V2-TEN-002), never from caller-supplied fields; a conflicting
+    `X-Telco-Id` claim is rejected 403 and security-audited (V2-TEN-003, EDG-026).
+
+    Conventions (binding, V2-API-002..011):
+    - Monetary values are integer **minor units** plus ISO 4217 currency; never floats.
+    - Mutating commands require an `Idempotency-Key`; a valid retry returns the
+      original outcome (V2-API-003).
+    - Timestamps are UTC RFC 3339.
+    - Errors use the standard envelope with stable `error_code` families
+      (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
+  version: 0.0.1  # M0
+servers:
+  - url: http://localhost:8090
+    description: Local development (A-14)
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealth
+      summary: Liveness/readiness probe (V2-SRV-008)
+      security: []  # unauthenticated by design
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /v1/programmes:
+    get:
+      operationId: listProgrammes
+      summary: List the authenticated tenant's programmes
+      description: >
+        Tenant-scoped via RLS: returns only rows belonging to the telco the
+        credential resolves to. Missing tenant context returns nothing, never
+        all tenants (fail closed).
+      parameters:
+        - $ref: "#/components/parameters/TelcoIdClaim"
+      responses:
+        "200":
+          description: Programmes for the authenticated tenant
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Programme"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/TenantMismatch"
+        "500":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: >
+        Telco/channel credential. Only the SHA-256 of the key is stored
+        (V2-SEC-005). The credential — not any payload field — determines the
+        tenant context.
+
+  parameters:
+    TelcoIdClaim:
+      name: X-Telco-Id
+      in: header
+      required: false
+      description: >
+        Optional claimed tenant. If present and different from the tenant the
+        credential resolves to, the request is rejected 403 and audited
+        (TENANT_CONTEXT_MISMATCH).
+      schema:
+        type: string
+        example: MTN_NG
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >
+        Required on all mutating commands (V2-API-002). Scoped to
+        (tenant, operation). A retry with the same key returns the original
+        outcome; it never repeats the economic effect.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+
+  schemas:
+    Programme:
+      type: object
+      description: Commercial/regulatory arrangement binding legal entity, telco and product set (V1 §5).
+      required: [ProgrammeID, TelcoID, Code, Name, Status, CreatedAt]
+      properties:
+        ProgrammeID:
+          type: string
+          example: prg_01J2ZK8QF3ANEXAMPLE000000
+        TelcoID:
+          type: string
+          example: MTN_NG
+        Code:
+          type: string
+          example: AIRTIME01
+        Name:
+          type: string
+          example: Airtime Advance
+        Status:
+          type: string
+          enum: [DRAFT, CERTIFICATION, ACTIVE, SUSPENDED, CLOSED]
+        CreatedAt:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      description: Standard error envelope (V2-API-011).
+      required: [error_code, message, retryable]
+      properties:
+        error_code:
+          type: string
+          description: Stable business error code, family-prefixed.
+          example: TENANT_CONTEXT_MISMATCH
+        message:
+          type: string
+          description: Safe human-readable message; never stack traces or secrets.
+        retryable:
+          type: boolean
+        correlation_id:
+          type: string
+
+  responses:
+    Unauthorized:
+      description: Missing, unknown or revoked credential (AUTH_INVALID_CLIENT).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TenantMismatch:
+      description: Credential tenant conflicts with claimed tenant (TENANT_CONTEXT_MISMATCH); security-audited.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: Dependency failure (SYSTEM_TEMPORARILY_UNAVAILABLE).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

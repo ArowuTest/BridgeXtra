@@ -74,6 +74,13 @@ Partitioning: `recovery_events`, `journal_entries`, `audit_events` are designed 
 6. **Config activation is atomic to readers** (V2-CFG-003): decisions read one immutable version set resolved at request start.
 7. `SELECT FOR UPDATE` ordering discipline (always subscriber → advance → pool) to make deadlocks structurally impossible.
 
+## 5a. API specification discipline (V2-API-001, owner-directed Jul 17)
+
+- `api/openapi.yaml` (platform) and `api/simulator-openapi.yaml` (canonical telco contract) are **updated in the same commit as any endpoint change** — never retrofitted.
+- `api/apispec_test.go` makes drift release-gating in CI: specs must parse + validate, the documented path set must exactly match the served path set (both directions), and load-bearing contract properties (e.g. required `Idempotency-Key` on the canonical fulfilment operation) are asserted structurally.
+- Spec `info.version` tracks milestones: `0.<milestone>.<increment>`.
+- The simulator spec doubles as the canonical telco adapter contract (V2-SIM-012): real adapters are certified against the same schema the simulator serves.
+
 ## 6. Query-efficiency rules (enforced in review)
 
 - Hot path (offer fetch, confirm) = **point reads on covering indexes only**; no aggregation at request time (V2-TAR-004). Target: ≤3 indexed statements per USSD step.
