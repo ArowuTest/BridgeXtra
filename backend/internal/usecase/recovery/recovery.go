@@ -277,12 +277,35 @@ func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEv
 	if err != nil {
 		return err
 	}
-	// Component totals: FEE = adv.Fee; PRINCIPAL = repayment - fee
-	// (outstanding always equals Σ component remainders — invariant).
-	principalTotal, err := adv.Outstanding.Add(entity.MustMoney(recovered[entity.ComponentFee]+recovered[entity.ComponentPrincipal], adv.Outstanding.Currency()))
+	// recoveredOf: Money accessor with an explicit zero for absent components.
+	cur := adv.Outstanding.Currency()
+	recoveredOf := func(c entity.AllocationComponent) (entity.Money, error) {
+		if m, ok := recovered[c]; ok {
+			return m, nil
+		}
+		return entity.ZeroMoney(cur)
+	}
+
+	// Component totals (invariant: outstanding == Σ component remainders):
+	// gross repayment = outstanding + everything recovered so far;
+	// FEE total = adv.Fee; PRINCIPAL total = gross repayment - fee.
+	feeRec, err := recoveredOf(entity.ComponentFee)
 	if err != nil {
 		return err
 	}
+	prinRec, err := recoveredOf(entity.ComponentPrincipal)
+	if err != nil {
+		return err
+	}
+	totalRecovered, err := feeRec.Add(prinRec)
+	if err != nil {
+		return err
+	}
+	grossRepayment, err := adv.Outstanding.Add(totalRecovered)
+	if err != nil {
+		return err
+	}
+
 	remaining := applied
 	for _, comp := range ac.Waterfall {
 		if !remaining.IsPositive() {
@@ -293,24 +316,28 @@ func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEv
 		case entity.ComponentFee:
 			compTotal = adv.Fee
 		case entity.ComponentPrincipal:
-			compTotal, err = principalTotal.Sub(adv.Fee)
-			if err != nil {
+			if compTotal, err = grossRepayment.Sub(adv.Fee); err != nil {
 				return err
 			}
 		default:
 			return fmt.Errorf("unknown waterfall component %q", comp)
 		}
-		compRecovered := recovered[entity.AllocationComponent(comp)]
-		compRemainingMinor := compTotal.Amount() - compRecovered
-		if compRemainingMinor <= 0 {
+		compRecovered, err := recoveredOf(entity.AllocationComponent(comp))
+		if err != nil {
+			return err
+		}
+		compRemaining, err := compTotal.Sub(compRecovered)
+		if err != nil {
+			return err
+		}
+		if !compRemaining.IsPositive() {
 			continue
 		}
 		take := remaining
-		if take.Amount() > compRemainingMinor {
-			take, err = entity.NewMoney(compRemainingMinor, remaining.Currency())
-			if err != nil {
-				return err
-			}
+		if c, err := take.Cmp(compRemaining); err != nil {
+			return err
+		} else if c > 0 {
+			take = compRemaining
 		}
 		if err := s.allocations.Insert(ctx, tx, entity.RecoveryAllocation{
 			AllocationID:    platform.NewID("alc"),

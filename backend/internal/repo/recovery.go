@@ -82,23 +82,35 @@ func (Allocations) Insert(ctx context.Context, tx pgx.Tx, a entity.RecoveryAlloc
 }
 
 // SumByComponent returns recovered-so-far per component for an advance
-// (drives the waterfall split). Index: recovery_alloc_advance_ix.
-func (Allocations) SumByComponent(ctx context.Context, tx pgx.Tx, advanceID string) (map[entity.AllocationComponent]int64, error) {
+// (drives the waterfall split). Returns Money, not raw minor units — bare
+// integer money never crosses a repo boundary (BC-1/ADR-0002; VR-8 NIT).
+// Index: recovery_alloc_advance_ix.
+func (Allocations) SumByComponent(ctx context.Context, tx pgx.Tx, advanceID string) (map[entity.AllocationComponent]entity.Money, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT component, COALESCE(SUM(amount_minor),0)
-		FROM recovery_allocations WHERE advance_id = $1 GROUP BY component`, advanceID)
+		SELECT component, currency, COALESCE(SUM(amount_minor),0)
+		FROM recovery_allocations WHERE advance_id = $1 GROUP BY component, currency`, advanceID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[entity.AllocationComponent]int64{}
+	out := map[entity.AllocationComponent]entity.Money{}
 	for rows.Next() {
 		var c entity.AllocationComponent
+		var cur string
 		var sum int64
-		if err := rows.Scan(&c, &sum); err != nil {
+		if err := rows.Scan(&c, &cur, &sum); err != nil {
 			return nil, err
 		}
-		out[c] = sum
+		m, err := scanMoney(sum, cur)
+		if err != nil {
+			return nil, err
+		}
+		if prev, ok := out[c]; ok {
+			// Multi-currency per component would be a data-integrity breach
+			// (one advance = one currency); surface it, never merge blindly.
+			return nil, fmt.Errorf("allocation component %s spans currencies (%s, %s)", c, prev.Currency(), cur)
+		}
+		out[c] = m
 	}
 	return out, rows.Err()
 }
