@@ -88,6 +88,34 @@ type DecisionSnapshot struct {
 	IsCurrent           bool
 	ConfigVersionID     string
 	CreatedAt           time.Time
+
+	// M2 canonical-result fields (§11.2). TierCode 'SEED' marks pre-M2 seeds;
+	// scored decisions carry full provenance + replay pins (0007/0009 CHECKs).
+	TierCode          string
+	ReasonCodes       []byte // JSON array
+	FeatureSnapshotID string
+	ScoringRunID      string
+	ValidUntil        *time.Time
+	DecisionHash      string
+	DecisionDoc       []byte // canonical engine output (bit-exact replay target)
+	PriorTierCode     string
+	ScoredAt          *time.Time
+}
+
+// ScoringRun is one batch decisioning run, pinned to a policy version
+// (V2-SCR-018 control totals).
+type ScoringRun struct {
+	ScoringRunID    string
+	TelcoID         string
+	ProgrammeID     string
+	FeatureFileID   string
+	PolicyVersionID string
+	Status          string // RUNNING | COMPLETED | FAILED
+	SubjectsTotal   int
+	SubjectsScored  int
+	SubjectsSkipped int
+	StartedAt       time.Time
+	CompletedAt     *time.Time
 }
 
 // ---------------------------------------------------------------------------

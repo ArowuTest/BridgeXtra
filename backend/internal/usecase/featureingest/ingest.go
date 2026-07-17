@@ -78,7 +78,7 @@ func (s *Service) Run(ctx context.Context, telcoID string) (Summary, error) {
 	if err != nil {
 		return Summary{}, err
 	}
-	return s.ingest(ctx, telcoID, "telco:feature-file", raw)
+	return s.IngestRaw(ctx, telcoID, "telco:feature-file", raw)
 }
 
 // fetch pulls the file from the endpoint in governed telco.adapter config —
@@ -114,9 +114,9 @@ func (s *Service) fetch(ctx context.Context, telcoID string) ([]byte, error) {
 	return raw, nil
 }
 
-// ingest lands raw file bytes. Exported path for tests and for a future
+// IngestRaw lands raw file bytes. Exported path for tests and for a future
 // file-drop (SFTP) source: the pipeline is source-agnostic once bytes arrive.
-func (s *Service) ingest(ctx context.Context, telcoID, source string, raw []byte) (Summary, error) {
+func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []byte) (Summary, error) {
 	var file fileShape
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return Summary{}, fmt.Errorf("feature file does not parse: %w", err)

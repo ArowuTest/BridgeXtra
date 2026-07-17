@@ -137,7 +137,7 @@ func TestIngest_MalformedRow_QuarantinedNeverSilent(t *testing.T) {
 
 	// Fetch the file WITH the injected contract-violating row, ingest raw.
 	raw := testutil.HTTPGet(t, simSrv.URL+"/v1/telcos/SIM_NG/feature-file?count=10&malformed=1")
-	sum, err := svc.ingest(ctx, "SIM_NG", "test:malformed", raw)
+	sum, err := svc.IngestRaw(ctx, "SIM_NG", "test:malformed", raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestIngest_MalformedRow_QuarantinedNeverSilent(t *testing.T) {
 
 func TestIngest_UndatedFileRefused(t *testing.T) {
 	svc, _, _ := setup(t, "ftr_undated")
-	_, err := svc.ingest(context.Background(), "SIM_NG", "test:undated",
+	_, err := svc.IngestRaw(context.Background(), "SIM_NG", "test:undated",
 		[]byte(`{"telco_id":"SIM_NG","rows":[]}`))
 	if err == nil {
 		t.Fatal("an undated data cut must be refused (V2-SCR-002)")

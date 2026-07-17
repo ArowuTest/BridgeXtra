@@ -84,11 +84,13 @@ func (Decisions) GetCurrent(ctx context.Context, tx pgx.Tx, subscriberAccountID 
 	var cur string
 	err := tx.QueryRow(ctx, `
 		SELECT decision_snapshot_id, telco_id, subscriber_account_id, max_face_value_minor, currency,
-		       is_current, config_version_id, created_at
+		       is_current, config_version_id, created_at,
+		       tier_code, COALESCE(scoring_run_id,''), valid_until
 		FROM decision_snapshots
 		WHERE subscriber_account_id = $1 AND is_current`, subscriberAccountID).
 		Scan(&d.DecisionSnapshotID, &d.TelcoID, &d.SubscriberAccountID, &minor, &cur,
-			&d.IsCurrent, &d.ConfigVersionID, &d.CreatedAt)
+			&d.IsCurrent, &d.ConfigVersionID, &d.CreatedAt,
+			&d.TierCode, &d.ScoringRunID, &d.ValidUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return d, fmt.Errorf("current decision: %w", ErrNotFound)
 	}
