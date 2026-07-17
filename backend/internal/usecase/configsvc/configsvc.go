@@ -143,6 +143,18 @@ func (s *Service) Activate(ctx context.Context, id, actor string, at time.Time) 
 // ActiveAt resolves the effective version for (domain, scope) at t, falling
 // back scope -> global so tenants inherit platform defaults (V1 no-hardcoding:
 // a seeded global default always exists for every domain the code reads).
+// GetVersion reads one config version by id — the decision-replay path reads
+// the EXACT pinned version, never "the active one" (V1-CFG-007).
+func (s *Service) GetVersion(ctx context.Context, id string) (entity.ConfigVersion, error) {
+	var out entity.ConfigVersion
+	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var err error
+		out, err = s.configs.Get(ctx, tx, id)
+		return err
+	})
+	return out, err
+}
+
 func (s *Service) ActiveAt(ctx context.Context, domain, scope string, t time.Time) (entity.ConfigVersion, error) {
 	var out entity.ConfigVersion
 	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {

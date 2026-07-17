@@ -17,9 +17,14 @@ import (
 )
 
 // EngineVersion is part of every canonical decision. Any change to the
-// algorithm below MUST bump this — replay compares like-for-like engines and
-// a silent algorithm change would otherwise masquerade as data corruption.
-const EngineVersion = "bx-score-1.0.0"
+// algorithm below OR to the canonical document shape MUST bump this — replay
+// compares like-for-like engines and a silent change would otherwise
+// masquerade as data corruption.
+//
+// 1.1.0: canonical doc echoes ALL engine inputs (subscriber_status,
+// prior_tier_code) so replay is self-contained — mutable external state
+// (a status change after scoring) can never make a replay diverge.
+const EngineVersion = "bx-score-1.1.0"
 
 // Features is the parsed canonical feature row (integer quantities only).
 type Features struct {
@@ -96,7 +101,11 @@ type Decision struct {
 	FeatureAsOf      string   `json:"feature_as_of"`
 	ScoredAt         string   `json:"scored_at"`
 	ValidUntil       string   `json:"valid_until"`
-	StalenessOutcome string   `json:"staleness_outcome"` // FRESH | DEGRADED
+	StalenessOutcome string   `json:"staleness_outcome"` // FRESH | DEGRADED | REJECTED
+	// Input echoes: every engine input a replay cannot re-derive from
+	// immutable stores rides in the doc itself.
+	SubscriberStatus string `json:"subscriber_status"`
+	PriorTierCode    string `json:"prior_tier_code"`
 }
 
 // Score computes one decision. Errors are contract violations (malformed
@@ -115,13 +124,15 @@ func (in Input) Score() (Decision, error) {
 	}
 
 	d := Decision{
-		Currency:        f.Currency,
-		EngineVersion:   EngineVersion,
-		PolicyVersionID: in.PolicyVersionID,
-		FeatureHash:     in.FeatureContentHash,
-		FeatureAsOf:     in.FeatureAsOf.UTC().Format(time.RFC3339),
-		ScoredAt:        in.ScoredAt.UTC().Format(time.RFC3339),
-		ValidUntil:      in.ScoredAt.UTC().Add(time.Duration(p.DecisionValidHours) * time.Hour).Format(time.RFC3339),
+		Currency:         f.Currency,
+		EngineVersion:    EngineVersion,
+		PolicyVersionID:  in.PolicyVersionID,
+		FeatureHash:      in.FeatureContentHash,
+		FeatureAsOf:      in.FeatureAsOf.UTC().Format(time.RFC3339),
+		ScoredAt:         in.ScoredAt.UTC().Format(time.RFC3339),
+		ValidUntil:       in.ScoredAt.UTC().Add(time.Duration(p.DecisionValidHours) * time.Hour).Format(time.RFC3339),
+		SubscriberStatus: in.SubscriberStatus,
+		PriorTierCode:    in.PriorTierCode,
 	}
 	reason := func(codes ...string) {
 		d.ReasonCodes = append(d.ReasonCodes, codes...)

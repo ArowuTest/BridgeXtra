@@ -34,6 +34,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/outboxdispatch"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recon"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/replay"
 )
 
 func env(k, def string) string {
@@ -57,6 +58,9 @@ func main() {
 		"run the BC-3 invariant sweep once and exit (exit 1 on any violation) — the V3-BOP-006 operator job")
 	reconOnce := flag.Bool("recon", false,
 		"run fulfilment reconciliation once for every active telco/programme and exit (exit 1 on any break)")
+	replayRun := flag.String("replay", "",
+		"BC-4 operator job: replay-verify every decision of the given scoring run id and exit (exit 1 on any divergence); requires -telco")
+	replayTelco := flag.String("telco", "SIM_NG", "tenant for -replay")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -102,6 +106,22 @@ func main() {
 
 	if *reconOnce {
 		runRecon(ctx, log, appPool, appCfg, telcos)
+		return
+	}
+
+	if *replayRun != "" {
+		res, err := replay.New(appPool, appCfg, log).VerifyRun(ctx, *replayTelco, *replayRun)
+		if err != nil {
+			log.Error("replay verification failed to run", "err", err)
+			os.Exit(1)
+		}
+		for _, m := range res.Mismatches {
+			fmt.Println("DIVERGENCE:", m.DecisionSnapshotID, "—", m.Reason)
+		}
+		if len(res.Mismatches) > 0 {
+			os.Exit(1)
+		}
+		fmt.Printf("replay verified: %d decisions reproduce bit-exactly (run %s)\n", res.Checked, res.RunID)
 		return
 	}
 
