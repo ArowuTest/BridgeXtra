@@ -117,6 +117,19 @@ The admin config API ships **at the start of M1** (drafts → submit → approve
 
 "No stubs" clarification (binding): every milestone feature is real end-to-end. The simulator is a real external service implementing the canonical telco contract — the thing production adapters are certified against — not a stub of business logic. Anything that cannot be real yet goes to ASSUMPTIONS.md or §9 deferred, never a silent placeholder.
 
+## 7b. M2 credit-core slice plan (added 17 Jul 2026, post-G1)
+
+Requirement spine: V2-SCR-001..018 (§11), §11.2 canonical decision result, V2 §12 offer/disclosure, EDG-013 (gaming), EDG-014 (stale features), V1-CRD-010 / V2-SCR-011 (bit-exact replay = BC-4). Controls ship WITH features (V3-DLV-004).
+
+| Slice | Contents | Proof at exit |
+|---|---|---|
+| **M2a** | Migration 0007: `feature_files` (file-level dedup by content hash), `feature_snapshots` (per subscriber/as-of; coverage, missingness, quality flags — SCR-002), `scoring_runs` (config-pinned, control totals), decision_snapshots extensions (tier_code, reason_codes, feature_snapshot_id, run_id, valid_until, decision_hash), `subscriber_flags` (overlay states w/ effective ranges), `consents` (UNIQUE(advance_id), content hash — V2-REG-001), `notifications` (evidence w/ template version + rendered hash). New governed domains + validators with teeth: `scoring.policy` (gates, tier ladder, one-tier-up, starter/thin-file, winsorisation + spike params, staleness accept/degrade/reject, missing-feature policy), `overlays.policy`, `notify.templates` (offer expiry stays in `product.airtime` — no duplicate domain) | fresh-DB migration green incl. managed-owner path; validators reject armed-but-dead configs (tier ladder non-monotonic, starter tier missing, zero staleness windows) |
+| **M2b** | Feature ingestion: simulator serves the canonical batch feature file; ingest → parse → `feature_snapshots` with quality flags; file dedup; deterministic re-run = no-op | ingestion idempotency test; malformed-row quarantine (never silent drop); EDG-014 staleness recorded |
+| **M2c** | `internal/scoring`: PURE deterministic engine — feature snapshot + pinned config + prior decision + flags → canonical decision result with reason codes (SCR-010); anti-gaming stats in integer/bps math (SCR-003/004); tier assignment constrained one-tier-up (SCR-007), immediate down (SCR-008), cold-start starter policy (SCR-009); limit waterfall caps (SCR-006) | EDG-013 gaming pack (spike month, wash recharges) holds limits flat; property tests; zero floats (BC-1 perimeter extended to scoring) |
+| **M2d** | BC-4 replay: decision_hash stored at scoring time; replay job re-derives from retained snapshot + pinned config and compares bit-exact; `-replay` operator job | replay of every stored decision reproduces its hash (V1-CRD-010); CI test |
+| **M2e** | Wire-in: offers derive from CURRENT decision (valid_until + staleness policy enforced — SCR-015/016); overlays consulted at offer AND confirm; consent/disclosure evidence written in the confirm tx; SMS notification via simulator w/ evidence record | EDG-014 tests (stale → policy outcome, never silent); confirm without consent evidence impossible; notification evidence idempotent |
+| **M2f** | Scale + spec: scoring run over 1M synthetic subscribers (measured honestly, controlled protocol); OpenAPI for new surfaces; docs | 1M-run wall-clock recorded in build/reviews/; spec drift tests green |
+
 ## 8. Configuration-first discipline (owner standing rule)
 
 Every threshold in this plan — tier tables, spike caps, offer expiry, delinquency buckets, guardrail deviations, allocation waterfall, reservation TTLs, SLA timers — is a **config record with a seeded conservative default**, never a constant. Seeds land in migrations; the config service pins versions to every decision (V1-CFG-007). Legal-entity identity (names, licence refs, contacts, sender IDs) is config (V1-BUS-003).
