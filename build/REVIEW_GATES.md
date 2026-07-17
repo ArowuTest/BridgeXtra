@@ -159,3 +159,11 @@ Independent -race run: all 11 packages green (first attempt hit transient contai
 
 ### VR-9 — 17 Jul 2026: VR-8 NIT fold verified (60fe1ac)
 Spot-check at source + targeted -race run (recovery + repo green). `SumByComponent` returns `map[component]entity.Money` built through the validated constructor with currency carried from the DB row — a cross-currency component now surfaces as a loud integrity error, and the waterfall runs entirely in Money operations. Zero bare-integer money above the SQL scan line. **Open findings: none.** Next review = G1 full gate (complete EDG pack re-run, BC-3 checker verification, SF-7 measurement check, saga/HTTP/recon sweep) at walking-skeleton completion.
+
+### VR-10 — 17 Jul 2026: M1b-3 HTTP surface review (0df03ca)
+Independent -race run: all 12 packages green. Read channel.go in full.
+**Verified at source:** Correlation middleware mints-or-accepts + echoes + context-propagates (BC-6); wire test proves the customer's exact correlation id lands on the journal. BC-7 mapping lives in exactly one function (writeDomainErr); unmapped errors render opaque 500 with detail logged, never leaked (V2-API-011). Idempotency-Key validated 8..128 BEFORE the domain (V2-API-002); bodies bounded (MaxBytesReader 64KB). Customer-safe vocabulary correct: all pre-terminal/ambiguous states → PROCESSING with durable status_route; 201 ACTIVE / 200 replay / 202 UNKNOWN / 422 definitive-fail (V2-ADV-016, EDG-001/004 at wire level). Layering held (GetAdvance usecase accessor; handlers never touch repos). Cross-tenant advance lookups invisible via RLS. OpenAPI 0.1.1 same-commit, drift test updated.
+**Two findings (LOW/NIT — fold with M1b-5):**
+- VR10-F1 (LOW): caller-supplied X-Correlation-Id is unbounded/unvalidated — up to Go's ~1MB header limit could persist into IMMUTABLE journal rows and logs. Bound it (e.g. ≤64 chars, [A-Za-z0-9_-]); re-mint when invalid (still echo the minted one).
+- VR10-F2 (NIT): GET /v1/advances/{id} 404 renders family OFFER_NOT_FOUND — misleading for the status route; render ADVANCE_NOT_FOUND (spec + drift test in same commit per §5a).
+Next: G1 full gate at M1b-5 completion.

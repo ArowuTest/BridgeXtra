@@ -183,7 +183,7 @@ paths:
               schema: { $ref: "#/components/schemas/Advance" }
         "401": { $ref: "#/components/responses/Unauthorized" }
         "404":
-          description: Unknown advance (tenant-scoped visibility)
+          description: Unknown advance (ADVANCE_NOT_FOUND; tenant-scoped visibility)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -391,11 +391,15 @@ components:
       in: header
       required: false
       description: >
-        BC-6 lineage id. Accepted if provided, minted otherwise; always echoed
-        on the response and carried through every command, event, journal and
+        BC-6 lineage id. Accepted when 1..64 chars of [A-Za-z0-9_.-];
+        otherwise discarded and re-minted (never truncated). Always echoed on
+        the response and carried through every command, event, journal and
         audit row this request causes.
       schema:
         type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9_.-]+$"
 
   schemas:
     Money:

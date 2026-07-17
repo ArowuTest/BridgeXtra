@@ -128,6 +128,7 @@ Every threshold in this plan — tier tables, spike caps, offer expiry, delinque
 | Incumbent migration tooling (MIG-*) | telco contract + incumbent data access |
 | Config-driven ledger posting-TEMPLATE engine (V2-LED-009/V2-CFG-012 full form) — M1 posts fixed event shapes through internal/ledger with config-governed accounts; templates-as-config with symbolic balance validation | M3 money core (DD-18 accounting-point sign-off) |
 | Ledger attribution for PROGRAMME-LESS quarantined recovery events (unmatched subscriber / no open advance) — M1 records the suspense item (visible ops backlog) without a journal; booking it requires a programme-attribution rule | M3 settlement design (DD-19) |
+| SF-7 balance trigger DECLINED at M1 on measurement (+31.8% vs <10% bar — build/reviews/SF7_MEASUREMENT.md; app assertion + append-only grants + INV-004 sweep remain) | Re-measure at M3 if entry batching or statement-level validation changes the arithmetic |
 | Live bureau submission (export stays dormant-capable M3) | DD-13 + mandate |
 | Second telco adapter | R3; certification harness proves core-code-free onboarding (V2-TAR-002) |
 | Broker migration (Kafka etc.), table partitioning activation | R2/R3 volume triggers |

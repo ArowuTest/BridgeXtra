@@ -26,15 +26,35 @@ const headerIdempotencyKey = "Idempotency-Key"
 
 // Correlation wraps a handler with BC-6 correlation propagation: accept the
 // caller's id or mint one; always echo it on the response.
+//
+// VR10-F1: the caller-supplied id is BOUNDED (<=64 chars, [A-Za-z0-9_.-])
+// before it can persist into immutable journal rows and logs — anything
+// outside the envelope is discarded and re-minted, never truncated (a
+// truncated id is a lineage lie).
 func Correlation(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cor := r.Header.Get(headerCorrelationID)
-		if cor == "" {
+		if !validCorrelationID(cor) {
 			cor = platform.NewID("cor")
 		}
 		w.Header().Set(headerCorrelationID, cor)
 		next.ServeHTTP(w, r.WithContext(platform.WithCorrelation(r.Context(), cor)))
 	})
+}
+
+func validCorrelationID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '-', r == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Channel serves the customer-facing credit journey.
@@ -184,6 +204,11 @@ func (h *Channel) confirm(w http.ResponseWriter, r *http.Request) {
 
 func (h *Channel) advanceStatus(w http.ResponseWriter, r *http.Request) {
 	adv, err := h.Origination.GetAdvance(r.Context(), r.PathValue("id"))
+	if errors.Is(err, repo.ErrNotFound) {
+		// VR10-F2: this route's 404 is about the ADVANCE, not an offer.
+		writeErr(w, http.StatusNotFound, "ADVANCE_NOT_FOUND", "advance not found")
+		return
+	}
 	if err != nil {
 		h.writeDomainErr(w, r, err)
 		return

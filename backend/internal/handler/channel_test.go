@@ -220,6 +220,41 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 	}
 }
 
+func TestVR10F1_CorrelationIdBounded_RemintedNeverTruncated(t *testing.T) {
+	f := newChannelFixture(t, "chan_vr10f1", 0, 2_000)
+
+	// (A raw newline can't be tested here: Go's http.Client refuses to send
+	// it — transport-level defense; the charset check covers other clients.)
+	long := bytes.Repeat([]byte("x"), 300)
+	for _, bad := range []string{string(long), "has spaces", "semi;colon"} {
+		resp, _ := f.do(t, http.MethodGet,
+			"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001",
+			map[string]string{"X-Correlation-Id": bad}, nil)
+		echoed := resp.Header.Get("X-Correlation-Id")
+		if echoed == bad {
+			t.Fatalf("invalid correlation id %q must be re-minted, was accepted", bad)
+		}
+		if len(echoed) == 0 || len(echoed) > 64 {
+			t.Fatalf("re-minted id out of bounds: %q", echoed)
+		}
+	}
+	// A valid caller id passes through unchanged.
+	resp, _ := f.do(t, http.MethodGet,
+		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001",
+		map[string]string{"X-Correlation-Id": "valid-id_1.a"}, nil)
+	if resp.Header.Get("X-Correlation-Id") != "valid-id_1.a" {
+		t.Fatal("valid correlation id must be preserved")
+	}
+}
+
+func TestVR10F2_AdvanceStatus404_UsesAdvanceFamily(t *testing.T) {
+	f := newChannelFixture(t, "chan_vr10f2", 0, 2_000)
+	resp, body := f.do(t, http.MethodGet, "/v1/advances/adv_does_not_exist", nil, nil)
+	if resp.StatusCode != http.StatusNotFound || !bytes.Contains(body, []byte("ADVANCE_NOT_FOUND")) {
+		t.Fatalf("advance-status 404 must render ADVANCE_NOT_FOUND: %d %s", resp.StatusCode, body)
+	}
+}
+
 func TestChannel_IdempotencyKeyRequired(t *testing.T) {
 	f := newChannelFixture(t, "chan_idem", 0, 2_000)
 	resp, body := f.do(t, http.MethodPost, "/v1/advances", nil,

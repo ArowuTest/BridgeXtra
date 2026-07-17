@@ -44,6 +44,7 @@ docker run -d --name telco-credit-postgres -e POSTGRES_PASSWORD=devlocal \
 go run ./backend/cmd/migrate
 go run ./backend/cmd/api       # :8090
 go run ./backend/cmd/worker
+go run ./backend/cmd/worker -invariants  # BC-3 operator sweep: exit 1 on any violation
 go run ./simulator/cmd/simulator  # :8091
 
 # 3. Tests (no race on Windows-native Go)
