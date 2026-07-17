@@ -351,6 +351,32 @@ func TestEDG011_ExpiredOffer_SafeRejection(t *testing.T) {
 	}
 }
 
+func TestVR7a_ConcurrentFirstEnquiries_SingleLadder(t *testing.T) {
+	f := newFixture(t, "orig_vr7a", 0, 2_000)
+	f.seedSubscriber(t, "sub_vr7a", "tok_vr7a_1", 50_000)
+
+	const n = 6
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.svc.GetOffers(tenantCtx(), "prg_sim_airtime01", "tok_vr7a_1")
+		}()
+	}
+	wg.Wait()
+
+	// Exactly one ladder (4 config denominations, all under the ₦500 cap).
+	var offers int
+	if err := f.db.Admin.QueryRow(context.Background(),
+		`SELECT count(*) FROM offers WHERE subscriber_account_id='sub_vr7a'`).Scan(&offers); err != nil {
+		t.Fatal(err)
+	}
+	if offers != 4 {
+		t.Fatalf("VR-7a: concurrent first enquiries must mint ONE ladder (4 offers), got %d", offers)
+	}
+}
+
 func TestOfferReuse_SecondEnquiryReturnsSameLadder(t *testing.T) {
 	f := newFixture(t, "orig_reuse", 0, 2_000)
 	first := f.offersFor(t, "tok_sim_0001")

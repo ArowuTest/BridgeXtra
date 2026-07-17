@@ -100,6 +100,14 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
 		}
+		// VR-7a: serialize ladder generation per (subscriber, programme) so
+		// concurrent first-time enquiries cannot mint duplicate ladders
+		// (double USSD menu entries). The second enquirer waits here, then
+		// sees the winner's offers in ListValid below.
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1 || '/' || $2))`,
+			sub.SubscriberAccountID, programmeID); err != nil {
+			return err
+		}
 		existing, err := s.offers.ListValid(ctx, tx, sub.SubscriberAccountID, programmeID, now)
 		if err != nil {
 			return err
@@ -469,13 +477,16 @@ func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID strin
 			if err := s.attempts.Resolve(ctx, tx, attemptID, currentAttemptState(adv), entity.AttemptUnknown, "", res.ResponseEvidence, &next); err != nil && !errors.Is(err, repo.ErrNotFound) {
 				return err
 			}
+			// VR-7b: the FulfilmentUnknown event is emitted on STATE ENTRY
+			// only — repeated still-unknown enquiry cycles reschedule quietly
+			// instead of flooding the outbox with duplicates.
 			if adv.State == entity.AdvPendingFulfilment {
 				if err := s.advances.Transition(ctx, tx, adv.AdvanceID, adv.Version, adv.State, entity.AdvFulfilmentUnknown); err != nil {
 					return err
 				}
-			}
-			if err := s.emitOutbox(ctx, tx, adv, "advance.FulfilmentUnknown"); err != nil {
-				return err
+				if err := s.emitOutbox(ctx, tx, adv, "advance.FulfilmentUnknown"); err != nil {
+					return err
+				}
 			}
 			// NO ledger entry, NO utilisation, reservation stays (V2-LED-006).
 

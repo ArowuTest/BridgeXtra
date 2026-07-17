@@ -62,9 +62,33 @@ type Simulator struct {
 	// answering (must exceed the platform adapter's request timeout).
 	HoldDuration time.Duration
 
-	mu           sync.Mutex
-	byIdemKey    map[string]FulfilmentResponse // V2-TEL-003 idempotent replay
-	transactions map[string]Transaction        // by platform_request_id
+	mu            sync.Mutex
+	byIdemKey     map[string]FulfilmentResponse // V2-TEL-003 idempotent replay
+	transactions  map[string]Transaction        // by platform_request_id
+	holdEnquiries bool                          // fault: enquiry route unresponsive
+}
+
+// CreditDirect injects a SUCCESS transaction as if the telco credited without
+// the platform ever hearing back — the crash-after-telco-success shape
+// (EDG-007) for certification tests (V2-SIM-002 fault catalogue).
+func (s *Simulator) CreditDirect(platformRequestID string, faceValueMinor int64, currency string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ref := fmt.Sprintf("SIM-%08x", stableHash(s.Seed+platformRequestID))
+	s.transactions[platformRequestID] = Transaction{
+		PlatformRequestID: platformRequestID, TelcoReference: ref,
+		FaceValueMinor: faceValueMinor, Currency: currency,
+		Status: "SUCCESS", CreditedAt: time.Now().UTC(),
+	}
+}
+
+// HoldEnquiries toggles the enquiry-route-unresponsive fault: status
+// enquiries hang past any sane client timeout (aggregator edge outage —
+// the still-unknown resolver cycle).
+func (s *Simulator) HoldEnquiries(hold bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.holdEnquiries = hold
 }
 
 func New(log *slog.Logger, seed string, hold time.Duration) *Simulator {
@@ -155,7 +179,16 @@ func (s *Simulator) enquire(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("platformRequestId")
 	s.mu.Lock()
 	txn, ok := s.transactions[id]
+	hold := s.holdEnquiries
 	s.mu.Unlock()
+	if hold {
+		s.Log.Warn("HOLD-ENQUIRIES fault: enquiry hanging", "request", id)
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(s.HoldDuration):
+		}
+	}
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such fulfilment"})
 		return

@@ -74,8 +74,9 @@ type Journal struct {
 
 // Well-known M1 event types.
 const (
-	EventAdvanceIssued   = "ADVANCE_ISSUED"
-	EventRecoveryApplied = "RECOVERY_APPLIED"
+	EventAdvanceIssued    = "ADVANCE_ISSUED"
+	EventRecoveryApplied  = "RECOVERY_APPLIED"
+	EventRecoverySuspense = "RECOVERY_SUSPENSE" // over-recovery held as explicit liability (EDG-020)
 )
 
 // Service posts journals. Chart-of-accounts comes from governed config —

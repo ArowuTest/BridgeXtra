@@ -205,7 +205,9 @@ type FundingPools struct{}
 // caught by the EDG-002 concurrency test). Contenders wait the few ms for
 // the row lock; the headroom predicate is re-evaluated under the lock, so
 // over-allocation remains impossible (plus the table CHECK as backstop).
-// Lock ordering everywhere: offer row -> pool row (deadlock-safe).
+// Lock ordering (VR-7c, post-0006): offer row -> advance INSERT (one-active
+// decided) -> pool row. Only the one-active winner ever reaches the pool,
+// which is what makes the ordering deadlock-safe.
 func (FundingPools) Reserve(ctx context.Context, tx pgx.Tx, programmeID string, amount entity.Money) (poolID string, err error) {
 	err = tx.QueryRow(ctx, `
 		UPDATE funding_pools SET reserved_minor = reserved_minor + $1
