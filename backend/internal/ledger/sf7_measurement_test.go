@@ -80,9 +80,15 @@ func TestSF7_DeferredTriggerCostMeasurement(t *testing.T) {
 	}
 	with := postBatch(t, db, svc, "trig", batch)
 
-	ratio := float64(with-without) / float64(without) * 100
-	t.Logf("SF-7 measurement: %d journals — without trigger: %v; with trigger: %v; overhead: %+.1f%%",
-		batch, without, with, ratio)
+	// Integer permille — this package is inside the BC-1 float-ban perimeter,
+	// and the measurement doesn't need floating point either.
+	permille := (with - without).Milliseconds() * 1000 / without.Milliseconds()
+	sign := "+"
+	if permille < 0 {
+		sign, permille = "-", -permille
+	}
+	t.Logf("SF-7 measurement: %d journals — without trigger: %v; with trigger: %v; overhead: %s%d.%d%%",
+		batch, without, with, sign, permille/10, permille%10)
 
 	// The trigger must actually FIRE: a raw unbalanced insert (bypassing the
 	// ledger package entirely, as admin) must fail at commit.
