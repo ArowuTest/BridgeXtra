@@ -220,6 +220,9 @@ func (s *Simulator) featureFile(w http.ResponseWriter, r *http.Request) {
 		file.Rows = append(file.Rows, s.featureRow(i))
 	}
 	if r.URL.Query().Get("malformed") == "1" {
+		// #nosec G101 -- not a credential: a synthetic tokenised-MSISDN row id
+		// for the contract-violation fault (negative amount exercises the
+		// platform's quarantine path). G101 pattern-matches the field name.
 		file.Rows = append(file.Rows, FeatureRow{
 			MSISDNToken: "tok_sim_malformed", TenureDays: 100, ActivityDays30d: 10,
 			ActiveDays90d: 30, WeeklyRechargeMinor: []int64{-500}, Currency: "NGN",
