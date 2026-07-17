@@ -90,6 +90,37 @@ type DecisionSnapshot struct {
 	CreatedAt           time.Time
 }
 
+// ---------------------------------------------------------------------------
+// Feature store (M2b, V2-SCR-001/002)
+// ---------------------------------------------------------------------------
+
+type FeatureFile struct {
+	FeatureFileID   string
+	TelcoID         string
+	Source          string
+	AsOf            time.Time
+	ContentHash     string
+	RowCount        int
+	QuarantinedRows int
+	Status          string // INGESTED | QUARANTINED
+	ReceivedAt      time.Time
+}
+
+// FeatureSnapshot is one subscriber's features at one as-of cut. Features and
+// Quality are canonical JSON (integer quantities only — BC-1 float ban covers
+// the scoring perimeter); ContentHash pins the exact bytes for BC-4 replay.
+type FeatureSnapshot struct {
+	FeatureSnapshotID   string
+	TelcoID             string
+	SubscriberAccountID string
+	FeatureFileID       string
+	AsOf                time.Time
+	Features            []byte
+	Quality             []byte
+	ContentHash         string
+	CreatedAt           time.Time
+}
+
 type FeeModel string
 
 const (

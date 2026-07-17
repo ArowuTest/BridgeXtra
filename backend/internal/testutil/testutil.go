@@ -8,6 +8,8 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"regexp"
 	"testing"
@@ -19,6 +21,25 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
 	"github.com/ArowuTest/telco-credit-platform/backend/migrations"
 )
+
+// HTTPGet fetches a URL and returns the response body, failing the test on
+// any transport error or non-200 status.
+func HTTPGet(t *testing.T, url string) []byte {
+	t.Helper()
+	resp, err := http.Get(url) // #nosec G107 -- test helper; URLs come from httptest servers
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("GET %s: read body: %v", url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s: status %d: %s", url, resp.StatusCode, body)
+	}
+	return body
+}
 
 const (
 	defaultHostPort = "localhost:5434" // A-14: telco-credit-postgres

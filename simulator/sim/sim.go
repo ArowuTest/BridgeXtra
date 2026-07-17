@@ -55,6 +55,26 @@ type Transaction struct {
 	CreditedAt        time.Time `json:"credited_at"`
 }
 
+// FeatureRow is one subscriber's row in the canonical batch feature file
+// (V2-SCR-001/002). All quantities are integers: minor units, day counts —
+// the scoring perimeter is float-free (BC-1).
+type FeatureRow struct {
+	MSISDNToken         string   `json:"msisdn_token"`
+	TenureDays          int      `json:"tenure_days"`
+	ActivityDays30d     int      `json:"activity_days_30d"`
+	ActiveDays90d       int      `json:"active_days_90d"`
+	WeeklyRechargeMinor []int64  `json:"weekly_recharge_minor"` // 13 weeks, most recent first
+	Currency            string   `json:"currency"`
+	QualityFlags        []string `json:"quality_flags,omitempty"`
+}
+
+// FeatureFile is the canonical batch file shape.
+type FeatureFile struct {
+	TelcoID string       `json:"telco_id"`
+	AsOf    time.Time    `json:"as_of"`
+	Rows    []FeatureRow `json:"rows"`
+}
+
 type Simulator struct {
 	Log  *slog.Logger
 	Seed string
@@ -107,8 +127,81 @@ func (s *Simulator) Handler() *http.ServeMux {
 	})
 	mux.HandleFunc("POST /v1/telcos/{telcoId}/fulfilments", s.fulfil)
 	mux.HandleFunc("GET /v1/telcos/{telcoId}/fulfilments/{platformRequestId}", s.enquire)
+	mux.HandleFunc("GET /v1/telcos/{telcoId}/feature-file", s.featureFile)
 	mux.HandleFunc("GET /sim/transactions", s.listTransactions)
 	return mux
+}
+
+// featureFile serves the canonical batch feature file (V2-SCR-001). Content
+// is DETERMINISTIC in (seed, count, as_of-date): fetching the same day's file
+// twice yields byte-identical content, so platform-side file dedup engages.
+// Profiles are index-derived so tests pick scenarios by row position:
+//
+//	every 13th row -> SPIKY: one enormous recharge week (EDG-013 material)
+//	every 7th row  -> THIN:  short tenure, few active days (cold start)
+//	?malformed=1   -> appends one contract-violating row (negative amount)
+//	                  to exercise quarantine, never silent drops
+func (s *Simulator) featureFile(w http.ResponseWriter, r *http.Request) {
+	count := 100
+	if c := r.URL.Query().Get("count"); c != "" {
+		if _, err := fmt.Sscanf(c, "%d", &count); err != nil || count < 1 || count > 2_000_000 {
+			http.Error(w, `{"error":"count must be 1..2000000"}`, http.StatusBadRequest)
+			return
+		}
+	}
+	asOf := time.Now().UTC().Truncate(24 * time.Hour)
+	if q := r.URL.Query().Get("as_of"); q != "" {
+		t, err := time.Parse("2006-01-02", q)
+		if err != nil {
+			http.Error(w, `{"error":"as_of must be YYYY-MM-DD"}`, http.StatusBadRequest)
+			return
+		}
+		asOf = t.UTC()
+	}
+
+	file := FeatureFile{TelcoID: r.PathValue("telcoId"), AsOf: asOf, Rows: make([]FeatureRow, 0, count)}
+	for i := 1; i <= count; i++ {
+		file.Rows = append(file.Rows, s.featureRow(i))
+	}
+	if r.URL.Query().Get("malformed") == "1" {
+		file.Rows = append(file.Rows, FeatureRow{
+			MSISDNToken: "tok_sim_malformed", TenureDays: 100, ActivityDays30d: 10,
+			ActiveDays90d: 30, WeeklyRechargeMinor: []int64{-500}, Currency: "NGN",
+		})
+	}
+	writeJSON(w, http.StatusOK, file)
+}
+
+// featureRow derives one subscriber's deterministic features from the seed
+// and row index.
+func (s *Simulator) featureRow(i int) FeatureRow {
+	h := int64(stableHash(fmt.Sprintf("%s/features/%d", s.Seed, i)))
+	row := FeatureRow{
+		MSISDNToken:     fmt.Sprintf("tok_sim_%04d", i),
+		TenureDays:      180 + int(h%1500),
+		ActivityDays30d: 15 + int(h%16),
+		ActiveDays90d:   45 + int(h%46),
+		Currency:        "NGN",
+	}
+	weekly := make([]int64, 13)
+	base := 5_000 + (h % 45_000) // ₦50..₦500 per week in kobo
+	for w := range weekly {
+		weekly[w] = base + (h>>uint(w%8))%7_000
+	}
+	switch {
+	case i%13 == 0: // SPIKY: one giant week on an otherwise modest pattern
+		weekly[0] = base * 40
+	case i%7 == 0: // THIN: new subscriber, sparse history
+		row.TenureDays = 10 + int(h%60)
+		row.ActivityDays30d = int(h % 8)
+		row.ActiveDays90d = int(h % 12)
+		for w := 4; w < 13; w++ {
+			weekly[w] = 0
+		}
+		row.QualityFlags = []string{"SHORT_HISTORY"}
+	}
+	row.WeeklyRechargeMinor = weekly
+	return row
 }
 
 func (s *Simulator) fulfil(w http.ResponseWriter, r *http.Request) {

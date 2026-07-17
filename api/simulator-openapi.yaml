@@ -12,7 +12,7 @@ info:
     stable hash of (seed, platform_request_id), so any failure is reproducible
     (V2-SIM-006). The fault catalogue (timeout-after-success, duplicate
     callbacks, out-of-order reversals) arrives with M1.
-  version: 0.1.0  # M1b-2 — fault catalogue (FAIL / TIMEOUT-after-success tokens), status enquiry, transaction listing
+  version: 0.2.0  # M2b — canonical batch feature file (V2-SCR-001/002)
 servers:
   - url: http://localhost:8091
     description: Local development
@@ -103,6 +103,37 @@ paths:
                 properties:
                   error: { type: string }
 
+  /v1/telcos/{telcoId}/feature-file:
+    get:
+      operationId: getFeatureFile
+      summary: Canonical batch feature file (V2-SCR-001/002)
+      description: >
+        The telco's daily data cut for feature computation. DETERMINISTIC in
+        (seed, count, as_of date) — refetching the same day's file yields
+        byte-identical content, so platform-side file dedup engages. Row
+        profiles are index-derived (every 13th row spiky, every 7th thin-file)
+        so certification tests select scenarios by row position. All
+        quantities are integers (minor units / day counts) — no floats.
+      parameters:
+        - { name: telcoId, in: path, required: true, schema: { type: string } }
+        - { name: count, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2000000, default: 100 } }
+        - { name: as_of, in: query, required: false, schema: { type: string, format: date }, description: "Data cut date (default: today UTC)" }
+        - { name: malformed, in: query, required: false, schema: { type: string, enum: ["1"] }, description: "Append one contract-violating row (negative amount) to exercise quarantine paths" }
+      responses:
+        "200":
+          description: The feature file
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FeatureFile" }
+        "400":
+          description: Bad count or as_of
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
   /sim/transactions:
     get:
       operationId: listSimTransactions
@@ -122,6 +153,34 @@ paths:
 
 components:
   schemas:
+    FeatureFile:
+      type: object
+      required: [telco_id, as_of, rows]
+      properties:
+        telco_id: { type: string }
+        as_of: { type: string, format: date-time }
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/FeatureRow" }
+    FeatureRow:
+      type: object
+      required: [msisdn_token, tenure_days, activity_days_30d, active_days_90d, weekly_recharge_minor, currency]
+      properties:
+        msisdn_token: { type: string }
+        tenure_days: { type: integer, minimum: 0 }
+        activity_days_30d: { type: integer, minimum: 0, maximum: 30 }
+        active_days_90d: { type: integer, minimum: 0, maximum: 90 }
+        weekly_recharge_minor:
+          type: array
+          description: 13 weekly recharge totals in minor units, most recent week first.
+          items: { type: integer, format: int64, minimum: 0 }
+          minItems: 13
+          maxItems: 13
+        currency: { type: string, minLength: 3, maxLength: 3 }
+        quality_flags:
+          type: array
+          items: { type: string }
+          description: Data-quality markers (e.g. SHORT_HISTORY) — read, never guessed (V2-SCR-002).
     Transaction:
       type: object
       required: [platform_request_id, telco_transaction_reference, msisdn_token, face_value_minor, currency, status, credited_at]
