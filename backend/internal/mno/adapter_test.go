@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -118,6 +119,46 @@ func TestAdapter_EnquiryNotFound_ForNeverLandedRequest(t *testing.T) {
 	}
 	if res.Outcome != mno.OutcomeNotFound {
 		t.Fatalf("never-landed request must be NOT_FOUND (safe to fail), got %+v", res)
+	}
+}
+
+func TestM1B2F2_NonDefinitiveHTTPCodes_ClassifyUnknown(t *testing.T) {
+	// 408/429/503 can come from an aggregator edge while the telco backend is
+	// still processing; only the definitive-rejection allowlist may be Failed.
+	db := testutil.MustSetup(t, "mno_codes")
+	cfg := configsvc.New(db.Worker)
+
+	var code int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(`{"error":"gateway"}`))
+	}))
+	t.Cleanup(srv.Close)
+	pointAdapterAt(t, cfg, srv.URL, 2_000)
+	a := mno.NewHTTPAdapter(cfg)
+
+	cases := []struct {
+		code int
+		want mno.Outcome
+	}{
+		{http.StatusRequestTimeout, mno.OutcomeUnknown},     // 408: edge timeout, backend may proceed
+		{http.StatusTooManyRequests, mno.OutcomeUnknown},    // 429: throttled at edge
+		{http.StatusServiceUnavailable, mno.OutcomeUnknown}, // 503
+		{http.StatusBadGateway, mno.OutcomeUnknown},         // 502
+		{http.StatusBadRequest, mno.OutcomeFailed},          // 400: definitive
+		{http.StatusUnprocessableEntity, mno.OutcomeFailed}, // 422: definitive
+		{http.StatusConflict, mno.OutcomeFailed},            // 409: definitive
+	}
+	for i, c := range cases {
+		code = c.code
+		res, err := a.SubmitFulfilment(context.Background(), "SIM_NG",
+			fmt.Sprintf("idem-code-%d", i), req(fmt.Sprintf("PRQ-C%d", i), "tok_sim_0001"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Outcome != c.want {
+			t.Errorf("HTTP %d must classify %s, got %s", c.code, c.want, res.Outcome)
+		}
 	}
 }
 

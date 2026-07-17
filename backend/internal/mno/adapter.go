@@ -39,6 +39,19 @@ const (
 	OutcomeNotFound Outcome = "NOT_FOUND"
 )
 
+// definitiveRejection (M1B2-F2): the ONLY status codes treated as proof the
+// telco rejected the instruction. Everything else non-2xx — including 408
+// Request Timeout and 429 Too Many Requests, which aggregator edges emit while
+// the backend may still be processing — classifies Unknown.
+var definitiveRejection = map[int]bool{
+	http.StatusBadRequest:          true, // 400
+	http.StatusUnauthorized:        true, // 401
+	http.StatusForbidden:           true, // 403
+	http.StatusNotFound:            true, // 404
+	http.StatusConflict:            true, // 409
+	http.StatusUnprocessableEntity: true, // 422
+}
+
 type FulfilmentRequest struct {
 	PlatformRequestID   string
 	SubscriberAccountID string
@@ -159,9 +172,12 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 	res.ResponseEvidence = raw
 
 	if resp.StatusCode != http.StatusOK {
-		// Non-2xx: the telco answered but did not accept. 4xx = definitively
-		// rejected (Failed); 5xx = state unknowable (Unknown).
-		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		// M1B2-F2: "Failed" is an explicit allowlist of DEFINITIVE-rejection
+		// codes. A 408/429 (or anything else) can come from an aggregator's
+		// edge gateway while the telco backend is still processing — exactly
+		// the double-credit shape this architecture guards against. Everything
+		// not provably rejected is Unknown for the enquiry path.
+		if definitiveRejection[resp.StatusCode] {
 			res.Outcome = OutcomeFailed
 		} else {
 			res.Outcome = OutcomeUnknown

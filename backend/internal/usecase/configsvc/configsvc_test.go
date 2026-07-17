@@ -137,6 +137,41 @@ func TestSF5_IdempotencyTTL_FloorEnforced(t *testing.T) {
 	}
 }
 
+func TestM1B2F1_LedgerAccountsValidator_RejectsOutageFootguns(t *testing.T) {
+	svc, _ := newSvc(t, "cfg_ledgeraccts")
+	ctx := context.Background()
+
+	for _, bad := range []string{
+		`{"accounts":[]}`, // empty chart = all posting halts
+		`{"accounts":[{"code":"A","kind":"ASSET"},{"code":"A","kind":"INCOME"}]}`, // dup code
+		`{"accounts":[{"code":"A","kind":"MAGIC"}]}`,                              // bad kind
+		`{"accounts":[{"kind":"ASSET"}]}`,                                         // missing code
+	} {
+		c, err := svc.CreateDraft(ctx, "ledger.accounts", entity.ScopeGlobal, "alice", "bad chart", []byte(bad))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.Submit(ctx, c.ConfigVersionID, "alice"); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.Approve(ctx, c.ConfigVersionID, "bob"); err == nil {
+			t.Fatalf("M1B2-F1: %s must be rejected", bad)
+		}
+	}
+	// A valid replacement chart passes.
+	good, err := svc.CreateDraft(ctx, "ledger.accounts", entity.ScopeGlobal, "alice", "extend chart",
+		[]byte(`{"accounts":[{"code":"SUBSCRIBER_RECEIVABLE","kind":"ASSET"},{"code":"FEE_INCOME","kind":"INCOME"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Submit(ctx, good.ConfigVersionID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Approve(ctx, good.ConfigVersionID, "bob"); err != nil {
+		t.Fatalf("valid chart must be approvable: %v", err)
+	}
+}
+
 func TestSeededDefaultsExist(t *testing.T) {
 	// V1 no-hardcoding: every domain the code reads has a seeded ACTIVE default.
 	svc, _ := newSvc(t, "cfg_seeds")

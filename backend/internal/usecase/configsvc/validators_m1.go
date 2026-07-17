@@ -22,6 +22,40 @@ func init() {
 	validators["recovery.allocation"] = validateAllocation
 	validators["telco.adapter"] = validateTelcoAdapter
 	validators["recon.tolerance"] = validateReconTolerance
+	validators["ledger.accounts"] = validateLedgerAccounts
+}
+
+// validateLedgerAccounts (M1B2-F1): an empty or malformed chart fails closed
+// at posting time (safe direction) but stops ALL money movement — an outage
+// foot-gun an admin must not be able to approve.
+func validateLedgerAccounts(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
+	var v struct {
+		Accounts []struct {
+			Code *string `json:"code"`
+			Kind *string `json:"kind"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(content, &v); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	if len(v.Accounts) == 0 {
+		return fmt.Errorf("accounts must be non-empty: an empty chart halts all ledger posting (M1B2-F1)")
+	}
+	kinds := map[string]bool{"ASSET": true, "LIABILITY": true, "INCOME": true, "EXPENSE": true, "EQUITY": true}
+	seen := map[string]bool{}
+	for i, a := range v.Accounts {
+		if a.Code == nil || *a.Code == "" {
+			return fmt.Errorf("accounts[%d]: code is required", i)
+		}
+		if seen[*a.Code] {
+			return fmt.Errorf("accounts[%d]: duplicate code %q", i, *a.Code)
+		}
+		seen[*a.Code] = true
+		if a.Kind == nil || !kinds[*a.Kind] {
+			return fmt.Errorf("accounts[%d] (%s): kind must be one of ASSET|LIABILITY|INCOME|EXPENSE|EQUITY", i, *a.Code)
+		}
+	}
+	return nil
 }
 
 func validateProductAirtime(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
