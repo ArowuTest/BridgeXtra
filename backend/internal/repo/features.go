@@ -117,6 +117,97 @@ func (FeatureSnapshots) Get(ctx context.Context, tx pgx.Tx, snapshotID string) (
 	return s, err
 }
 
+// BulkEnsureByToken is the set-based twin of EnsureByToken (owner rule:
+// "scale" = specialized repo methods, never bypassing the layer). One staging
+// COPY + two set-based statements per chunk instead of 3 round trips per row.
+// Returns token -> subscriber_account_id for every requested token.
+func (Subscribers) BulkEnsureByToken(ctx context.Context, tx pgx.Tx, telcoID string, tokens []string, newIDs []string) (map[string]string, error) {
+	if len(tokens) != len(newIDs) {
+		return nil, fmt.Errorf("tokens and newIDs must pair")
+	}
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE IF NOT EXISTS _sub_stage
+		  (msisdn_token TEXT, new_id TEXT) ON COMMIT DROP`); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `TRUNCATE _sub_stage`); err != nil {
+		return nil, err
+	}
+	rows := make([][]any, len(tokens))
+	for i := range tokens {
+		rows[i] = []any{tokens[i], newIDs[i]}
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"_sub_stage"},
+		[]string{"msisdn_token", "new_id"}, pgx.CopyFromRows(rows)); err != nil {
+		return nil, fmt.Errorf("stage subscribers: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
+		SELECT s.new_id, $1, s.msisdn_token, 'ACTIVE' FROM _sub_stage s
+		ON CONFLICT DO NOTHING`, telcoID); err != nil {
+		return nil, fmt.Errorf("bulk create subscribers: %w", err)
+	}
+	out := make(map[string]string, len(tokens))
+	res, err := tx.Query(ctx, `
+		SELECT sa.msisdn_token, sa.subscriber_account_id
+		FROM subscriber_accounts sa
+		JOIN _sub_stage s ON s.msisdn_token = sa.msisdn_token
+		WHERE sa.effective_to IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Close()
+	for res.Next() {
+		var token, id string
+		if err := res.Scan(&token, &id); err != nil {
+			return nil, err
+		}
+		out[token] = id
+	}
+	return out, res.Err()
+}
+
+// BulkUpsert is the set-based twin of Upsert: one staging COPY + one
+// INSERT..SELECT ON CONFLICT DO NOTHING per chunk. Returns rows written.
+func (FeatureSnapshots) BulkUpsert(ctx context.Context, tx pgx.Tx, snaps []entity.FeatureSnapshot) (int64, error) {
+	if len(snaps) == 0 {
+		return 0, nil
+	}
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE IF NOT EXISTS _ftr_stage
+		  (feature_snapshot_id TEXT, telco_id TEXT, subscriber_account_id TEXT,
+		   feature_file_id TEXT, as_of TIMESTAMPTZ, features JSONB, quality JSONB,
+		   content_hash TEXT) ON COMMIT DROP`); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(ctx, `TRUNCATE _ftr_stage`); err != nil {
+		return 0, err
+	}
+	rows := make([][]any, len(snaps))
+	for i, s := range snaps {
+		rows[i] = []any{s.FeatureSnapshotID, s.TelcoID, s.SubscriberAccountID,
+			s.FeatureFileID, s.AsOf, s.Features, s.Quality, s.ContentHash}
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"_ftr_stage"},
+		[]string{"feature_snapshot_id", "telco_id", "subscriber_account_id",
+			"feature_file_id", "as_of", "features", "quality", "content_hash"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return 0, fmt.Errorf("stage snapshots: %w", err)
+	}
+	ct, err := tx.Exec(ctx, `
+		INSERT INTO feature_snapshots
+		  (feature_snapshot_id, telco_id, subscriber_account_id, feature_file_id,
+		   as_of, features, quality, content_hash)
+		SELECT feature_snapshot_id, telco_id, subscriber_account_id, feature_file_id,
+		       as_of, features, quality, content_hash
+		FROM _ftr_stage
+		ON CONFLICT (subscriber_account_id, as_of) DO NOTHING`)
+	if err != nil {
+		return 0, fmt.Errorf("bulk upsert snapshots: %w", err)
+	}
+	return ct.RowsAffected(), nil
+}
+
 // EnsureByToken resolves a live subscriber account for a token, creating one
 // when the telco's feature file introduces a subscriber the platform has not
 // seen (the subscriber base arrives through the data feed before any advance).

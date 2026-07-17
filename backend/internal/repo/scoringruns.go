@@ -92,6 +92,7 @@ type SnapshotSubject struct {
 	Snapshot         entity.FeatureSnapshot
 	SubscriberStatus string
 	PriorTierCode    string // '' when no current scored/seed decision
+	CurrentRunID     string // scoring run that produced the current decision ('' if none)
 }
 
 // ListSubjectsByFile returns the file's snapshots joined with subscriber
@@ -100,7 +101,7 @@ func (FeatureSnapshots) ListSubjectsByFile(ctx context.Context, tx pgx.Tx, fileI
 	rows, err := tx.Query(ctx, `
 		SELECT fs.feature_snapshot_id, fs.telco_id, fs.subscriber_account_id, fs.feature_file_id,
 		       fs.as_of, fs.features, fs.quality, fs.content_hash, fs.created_at,
-		       sa.status, COALESCE(d.tier_code, '')
+		       sa.status, COALESCE(d.tier_code, ''), COALESCE(d.scoring_run_id, '')
 		FROM feature_snapshots fs
 		JOIN subscriber_accounts sa ON sa.subscriber_account_id = fs.subscriber_account_id
 		LEFT JOIN decision_snapshots d ON d.subscriber_account_id = fs.subscriber_account_id AND d.is_current
@@ -117,7 +118,7 @@ func (FeatureSnapshots) ListSubjectsByFile(ctx context.Context, tx pgx.Tx, fileI
 		if err := rows.Scan(&s.Snapshot.FeatureSnapshotID, &s.Snapshot.TelcoID,
 			&s.Snapshot.SubscriberAccountID, &s.Snapshot.FeatureFileID, &s.Snapshot.AsOf,
 			&s.Snapshot.Features, &s.Snapshot.Quality, &s.Snapshot.ContentHash,
-			&s.Snapshot.CreatedAt, &s.SubscriberStatus, &s.PriorTierCode); err != nil {
+			&s.Snapshot.CreatedAt, &s.SubscriberStatus, &s.PriorTierCode, &s.CurrentRunID); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -146,6 +147,72 @@ func (Decisions) InsertScored(ctx context.Context, tx pgx.Tx, d entity.DecisionS
 		d.ScoringRunID, d.ValidUntil, d.DecisionHash, d.DecisionDoc, d.PriorTierCode, d.ScoredAt)
 	if err != nil {
 		return fmt.Errorf("insert scored decision: %w", err)
+	}
+	return nil
+}
+
+// BulkInsertScored is the set-based twin of InsertScored for batch runs
+// (owner rule: scale = specialized repo methods): ONE set-based close of the
+// subjects' current decisions + ONE CopyFrom of the new rows per page,
+// instead of two statements per subject. Same invariants — the partial
+// unique decision_current_uq still arbitrates.
+func (Decisions) BulkInsertScored(ctx context.Context, tx pgx.Tx, ds []entity.DecisionSnapshot) error {
+	if len(ds) == 0 {
+		return nil
+	}
+	subjects := make([]string, len(ds))
+	for i, d := range ds {
+		subjects[i] = d.SubscriberAccountID
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE decision_snapshots SET is_current = false
+		WHERE subscriber_account_id = ANY($1) AND is_current`, subjects); err != nil {
+		return fmt.Errorf("bulk close current decisions: %w", err)
+	}
+	rows := make([][]any, len(ds))
+	for i, d := range ds {
+		rows[i] = []any{d.DecisionSnapshotID, d.TelcoID, d.SubscriberAccountID,
+			d.MaxFaceValue.Amount(), string(d.MaxFaceValue.Currency()), true,
+			d.ConfigVersionID, d.TierCode, d.ReasonCodes, d.FeatureSnapshotID,
+			d.ScoringRunID, d.ValidUntil, d.DecisionHash, d.DecisionDoc,
+			d.PriorTierCode, d.ScoredAt}
+	}
+	// COPY cannot target an RLS-enforced table (0A000) — stage into a temp
+	// table (no RLS), then INSERT..SELECT so the WITH CHECK policy applies
+	// row-by-row exactly as for single inserts.
+	if _, err := tx.Exec(ctx, `
+		CREATE TEMP TABLE IF NOT EXISTS _dec_stage
+		  (decision_snapshot_id TEXT, telco_id TEXT, subscriber_account_id TEXT,
+		   max_face_value_minor BIGINT, currency CHAR(3), is_current BOOLEAN,
+		   config_version_id TEXT, tier_code TEXT, reason_codes JSONB,
+		   feature_snapshot_id TEXT, scoring_run_id TEXT, valid_until TIMESTAMPTZ,
+		   decision_hash TEXT, decision_doc JSONB, prior_tier_code TEXT,
+		   scored_at TIMESTAMPTZ) ON COMMIT DROP`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `TRUNCATE _dec_stage`); err != nil {
+		return err
+	}
+	if _, err := tx.CopyFrom(ctx, pgx.Identifier{"_dec_stage"},
+		[]string{"decision_snapshot_id", "telco_id", "subscriber_account_id",
+			"max_face_value_minor", "currency", "is_current", "config_version_id",
+			"tier_code", "reason_codes", "feature_snapshot_id", "scoring_run_id",
+			"valid_until", "decision_hash", "decision_doc", "prior_tier_code", "scored_at"},
+		pgx.CopyFromRows(rows)); err != nil {
+		return fmt.Errorf("stage scored decisions: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO decision_snapshots
+		  (decision_snapshot_id, telco_id, subscriber_account_id, max_face_value_minor,
+		   currency, is_current, config_version_id, tier_code, reason_codes,
+		   feature_snapshot_id, scoring_run_id, valid_until, decision_hash,
+		   decision_doc, prior_tier_code, scored_at)
+		SELECT decision_snapshot_id, telco_id, subscriber_account_id, max_face_value_minor,
+		       currency, is_current, config_version_id, tier_code, reason_codes,
+		       feature_snapshot_id, scoring_run_id, valid_until, decision_hash,
+		       decision_doc, prior_tier_code, scored_at
+		FROM _dec_stage`); err != nil {
+		return fmt.Errorf("bulk insert scored decisions: %w", err)
 	}
 	return nil
 }

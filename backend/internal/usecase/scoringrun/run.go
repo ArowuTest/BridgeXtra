@@ -103,22 +103,29 @@ func (s *Service) Run(ctx context.Context, telcoID, programmeID, featureFileID s
 			if err != nil {
 				return err
 			}
-			scored, skipped := 0, 0
+			// Compute every decision in memory (the engine is pure), then ONE
+			// set-based write for the whole page — per-subject round trips do
+			// not survive a 1M-subscriber nightly window.
+			batch := make([]entity.DecisionSnapshot, 0, len(page))
+			skipped := 0
 			for _, subj := range page {
-				outcome, err := s.scoreOne(ctx, tx, subj, policy, cv.ConfigVersionID, res.Run, scoredAt)
+				d, ok, err := s.computeOne(subj, policy, cv.ConfigVersionID, res.Run, scoredAt)
 				if err != nil {
 					return fmt.Errorf("subscriber %s: %w", subj.Snapshot.SubscriberAccountID, err)
 				}
-				if outcome {
-					scored++
-				} else {
+				if !ok {
 					skipped++
+					continue
 				}
+				batch = append(batch, d)
 			}
 			if len(page) > 0 {
-				res.Scored += scored
+				if err := (repo.Decisions{}).BulkInsertScored(ctx, tx, batch); err != nil {
+					return err
+				}
+				res.Scored += len(batch)
 				res.Skipped += skipped
-				return (repo.ScoringRuns{}).Progress(ctx, tx, res.Run.ScoringRunID, scored, skipped)
+				return (repo.ScoringRuns{}).Progress(ctx, tx, res.Run.ScoringRunID, len(batch), skipped)
 			}
 			return nil
 		})
@@ -142,30 +149,29 @@ func (s *Service) Run(ctx context.Context, telcoID, programmeID, featureFileID s
 	return res, nil
 }
 
-// scoreOne scores a single subject inside the page transaction. Returns
-// true when a decision was written, false when skipped (already scored by
-// this run — resume path — or contract-violating snapshot, logged loudly).
-func (s *Service) scoreOne(ctx context.Context, tx pgx.Tx, subj repo.SnapshotSubject,
-	policy scoring.Policy, policyVersionID string, run entity.ScoringRun, scoredAt time.Time) (bool, error) {
+// computeOne scores a single subject IN MEMORY (no statements — the page
+// write is set-based). ok=false means skipped: already scored by this run
+// (resume path, via the page query's CurrentRunID) or a contract-violating
+// snapshot, logged loudly, never guessed.
+func (s *Service) computeOne(subj repo.SnapshotSubject,
+	policy scoring.Policy, policyVersionID string, run entity.ScoringRun, scoredAt time.Time) (entity.DecisionSnapshot, bool, error) {
 
-	// Resume dedup: if the subscriber's current decision already came from
-	// this run, this page was committed before a crash — skip.
-	cur, err := (repo.Decisions{}).GetCurrent(ctx, tx, subj.Snapshot.SubscriberAccountID)
-	if err == nil && cur.ScoringRunID == run.ScoringRunID {
-		return false, nil
+	var zero entity.DecisionSnapshot
+	if subj.CurrentRunID == run.ScoringRunID {
+		return zero, false, nil // page committed before a crash — resume skips
 	}
 
 	var feats scoring.Features
 	if err := json.Unmarshal(subj.Snapshot.Features, &feats); err != nil {
 		s.Log.Error("stored features do not parse — skipping subject, investigate the store",
 			"snapshot", subj.Snapshot.FeatureSnapshotID, "err", err)
-		return false, nil
+		return zero, false, nil
 	}
 	var qual scoring.Quality
 	if err := json.Unmarshal(subj.Snapshot.Quality, &qual); err != nil {
 		s.Log.Error("stored quality does not parse — skipping subject",
 			"snapshot", subj.Snapshot.FeatureSnapshotID, "err", err)
-		return false, nil
+		return zero, false, nil
 	}
 
 	priorTier := subj.PriorTierCode
@@ -184,11 +190,11 @@ func (s *Service) scoreOne(ctx context.Context, tx pgx.Tx, subj repo.SnapshotSub
 	if err != nil {
 		s.Log.Error("engine rejected inputs — skipping subject", "snapshot",
 			subj.Snapshot.FeatureSnapshotID, "err", err)
-		return false, nil
+		return zero, false, nil
 	}
 	doc, err := dec.CanonicalJSON()
 	if err != nil {
-		return false, err
+		return zero, false, err
 	}
 	docHash := sha256.Sum256(doc)
 
@@ -198,18 +204,18 @@ func (s *Service) scoreOne(ctx context.Context, tx pgx.Tx, subj repo.SnapshotSub
 	}
 	face, err := entity.NewMoney(faceMinor, entity.Currency(dec.Currency))
 	if err != nil {
-		return false, fmt.Errorf("decision money invalid: %w", err)
+		return zero, false, fmt.Errorf("decision money invalid: %w", err)
 	}
 	validUntil, err := time.Parse(time.RFC3339, dec.ValidUntil)
 	if err != nil {
-		return false, fmt.Errorf("engine emitted unparseable valid_until: %w", err)
+		return zero, false, fmt.Errorf("engine emitted unparseable valid_until: %w", err)
 	}
 	reasons, err := json.Marshal(dec.ReasonCodes)
 	if err != nil {
-		return false, err
+		return zero, false, err
 	}
 
-	return true, (repo.Decisions{}).InsertScored(ctx, tx, entity.DecisionSnapshot{
+	return entity.DecisionSnapshot{
 		DecisionSnapshotID:  platform.NewID("dec"),
 		TelcoID:             subj.Snapshot.TelcoID,
 		SubscriberAccountID: subj.Snapshot.SubscriberAccountID,
@@ -224,5 +230,5 @@ func (s *Service) scoreOne(ctx context.Context, tx pgx.Tx, subj repo.SnapshotSub
 		DecisionDoc:         doc,
 		PriorTierCode:       priorTier,
 		ScoredAt:            &scoredAt,
-	})
+	}, true, nil
 }

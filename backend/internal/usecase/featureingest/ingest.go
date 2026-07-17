@@ -143,38 +143,67 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 			return err
 		}
 
+		// Chunked set-based ingestion: validate + canonicalise in code, then
+		// one bulk subscriber-ensure and one bulk snapshot-upsert per chunk
+		// (the 1M-row nightly file cannot afford per-row round trips).
+		const chunkSize = 5_000
 		snaps := repo.FeatureSnapshots{}
 		subs := repo.Subscribers{}
-		for i, row := range file.Rows {
-			if reason := validateRow(row); reason != "" {
-				sum.Quarantined++
-				s.Log.Warn("feature row quarantined", "file", sum.FeatureFileID,
-					"row", i, "token", row.MSISDNToken, "reason", reason)
+		for start := 0; start < len(file.Rows); start += chunkSize {
+			end := min(start+chunkSize, len(file.Rows))
+			chunk := file.Rows[start:end]
+
+			tokens := make([]string, 0, len(chunk))
+			newIDs := make([]string, 0, len(chunk))
+			type prepared struct {
+				token             string
+				features, quality []byte
+				hash              string
+			}
+			preps := make([]prepared, 0, len(chunk))
+			for i, row := range chunk {
+				if reason := validateRow(row); reason != "" {
+					sum.Quarantined++
+					s.Log.Warn("feature row quarantined", "file", sum.FeatureFileID,
+						"row", start+i, "token", row.MSISDNToken, "reason", reason)
+					continue
+				}
+				features, quality, err := canonicalRow(row)
+				if err != nil {
+					return fmt.Errorf("row %d (%s): %w", start+i, row.MSISDNToken, err)
+				}
+				rowHash := sha256.Sum256(features)
+				tokens = append(tokens, row.MSISDNToken)
+				newIDs = append(newIDs, platform.NewID("sub"))
+				preps = append(preps, prepared{token: row.MSISDNToken,
+					features: features, quality: quality, hash: hex.EncodeToString(rowHash[:])})
+			}
+			if len(preps) == 0 {
 				continue
 			}
-			sub, err := subs.EnsureByToken(ctx, tx, telcoID, row.MSISDNToken, platform.NewID("sub"))
-			if err != nil {
-				return fmt.Errorf("row %d (%s): %w", i, row.MSISDNToken, err)
-			}
-			features, quality, err := canonicalRow(row)
-			if err != nil {
-				return fmt.Errorf("row %d (%s): %w", i, row.MSISDNToken, err)
-			}
-			rowHash := sha256.Sum256(features)
-			written, err := snaps.Upsert(ctx, tx, entity.FeatureSnapshot{
-				FeatureSnapshotID: platform.NewID("ftr"), TelcoID: telcoID,
-				SubscriberAccountID: sub.SubscriberAccountID, FeatureFileID: sum.FeatureFileID,
-				AsOf: file.AsOf, Features: features, Quality: quality,
-				ContentHash: hex.EncodeToString(rowHash[:]),
-			})
+			subIDs, err := subs.BulkEnsureByToken(ctx, tx, telcoID, tokens, newIDs)
 			if err != nil {
 				return err
 			}
-			if written {
-				sum.Written++
-			} else {
-				sum.Skipped++
+			batch := make([]entity.FeatureSnapshot, 0, len(preps))
+			for _, p := range preps {
+				subID, ok := subIDs[p.token]
+				if !ok {
+					return fmt.Errorf("token %q did not resolve to a subscriber", p.token)
+				}
+				batch = append(batch, entity.FeatureSnapshot{
+					FeatureSnapshotID: platform.NewID("ftr"), TelcoID: telcoID,
+					SubscriberAccountID: subID, FeatureFileID: sum.FeatureFileID,
+					AsOf: file.AsOf, Features: p.features, Quality: p.quality,
+					ContentHash: p.hash,
+				})
 			}
+			written, err := snaps.BulkUpsert(ctx, tx, batch)
+			if err != nil {
+				return err
+			}
+			sum.Written += int(written)
+			sum.Skipped += len(batch) - int(written)
 		}
 		status := "INGESTED"
 		if sum.Quarantined > 0 && sum.Written == 0 && sum.Skipped == 0 {
