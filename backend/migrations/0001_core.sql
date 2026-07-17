@@ -26,7 +26,19 @@ BEGIN
   BEGIN
     -- Outbox dispatcher & cross-tenant platform jobs: BYPASSRLS, still NOSUPERUSER.
     CREATE ROLE tcp_worker LOGIN PASSWORD 'devlocal_worker' NOSUPERUSER NOCREATEDB NOCREATEROLE BYPASSRLS;
-  EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+  EXCEPTION
+    WHEN duplicate_object OR unique_violation THEN NULL;
+    WHEN insufficient_privilege THEN
+      -- Managed Postgres (Render etc.): the database owner has CREATEROLE but
+      -- BYPASSRLS is superuser-only, and Postgres checks that privilege BEFORE
+      -- the duplicate-name check. Create the role without it so grants below
+      -- still resolve; worker deployments on such clusters connect as the
+      -- table owner instead (ENABLE-, not FORCE-, RLS does not apply to the
+      -- owner — same dispatch capability, tcp_app enforcement unchanged).
+      BEGIN
+        CREATE ROLE tcp_worker LOGIN PASSWORD 'devlocal_worker' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+      EXCEPTION WHEN duplicate_object OR unique_violation THEN NULL;
+      END;
   END;
 END $$;
 

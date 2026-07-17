@@ -105,3 +105,13 @@ jobs:
           total=$(go tool cover -func=coverage.out | tail -1 | awk '{gsub("%","",$3); print $3}')
           echo "total coverage: ${total}%"
           awk -v t="$total" 'BEGIN { if (t+0 < 70.0) { print "coverage " t "% below floor 70%"; exit 1 } }'
+
+      # Serial by design: reshapes cluster-global roles to prove the managed-
+      # Postgres deployment path (non-superuser owner, BYPASSRLS fallback,
+      # env password rotation). Runs AFTER the parallel suite so it cannot
+      # race other packages' role authentication.
+      - name: Managed-owner migration path (Render class, serial)
+        env:
+          TCP_TEST_HOSTPORT: localhost:5434
+          TCP_TEST_MANAGED_OWNER: "1"
+        run: go test -count=1 -run TestApply_AsManagedNonSuperuserOwner ./backend/internal/platform/dbmigrate/

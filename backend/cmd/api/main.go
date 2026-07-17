@@ -19,6 +19,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbroles"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
@@ -54,6 +55,14 @@ func main() {
 		os.Exit(1)
 	} else if n > 0 {
 		log.Info("migrations applied", "count", n)
+	}
+	// Rotate role passwords from the environment (production must never run
+	// on the dev passwords baked into 0001 — V2-SEC-005).
+	if rotated, err := dbroles.ApplyPasswords(ctx, adminPool); err != nil {
+		log.Error("role password rotation failed", "err", err)
+		os.Exit(1)
+	} else if len(rotated) > 0 {
+		log.Info("role passwords applied from environment", "roles", rotated)
 	}
 	adminPool.Close()
 

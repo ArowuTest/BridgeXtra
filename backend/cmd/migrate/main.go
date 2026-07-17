@@ -11,6 +11,7 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbroles"
 	"github.com/ArowuTest/telco-credit-platform/backend/migrations"
 )
 
@@ -44,4 +45,13 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("migrations applied: %d\n", n)
+
+	rotated, err := dbroles.ApplyPasswords(ctx, pool)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "role passwords:", err)
+		os.Exit(1)
+	}
+	if len(rotated) > 0 {
+		fmt.Printf("role passwords applied from environment: %v\n", rotated)
+	}
 }
