@@ -65,10 +65,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.Health(appPool))
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		var out []entity.Programme
-		err := repo.WithTenantTx(r.Context(), appPool, func(tx pgx.Tx) error {
+		err := repo.WithTenantTx(ctx, appPool, func(tx pgx.Tx) error {
 			var e error
-			out, e = programmes.ListForTenant(r.Context(), tx)
+			out, e = programmes.ListForTenant(ctx, tx)
 			return e
 		})
 		if err != nil {

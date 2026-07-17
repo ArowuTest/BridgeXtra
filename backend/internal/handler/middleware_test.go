@@ -56,8 +56,8 @@ func TestV2_TEN_002_CredentialResolvesTenant(t *testing.T) {
 func TestV2_TEN_003_ConflictingClaimedTenant_RejectedAndAudited(t *testing.T) {
 	db, h, seen := setup(t)
 	req := httptest.NewRequest("GET", "/v1/programmes", nil)
-	req.Header.Set("X-Api-Key", "key-a")     // credential belongs to TELCO_A
-	req.Header.Set("X-Telco-Id", "TELCO_B")  // claims to be TELCO_B
+	req.Header.Set("X-Api-Key", "key-a")    // credential belongs to TELCO_A
+	req.Header.Set("X-Telco-Id", "TELCO_B") // claims to be TELCO_B
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {

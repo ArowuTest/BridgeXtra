@@ -82,7 +82,10 @@ func Apply(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) (int, error) {
 	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", advisoryLockKey); err != nil {
 		return 0, fmt.Errorf("advisory lock: %w", err)
 	}
-	defer conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", advisoryLockKey)
+	defer func() {
+		// Best-effort unlock: the session lock dies with the connection anyway.
+		_, _ = conn.Exec(context.WithoutCancel(ctx), "SELECT pg_advisory_unlock($1)", advisoryLockKey)
+	}()
 
 	if _, err := conn.Exec(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INT PRIMARY KEY,

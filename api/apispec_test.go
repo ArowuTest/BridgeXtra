@@ -30,8 +30,8 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 	// Route pinning: every path the API serves must be documented, and every
 	// documented path must exist in code. Update BOTH in the same commit.
 	served := map[string]bool{
-		"/healthz":        true,
-		"/v1/programmes":  true,
+		"/healthz":       true,
+		"/v1/programmes": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {
@@ -49,8 +49,8 @@ func TestV2_API_001_SimulatorSpecValidates(t *testing.T) {
 	doc := loadSpec(t, "simulator-openapi.yaml")
 
 	served := map[string]bool{
-		"/healthz":                          true,
-		"/v1/telcos/{telcoId}/fulfilments":  true,
+		"/healthz":                         true,
+		"/v1/telcos/{telcoId}/fulfilments": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

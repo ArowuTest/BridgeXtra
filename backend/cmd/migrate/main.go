@@ -23,7 +23,9 @@ func main() {
 		dsn = os.Getenv("TCP_ADMIN_DSN")
 	}
 	if dsn == "" {
-		dsn = "postgres://postgres:devlocal@localhost:5434/telco_credit" // local dev (A-14)
+		// #nosec G101 -- local-dev docker fallback (A-14), not a production
+		// credential; production always injects TCP_ADMIN_DSN (V2-SEC-005).
+		dsn = "postgres://postgres:devlocal@localhost:5434/telco_credit"
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)

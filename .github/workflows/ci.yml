@@ -1,3 +1,6 @@
+# CI is the quality floor (BC-2, ENGINEERING_STANDARD): every job here is
+# merge-blocking. V2-TST-016: production deployment is blocked when release-
+# gating checks are missing or red.
 name: ci
 
 on:
@@ -6,6 +9,58 @@ on:
   pull_request:
 
 jobs:
+  quality:
+    # Static quality floor — no database needed, fails fast.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt clean (BC-2)
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "gofmt needed:"; echo "$out"; exit 1; fi
+
+      - name: go mod verify + tidy diff-clean (BC-2 supply chain)
+        run: |
+          go mod verify
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: No floats in the money path (BC-1 guard)
+        run: |
+          if grep -rEn 'float(32|64)' backend/internal/entity backend/internal/ledger 2>/dev/null; then
+            echo "float in money path — forbidden by ADR-0002 / BC-1"; exit 1
+          fi
+          echo "money path float-free"
+
+      - name: golangci-lint (BC-2 — zero warnings)
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+
+      - name: govulncheck (BC-2 — Go vulnerability DB)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: gosec (BC-2 — security static analysis)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec -quiet -exclude-generated ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build all packages
+        run: go build ./...
+
+      - name: OpenAPI spec validation (V2-API-001)
+        run: go test -count=1 ./api/...
+
   backend:
     runs-on: ubuntu-latest
     services:
@@ -27,25 +82,26 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Vet
-        run: go vet ./...
-
-      - name: Build all packages
-        run: go build ./...
-
       - name: Fresh-DB migration check (from-zero lesson)
         env:
           TCP_ADMIN_DSN: postgres://postgres:devlocal@localhost:5434/telco_credit
         run: go run ./backend/cmd/migrate
 
-      # V2-TST-016 wiring starts here: merge is blocked when this job fails.
-      # Includes the SF-3 tenant-isolation negative pack, which provisions its
-      # own fresh databases per test package.
-      - name: OpenAPI spec validation (V2-API-001)
-        run: go test -count=1 ./api/...
-
-      - name: Race-enabled test suite
+      # V2-TST-016: merge is blocked when this job fails. Includes the SF-3
+      # tenant-isolation negative pack (fresh databases per test package) and
+      # the G0-F2 reviewer reproducer.
+      - name: Race-enabled test suite with coverage
         env:
           CI: "true"
           TCP_TEST_HOSTPORT: localhost:5434
-        run: go test -race -count=1 ./backend/... ./simulator/...
+        run: >
+          go test -race -count=1
+          -coverprofile=coverage.out
+          -coverpkg=./backend/internal/...
+          ./backend/... ./simulator/...
+
+      - name: Coverage floor 70% on backend/internal (BC-2 — ratchets up, never down)
+        run: |
+          total=$(go tool cover -func=coverage.out | tail -1 | awk '{gsub("%","",$3); print $3}')
+          echo "total coverage: ${total}%"
+          awk -v t="$total" 'BEGIN { if (t+0 < 70.0) { print "coverage " t "% below floor 70%"; exit 1 } }'

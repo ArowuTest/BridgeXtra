@@ -31,7 +31,7 @@ func appendN(t *testing.T, db *testutil.DB, agg string, n int) {
 			return repo.Outbox{}.Append(ctx, tx, entity.OutboxEvent{
 				ID: platform.NewID("evt"), TelcoID: "TELCO_A", AggregateType: "Test",
 				AggregateID: agg, EventType: "T.Event", SchemaVersion: 1,
-				Payload: []byte(fmt.Sprintf(`{"n":%d,"agg":%q}`, i, agg)),
+				Payload:    []byte(fmt.Sprintf(`{"n":%d,"agg":%q}`, i, agg)),
 				OccurredAt: time.Now().UTC(),
 			})
 		}); err != nil {

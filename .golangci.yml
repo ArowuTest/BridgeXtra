@@ -1,0 +1,41 @@
+# BC-2 (ENGINEERING_STANDARD): merge-blocking lint baseline. Zero warnings —
+# not a ratchet. Linter set per the standard; additions welcome, removals are
+# a reviewer-gated change (never-weaken rule applies to the lint set too).
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck   # includes the former gosimple + stylecheck
+    - errcheck
+    - ineffassign
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - nilerr
+    - contextcheck
+  settings:
+    errcheck:
+      check-type-assertions: true
+      # Deferred rollback is the documented pgx safety-net idiom: after a
+      # successful Commit it returns ErrTxClosed by design — the error carries
+      # no information. Every deferred Rollback in this codebase is that idiom.
+      exclude-functions:
+        - (github.com/jackc/pgx/v5.Tx).Rollback
+  exclusions:
+    rules:
+      # Deferred rollbacks/unlocks and best-effort audit writes are the
+      # documented fire-and-forget cases; each is annotated at the call site.
+      - path: _test\.go
+        linters:
+          - bodyclose
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+run:
+  timeout: 5m
+  build-tags: []

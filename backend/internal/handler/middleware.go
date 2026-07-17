@@ -15,6 +15,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
+// #nosec G101 -- these are HTTP header NAMES, not credential values.
 const (
 	headerAPIKey  = "X-Api-Key"
 	headerTelcoID = "X-Telco-Id"

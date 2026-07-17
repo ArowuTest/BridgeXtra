@@ -2,6 +2,8 @@ module github.com/ArowuTest/telco-credit-platform
 
 go 1.25.0
 
+toolchain go1.25.12
+
 require (
 	github.com/getkin/kin-openapi v0.142.0
 	github.com/jackc/pgx/v5 v5.10.0
