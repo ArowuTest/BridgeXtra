@@ -12,7 +12,7 @@ info:
     stable hash of (seed, platform_request_id), so any failure is reproducible
     (V2-SIM-006). The fault catalogue (timeout-after-success, duplicate
     callbacks, out-of-order reversals) arrives with M1.
-  version: 0.0.1  # M0 — happy path + idempotent replay
+  version: 0.1.0  # M1b-2 — fault catalogue (FAIL / TIMEOUT-after-success tokens), status enquiry, transaction listing
 servers:
   - url: http://localhost:8091
     description: Local development
@@ -76,8 +76,63 @@ paths:
                 properties:
                   error: { type: string }
 
+  /v1/telcos/{telcoId}/fulfilments/{platformRequestId}:
+    get:
+      operationId: enquireFulfilmentStatus
+      summary: Status enquiry — THE ambiguity resolver (V2-TEL-011, INV-009)
+      description: >
+        Read-only and safe to repeat. A platform that received a timeout on
+        submission calls this instead of resubmitting. 404 means the
+        instruction provably never landed (safe to mark failed); 200 returns
+        the definitive outcome including timeout-after-success cases.
+      parameters:
+        - { name: telcoId, in: path, required: true, schema: { type: string } }
+        - { name: platformRequestId, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Definitive outcome for the fulfilment
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FulfilmentResponse" }
+        "404":
+          description: No record of this platform_request_id — never landed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
+  /sim/transactions:
+    get:
+      operationId: listSimTransactions
+      summary: Telco-side transaction records (reconciliation source, V2-REC-001)
+      description: >
+        The simulator's authoritative record of what it credited — the file
+        the platform's daily reconciliation compares against (M1). Ordered by
+        credited_at ascending.
+      responses:
+        "200":
+          description: All telco-side transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Transaction" }
+
 components:
   schemas:
+    Transaction:
+      type: object
+      required: [platform_request_id, telco_transaction_reference, msisdn_token, face_value_minor, currency, status, credited_at]
+      properties:
+        platform_request_id: { type: string }
+        telco_transaction_reference: { type: string }
+        msisdn_token: { type: string }
+        face_value_minor: { type: integer, format: int64 }
+        currency: { type: string }
+        status: { type: string, enum: [SUCCESS, FAILED] }
+        credited_at: { type: string, format: date-time }
     FulfilmentRequest:
       type: object
       required:

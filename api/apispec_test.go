@@ -56,6 +56,8 @@ func TestV2_API_001_SimulatorSpecValidates(t *testing.T) {
 	served := map[string]bool{
 		"/healthz":                         true,
 		"/v1/telcos/{telcoId}/fulfilments": true,
+		"/v1/telcos/{telcoId}/fulfilments/{platformRequestId}": true,
+		"/sim/transactions": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {
