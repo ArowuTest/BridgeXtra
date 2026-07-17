@@ -1,0 +1,217 @@
+package entity
+
+// M1 credit-core domain types. All money is Money (BC-1); state machines are
+// explicit transition tables so the FSM test can be exhaustive (BC-8).
+
+import "time"
+
+// ---------------------------------------------------------------------------
+// Advance FSM (V2 §13.1). Delinquency is an overlay classification, not a
+// state (SRS v3 D-2 resolution).
+// ---------------------------------------------------------------------------
+
+type AdvanceState string
+
+const (
+	AdvRequested          AdvanceState = "REQUESTED"
+	AdvValidated          AdvanceState = "VALIDATED"
+	AdvExposureReserved   AdvanceState = "EXPOSURE_RESERVED"
+	AdvPendingFulfilment  AdvanceState = "PENDING_FULFILMENT"
+	AdvFulfilmentUnknown  AdvanceState = "FULFILMENT_UNKNOWN"
+	AdvActive             AdvanceState = "ACTIVE"
+	AdvPartiallyRecovered AdvanceState = "PARTIALLY_RECOVERED"
+	AdvClosed             AdvanceState = "CLOSED"
+	AdvFulfilmentFailed   AdvanceState = "FULFILMENT_FAILED"
+	AdvDeclined           AdvanceState = "DECLINED"
+)
+
+// advanceTransitions is THE transition table (V2-ADV-008: only permitted
+// transitions accepted; everything else rejected and audited).
+var advanceTransitions = map[AdvanceState][]AdvanceState{
+	AdvRequested:          {AdvValidated, AdvDeclined},
+	AdvValidated:          {AdvExposureReserved, AdvDeclined},
+	AdvExposureReserved:   {AdvPendingFulfilment, AdvDeclined},
+	AdvPendingFulfilment:  {AdvActive, AdvFulfilmentFailed, AdvFulfilmentUnknown},
+	AdvFulfilmentUnknown:  {AdvActive, AdvFulfilmentFailed},
+	AdvActive:             {AdvPartiallyRecovered, AdvClosed},
+	AdvPartiallyRecovered: {AdvPartiallyRecovered, AdvClosed},
+	// CLOSED / FULFILMENT_FAILED / DECLINED are terminal in M1 (controlled
+	// reversal workflows arrive at M3).
+}
+
+// CanTransition reports whether from → to is a legal advance transition.
+func CanTransition(from, to AdvanceState) bool {
+	for _, t := range advanceTransitions[from] {
+		if t == to {
+			return true
+		}
+	}
+	return false
+}
+
+// AdvanceStates lists every state (for exhaustive FSM tests).
+func AdvanceStates() []AdvanceState {
+	return []AdvanceState{
+		AdvRequested, AdvValidated, AdvExposureReserved, AdvPendingFulfilment,
+		AdvFulfilmentUnknown, AdvActive, AdvPartiallyRecovered, AdvClosed,
+		AdvFulfilmentFailed, AdvDeclined,
+	}
+}
+
+// OpenAdvanceStates are the states covered by the one-active partial unique
+// index — MUST stay in sync with advances_one_active_uq (0004).
+func OpenAdvanceStates() []AdvanceState {
+	return []AdvanceState{
+		AdvRequested, AdvValidated, AdvExposureReserved, AdvPendingFulfilment,
+		AdvFulfilmentUnknown, AdvActive, AdvPartiallyRecovered,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Aggregates
+// ---------------------------------------------------------------------------
+
+type SubscriberAccount struct {
+	SubscriberAccountID string
+	TelcoID             string
+	MSISDNToken         string
+	Status              string
+	EffectiveFrom       time.Time
+	EffectiveTo         *time.Time
+}
+
+type DecisionSnapshot struct {
+	DecisionSnapshotID  string
+	TelcoID             string
+	SubscriberAccountID string
+	MaxFaceValue        Money
+	IsCurrent           bool
+	ConfigVersionID     string
+	CreatedAt           time.Time
+}
+
+type FeeModel string
+
+const (
+	FeeDeductedUpfront  FeeModel = "DEDUCTED_UPFRONT"
+	FeeAddedToRepayment FeeModel = "ADDED_TO_REPAYMENT"
+)
+
+type OfferState string
+
+const (
+	OfferGenerated  OfferState = "GENERATED"
+	OfferAccepted   OfferState = "ACCEPTED"
+	OfferExpired    OfferState = "EXPIRED"
+	OfferWithdrawn  OfferState = "WITHDRAWN"
+	OfferSuperseded OfferState = "SUPERSEDED"
+)
+
+type Offer struct {
+	OfferID                string
+	TelcoID                string
+	ProgrammeID            string
+	SubscriberAccountID    string
+	DecisionSnapshotID     string
+	FaceValue              Money
+	Fee                    Money
+	Disbursed              Money
+	Repayment              Money
+	FeeModel               FeeModel
+	ProductConfigVersionID string
+	State                  OfferState
+	ExpiresAt              time.Time
+	CreatedAt              time.Time
+}
+
+type Advance struct {
+	AdvanceID           string
+	TelcoID             string
+	ProgrammeID         string
+	SubscriberAccountID string
+	OfferID             string
+	FundingPoolID       string
+	IdempotencyKey      string
+	CorrelationID       string
+	State               AdvanceState
+	Version             int
+	FaceValue           Money
+	Fee                 Money
+	Disbursed           Money
+	Outstanding         Money
+	AcceptedAt          time.Time
+	ActivatedAt         *time.Time
+	ClosedAt            *time.Time
+	UpdatedAt           time.Time
+}
+
+type FulfilmentAttemptState string
+
+const (
+	AttemptSent      FulfilmentAttemptState = "SENT"
+	AttemptConfirmed FulfilmentAttemptState = "CONFIRMED"
+	AttemptFailed    FulfilmentAttemptState = "FAILED"
+	AttemptUnknown   FulfilmentAttemptState = "UNKNOWN"
+)
+
+type FulfilmentAttempt struct {
+	AttemptID           string
+	AdvanceID           string
+	AttemptNo           int
+	TelcoIdempotencyKey string
+	State               FulfilmentAttemptState
+	TelcoReference      string
+	RequestEvidence     []byte
+	ResponseEvidence    []byte
+	SubmittedAt         time.Time
+	NextEnquiryAt       *time.Time
+	EnquiryCount        int
+	ResolvedAt          *time.Time
+}
+
+type RecoveryEventState string
+
+const (
+	RecoveryPending     RecoveryEventState = "PENDING"
+	RecoveryAllocated   RecoveryEventState = "ALLOCATED"
+	RecoveryQuarantined RecoveryEventState = "QUARANTINED"
+	RecoveryUnmatched   RecoveryEventState = "UNMATCHED"
+)
+
+type RecoveryEvent struct {
+	RecoveryEventID     string
+	TelcoID             string
+	SourceEventID       string
+	SubscriberAccountID string
+	Amount              Money
+	State               RecoveryEventState
+	OccurredAt          time.Time
+	ReceivedAt          time.Time
+}
+
+type AllocationComponent string
+
+const (
+	ComponentFee       AllocationComponent = "FEE"
+	ComponentPrincipal AllocationComponent = "PRINCIPAL"
+)
+
+type RecoveryAllocation struct {
+	AllocationID    string
+	RecoveryEventID string
+	AdvanceID       string
+	Component       AllocationComponent
+	Amount          Money
+	CreatedAt       time.Time
+}
+
+type FundingPool struct {
+	PoolID      string
+	ProgrammeID string
+	TelcoID     string
+	Currency    Currency
+	Committed   Money
+	Reserved    Money
+	Utilised    Money
+	Status      string
+}
