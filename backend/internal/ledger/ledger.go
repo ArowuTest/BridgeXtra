@@ -16,9 +16,14 @@ package ledger
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -35,6 +40,10 @@ var (
 	ErrUnknownAccount = errors.New("ledger: account not in the governed chart of accounts")
 	ErrEmptyJournal   = errors.New("ledger: journal must have at least two entries")
 	ErrBadLine        = errors.New("ledger: line must have exactly one positive side")
+	// ErrDivergentDuplicate (M1B-F2): the same business event was re-posted
+	// with DIFFERENT lines. An honest retry and an amount-drifted bug must
+	// never look identical — this is loud, the retry path stays quiet.
+	ErrDivergentDuplicate = errors.New("ledger: duplicate business event with divergent lines — possible amount drift")
 )
 
 // Side of an entry.
@@ -141,22 +150,28 @@ func (s *Service) Post(ctx context.Context, tx pgx.Tx, j Journal) (posted bool, 
 		}
 	}
 
+	hash := linesHash(j.Lines)
 	journalID = platform.NewID("jrn")
 	ct, err := tx.Exec(ctx, `
-		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id)
-		VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7)
+		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id, lines_hash)
+		VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8)
 		ON CONFLICT (business_event_key, event_type) DO NOTHING`,
-		journalID, j.BusinessEventKey, j.EventType, j.TelcoID, j.ProgrammeID, j.AdvanceID, j.CorrelationID)
+		journalID, j.BusinessEventKey, j.EventType, j.TelcoID, j.ProgrammeID, j.AdvanceID, j.CorrelationID, hash)
 	if err != nil {
 		return false, "", err
 	}
 	if ct.RowsAffected() == 0 {
-		// Already posted — return the existing journal id for traceability.
-		var existing string
+		// Already posted. Honest retry (identical lines) returns the original
+		// quietly; divergent lines are a LOUD error (M1B-F2).
+		var existing, existingHash string
 		if err := tx.QueryRow(ctx,
-			`SELECT journal_id FROM journals WHERE business_event_key=$1 AND event_type=$2`,
-			j.BusinessEventKey, j.EventType).Scan(&existing); err != nil {
+			`SELECT journal_id, lines_hash FROM journals WHERE business_event_key=$1 AND event_type=$2`,
+			j.BusinessEventKey, j.EventType).Scan(&existing, &existingHash); err != nil {
 			return false, "", err
+		}
+		if existingHash != "" && existingHash != hash {
+			return false, existing, fmt.Errorf("%w: event %s/%s journal %s",
+				ErrDivergentDuplicate, j.BusinessEventKey, j.EventType, existing)
 		}
 		return false, existing, nil
 	}
@@ -176,6 +191,20 @@ func (s *Service) Post(ctx context.Context, tx pgx.Tx, j Journal) (posted bool, 
 		}
 	}
 	return true, journalID, nil
+}
+
+// linesHash is the canonical content hash of a journal's lines (M1B-F2):
+// order-independent (lines sorted canonically), so semantically identical
+// retries hash equal regardless of construction order.
+func linesHash(lines []Line) string {
+	parts := make([]string, len(lines))
+	for i, l := range lines {
+		parts[i] = l.Account + "|" + string(l.Side) + "|" +
+			string(l.Amount.Currency()) + "|" + strconv.FormatInt(l.Amount.Amount(), 10)
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
 }
 
 // AccountBalance reconstructs an account balance (debits - credits) from

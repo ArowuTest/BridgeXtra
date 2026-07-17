@@ -110,6 +110,52 @@ func TestINV_003_PostingIsIdempotent_DBArbiter(t *testing.T) {
 	}
 }
 
+func TestM1B_F2_DivergentDuplicateIsLoud_HonestRetryIsQuiet(t *testing.T) {
+	db := testutil.MustSetup(t, "ledger_divergent")
+	svc := ledger.New(configsvc.New(db.App))
+	_, inTx := withTenant(db)
+
+	if err := inTx(func(tx pgx.Tx) error {
+		_, _, err := svc.Post(context.Background(), tx, issuedJournal("advX/issued", 10_000, 9_000, 1_000))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Honest retry: identical lines in a DIFFERENT construction order — quiet.
+	reordered := issuedJournal("advX/issued", 10_000, 9_000, 1_000)
+	reordered.Lines[1], reordered.Lines[2] = reordered.Lines[2], reordered.Lines[1]
+	if err := inTx(func(tx pgx.Tx) error {
+		posted, _, err := svc.Post(context.Background(), tx, reordered)
+		if err != nil {
+			return err
+		}
+		if posted {
+			t.Error("retry must not re-post")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("order-independent honest retry must be quiet: %v", err)
+	}
+
+	// Amount drift on the same business event: LOUD typed error.
+	err := inTx(func(tx pgx.Tx) error {
+		_, _, err := svc.Post(context.Background(), tx, issuedJournal("advX/issued", 10_000, 8_999, 1_001))
+		return err
+	})
+	if !errors.Is(err, ledger.ErrDivergentDuplicate) {
+		t.Fatalf("drifted duplicate must be ErrDivergentDuplicate, got %v", err)
+	}
+	// And nothing extra was written.
+	var journals int
+	if err := db.Admin.QueryRow(context.Background(), `SELECT count(*) FROM journals`).Scan(&journals); err != nil {
+		t.Fatal(err)
+	}
+	if journals != 1 {
+		t.Fatalf("divergent duplicate must write nothing: %d journals", journals)
+	}
+}
+
 func TestLedger_UnknownAccountFailsClosed(t *testing.T) {
 	db := testutil.MustSetup(t, "ledger_account")
 	svc := ledger.New(configsvc.New(db.App))

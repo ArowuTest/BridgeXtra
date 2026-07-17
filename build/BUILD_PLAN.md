@@ -126,6 +126,7 @@ Every threshold in this plan — tier tables, spike caps, offer expiry, delinque
 | Item | Trigger to build |
 |---|---|
 | Incumbent migration tooling (MIG-*) | telco contract + incumbent data access |
+| Config-driven ledger posting-TEMPLATE engine (V2-LED-009/V2-CFG-012 full form) — M1 posts fixed event shapes through internal/ledger with config-governed accounts; templates-as-config with symbolic balance validation | M3 money core (DD-18 accounting-point sign-off) |
 | Live bureau submission (export stays dormant-capable M3) | DD-13 + mandate |
 | Second telco adapter | R3; certification harness proves core-code-free onboarding (V2-TAR-002) |
 | Broker migration (Kafka etc.), table partitioning activation | R2/R3 volume triggers |
