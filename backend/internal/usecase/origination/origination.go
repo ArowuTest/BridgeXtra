@@ -19,6 +19,8 @@ package origination
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +44,12 @@ var (
 	ErrOfferExpired         = errors.New("origination: offer expired") // EDG-011
 	ErrOfferNotAcceptable   = errors.New("origination: offer no longer acceptable")
 	ErrSubscriberIneligible = errors.New("origination: subscriber not eligible") // barred/self-excluded/closed
+	// ErrDecisionUnavailable (M2e): the credit decision is expired, ineligible
+	// or absent — customer-safe NO_OFFER, never a stale lend (EDG-014).
+	ErrDecisionUnavailable = errors.New("origination: no valid credit decision")
+	// ErrOverlayBlocked (M2e, V2-SCR-015): a real-time risk overlay blocks the
+	// subscriber at this moment. Which flag fired is logged, never disclosed.
+	ErrOverlayBlocked = errors.New("origination: risk overlay blocks this action")
 )
 
 type Service struct {
@@ -58,6 +66,8 @@ type Service struct {
 	advances    repo.Advances
 	attempts    repo.Attempts
 	outbox      repo.Outbox
+	flags       repo.SubscriberFlags
+	consents    repo.Consents
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, adapter mno.Client, log *slog.Logger) *Service {
@@ -75,6 +85,71 @@ type productCfg struct {
 type fulfilmentCfg struct {
 	StatusEnquiryDelaysSeconds []int `json:"status_enquiry_delays_seconds"`
 	UnknownEscalationMinutes   int   `json:"unknown_escalation_minutes"`
+}
+
+type overlaysCfg struct {
+	BlockingFlags       []string `json:"blocking_flags"`
+	SimSwapCooloffHours int      `json:"sim_swap_cooloff_hours"`
+	CheckAt             []string `json:"check_at"`
+}
+
+// checkOverlays applies the real-time risk overlays (V2-SCR-015) at the given
+// checkpoint (OFFER or CONFIRM). Config-driven; the validator guarantees
+// CONFIRM can never be configured off. SIM_SWAP blocks only inside its
+// cool-off window; every other blocking flag blocks while open.
+func (s *Service) checkOverlays(ctx context.Context, tx pgx.Tx, telcoID, subscriberAccountID, checkpoint string, now time.Time) error {
+	cv, err := s.Config.ActiveAt(ctx, "overlays.policy", "telco:"+telcoID, now)
+	if err != nil {
+		return fmt.Errorf("overlays.policy config: %w", err)
+	}
+	var oc overlaysCfg
+	if err := json.Unmarshal(cv.Content, &oc); err != nil {
+		return err
+	}
+	applies := false
+	for _, c := range oc.CheckAt {
+		if c == checkpoint {
+			applies = true
+		}
+	}
+	if !applies {
+		return nil
+	}
+	blocking := map[string]bool{}
+	for _, f := range oc.BlockingFlags {
+		blocking[f] = true
+	}
+	open, err := s.flags.ListOpen(ctx, tx, subscriberAccountID)
+	if err != nil {
+		return err
+	}
+	for _, f := range open {
+		if !blocking[f.Flag] {
+			continue
+		}
+		if f.Flag == "SIM_SWAP" &&
+			now.After(f.EffectiveFrom.Add(time.Duration(oc.SimSwapCooloffHours)*time.Hour)) {
+			continue // cool-off elapsed: a settled SIM swap no longer blocks
+		}
+		s.Log.Warn("overlay blocked", "subscriber", subscriberAccountID,
+			"flag", f.Flag, "checkpoint", checkpoint)
+		return fmt.Errorf("%w (%s)", ErrOverlayBlocked, checkpoint)
+	}
+	return nil
+}
+
+// requireValidDecision enforces decision validity at the lending boundary
+// (EDG-014 / V2-SCR-015): a scored decision past valid_until or ineligible
+// never serves an offer; seeds (no expiry) pass — they exist only in
+// pre-scoring environments.
+func requireValidDecision(dec entity.DecisionSnapshot, now time.Time) error {
+	if dec.ValidUntil != nil && !dec.ValidUntil.After(now) {
+		return fmt.Errorf("%w: decision expired %s", ErrDecisionUnavailable, dec.ValidUntil.UTC().Format(time.RFC3339))
+	}
+	if !dec.MaxFaceValue.IsPositive() {
+		return fmt.Errorf("%w: not eligible", ErrDecisionUnavailable)
+	}
+	return nil
 }
 
 // GetOffers returns the subscriber's valid offers, generating the ladder from
@@ -100,6 +175,9 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
 		}
+		if err := s.checkOverlays(ctx, tx, sub.TelcoID, sub.SubscriberAccountID, "OFFER", now); err != nil {
+			return err
+		}
 		// VR-7a: serialize ladder generation per (subscriber, programme) so
 		// concurrent first-time enquiries cannot mint duplicate ladders
 		// (double USSD menu entries). The second enquirer waits here, then
@@ -117,7 +195,13 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 			return nil
 		}
 		dec, err := s.decisions.GetCurrent(ctx, tx, sub.SubscriberAccountID)
+		if errors.Is(err, repo.ErrNotFound) {
+			return fmt.Errorf("%w: no decision on file", ErrDecisionUnavailable)
+		}
 		if err != nil {
+			return err
+		}
+		if err := requireValidDecision(dec, now); err != nil {
 			return err
 		}
 		built, err := buildLadder(sub, dec, programmeID, cfgV.ConfigVersionID, pc, now)
@@ -229,6 +313,11 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
 		}
+		// Real-time overlays at the money-moving moment (V2-SCR-015). The
+		// validator guarantees CONFIRM cannot be configured off.
+		if err := s.checkOverlays(ctx, tx, sub.TelcoID, sub.SubscriberAccountID, "CONFIRM", time.Now().UTC()); err != nil {
+			return err
+		}
 
 		offer, err = s.offers.GetForUpdate(ctx, tx, cmd.OfferID)
 		if errors.Is(err, repo.ErrNotFound) {
@@ -257,6 +346,17 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 			// EDG-011: expired between menu and confirm — fail safely.
 			_ = s.offers.SetState(ctx, tx, offer.OfferID, entity.OfferGenerated, entity.OfferExpired)
 			return ErrOfferExpired
+		}
+
+		// The offer's pinned decision must still be valid AT CONFIRM: an
+		// offer whose decision expired between menu and confirm is a stale
+		// lend (EDG-014) — refuse, never honour.
+		dec, err := s.decisions.Get(ctx, tx, offer.DecisionSnapshotID)
+		if err != nil {
+			return err
+		}
+		if err := requireValidDecision(dec, now); err != nil {
+			return err
 		}
 
 		// Create the advance FIRST, pool-less (0006): the one-active contest
@@ -301,6 +401,34 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 			return err
 		}
 		if err := s.offers.SetState(ctx, tx, offer.OfferID, entity.OfferGenerated, entity.OfferAccepted); err != nil {
+			return err
+		}
+
+		// Consent/disclosure evidence IN the confirm transaction (V2-REG-001):
+		// an advance cannot exist without the exact terms the customer
+		// accepted. The record is what was DISCLOSED — offer-pinned amounts,
+		// fee model and decision provenance — hashed for tamper evidence.
+		terms, err := json.Marshal(map[string]any{
+			"offer_id":             offer.OfferID,
+			"face_value_minor":     offer.FaceValue.Amount(),
+			"fee_minor":            offer.Fee.Amount(),
+			"disbursed_minor":      offer.Disbursed.Amount(),
+			"repayment_minor":      offer.Repayment.Amount(),
+			"currency":             string(offer.FaceValue.Currency()),
+			"fee_model":            string(offer.FeeModel),
+			"decision_snapshot_id": offer.DecisionSnapshotID,
+			"product_config":       offer.ProductConfigVersionID,
+		})
+		if err != nil {
+			return err
+		}
+		termsHash := sha256.Sum256(terms)
+		if err := s.consents.Insert(ctx, tx, repo.Consent{
+			ConsentID: platform.NewID("cns"), TelcoID: sub.TelcoID,
+			AdvanceID: adv.AdvanceID, SubscriberAccountID: sub.SubscriberAccountID,
+			DisclosedTerms: terms, ContentHash: hex.EncodeToString(termsHash[:]),
+			Channel: "USSD",
+		}); err != nil {
 			return err
 		}
 

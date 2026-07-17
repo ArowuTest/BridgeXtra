@@ -86,6 +86,8 @@ type Simulator struct {
 	byIdemKey     map[string]FulfilmentResponse // V2-TEL-003 idempotent replay
 	transactions  map[string]Transaction        // by platform_request_id
 	holdEnquiries bool                          // fault: enquiry route unresponsive
+	smsByIdemKey  map[string]string             // idem key -> provider ref
+	smsLog        []SMSRecord
 }
 
 // CreditDirect injects a SUCCESS transaction as if the telco credited without
@@ -116,6 +118,7 @@ func New(log *slog.Logger, seed string, hold time.Duration) *Simulator {
 		Log: log, Seed: seed, HoldDuration: hold,
 		byIdemKey:    map[string]FulfilmentResponse{},
 		transactions: map[string]Transaction{},
+		smsByIdemKey: map[string]string{},
 	}
 }
 
@@ -128,8 +131,61 @@ func (s *Simulator) Handler() *http.ServeMux {
 	mux.HandleFunc("POST /v1/telcos/{telcoId}/fulfilments", s.fulfil)
 	mux.HandleFunc("GET /v1/telcos/{telcoId}/fulfilments/{platformRequestId}", s.enquire)
 	mux.HandleFunc("GET /v1/telcos/{telcoId}/feature-file", s.featureFile)
+	mux.HandleFunc("POST /v1/telcos/{telcoId}/sms", s.sendSMS)
+	mux.HandleFunc("GET /sim/sms", s.listSMS)
 	mux.HandleFunc("GET /sim/transactions", s.listTransactions)
 	return mux
+}
+
+// SMSRequest is the canonical SMS submission (V2 §10.2 notifications).
+type SMSRequest struct {
+	MSISDNToken string `json:"msisdn_token"`
+	SenderID    string `json:"sender_id"`
+	Body        string `json:"body"`
+}
+
+// SMSRecord is the telco-side evidence of a delivered message.
+type SMSRecord struct {
+	ProviderRef string    `json:"provider_ref"`
+	MSISDNToken string    `json:"msisdn_token"`
+	SenderID    string    `json:"sender_id"`
+	Body        string    `json:"body"`
+	ReceivedAt  time.Time `json:"received_at"`
+}
+
+// sendSMS accepts a message; idempotent per Idempotency-Key like fulfilment.
+func (s *Simulator) sendSMS(w http.ResponseWriter, r *http.Request) {
+	idemKey := r.Header.Get("Idempotency-Key")
+	if idemKey == "" {
+		http.Error(w, `{"error":"missing Idempotency-Key"}`, http.StatusBadRequest)
+		return
+	}
+	var req SMSRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.MSISDNToken == "" || req.Body == "" {
+		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if prev, ok := s.smsByIdemKey[idemKey]; ok {
+		writeJSON(w, http.StatusOK, map[string]string{"provider_ref": prev})
+		return
+	}
+	ref := fmt.Sprintf("SMS-%08x", stableHash(s.Seed+idemKey))
+	s.smsByIdemKey[idemKey] = ref
+	s.smsLog = append(s.smsLog, SMSRecord{
+		ProviderRef: ref, MSISDNToken: req.MSISDNToken, SenderID: req.SenderID,
+		Body: req.Body, ReceivedAt: time.Now().UTC(),
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"provider_ref": ref})
+}
+
+func (s *Simulator) listSMS(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	out := make([]SMSRecord, len(s.smsLog))
+	copy(out, s.smsLog)
+	s.mu.Unlock()
+	writeJSON(w, http.StatusOK, out)
 }
 
 // featureFile serves the canonical batch feature file (V2-SCR-001). Content

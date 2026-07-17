@@ -12,7 +12,7 @@ info:
     stable hash of (seed, platform_request_id), so any failure is reproducible
     (V2-SIM-006). The fault catalogue (timeout-after-success, duplicate
     callbacks, out-of-order reversals) arrives with M1.
-  version: 0.2.0  # M2b — canonical batch feature file (V2-SCR-001/002)
+  version: 0.3.0  # M2e — canonical SMS submission + sms evidence log
 servers:
   - url: http://localhost:8091
     description: Local development
@@ -133,6 +133,68 @@ paths:
                 type: object
                 properties:
                   error: { type: string }
+
+  /v1/telcos/{telcoId}/sms:
+    post:
+      operationId: sendSMS
+      summary: Submit a subscriber SMS (canonical notification contract, V2 §10.2)
+      description: >
+        Idempotent per Idempotency-Key like fulfilment — a notifier retry can
+        never double-send. The simulator records every accepted message as
+        evidence, retrievable via /sim/sms.
+      parameters:
+        - { name: telcoId, in: path, required: true, schema: { type: string } }
+        - { name: Idempotency-Key, in: header, required: true, schema: { type: string, minLength: 8, maxLength: 128 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [msisdn_token, sender_id, body]
+              properties:
+                msisdn_token: { type: string }
+                sender_id: { type: string }
+                body: { type: string }
+      responses:
+        "200":
+          description: Accepted (or replayed) — provider reference returned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [provider_ref]
+                properties:
+                  provider_ref: { type: string }
+        "400":
+          description: Missing Idempotency-Key or malformed request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error: { type: string }
+
+  /sim/sms:
+    get:
+      operationId: listSimSMS
+      summary: Telco-side SMS evidence log
+      responses:
+        "200":
+          description: All accepted messages in arrival order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [provider_ref, msisdn_token, sender_id, body, received_at]
+                  properties:
+                    provider_ref: { type: string }
+                    msisdn_token: { type: string }
+                    sender_id: { type: string }
+                    body: { type: string }
+                    received_at: { type: string, format: date-time }
 
   /sim/transactions:
     get:

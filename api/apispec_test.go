@@ -62,6 +62,8 @@ func TestV2_API_001_SimulatorSpecValidates(t *testing.T) {
 		"/v1/telcos/{telcoId}/fulfilments": true,
 		"/v1/telcos/{telcoId}/fulfilments/{platformRequestId}": true,
 		"/v1/telcos/{telcoId}/feature-file":                    true,
+		"/v1/telcos/{telcoId}/sms":                             true,
+		"/sim/sms":                                             true,
 		"/sim/transactions":                                    true,
 	}
 	for p := range served {

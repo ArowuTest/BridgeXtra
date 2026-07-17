@@ -31,6 +31,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/fulfilmentresolver"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/notify"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/outboxdispatch"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recon"
@@ -132,13 +133,20 @@ func main() {
 	resolver := fulfilmentresolver.New(appPool, appCfg, adapter, orig, log)
 
 	d := outboxdispatch.New(workerPool, configsvc.New(workerPool), log)
-	// M1 event consumers: downstream systems (notifications, analytics, bureau
+	// advance.FulfilmentConfirmed drives the M2e subscriber notification with
+	// evidence (V2 §10.2). The consumer is replay-safe end to end: the
+	// evidence row is idempotent per (advance, kind) and the SMS submit is
+	// idempotent at the telco.
+	notifier := notify.New(appPool, appCfg, log)
+	d.Register("advance.FulfilmentConfirmed", func(ctx context.Context, e entity.OutboxEvent) error {
+		return notifier.AdvanceConfirmed(ctx, e.TelcoID, e.AggregateID)
+	})
+	// Remaining M1 event consumers: downstream systems (analytics, bureau
 	// feeds) arrive in later milestones; until then the contract is proven by
 	// consuming each event exactly once into the structured log.
 	for _, et := range []string{
-		"advance.FulfilmentConfirmed", "advance.FulfilmentFailed",
-		"advance.FulfilmentUnknown", "advance.RecoveryApplied",
-		"M0.Ping",
+		"advance.FulfilmentFailed", "advance.FulfilmentUnknown",
+		"advance.RecoveryApplied", "M0.Ping",
 	} {
 		d.Register(et, func(ctx context.Context, e entity.OutboxEvent) error {
 			log.Info("outbox event consumed", "type", e.EventType, "event_id", e.ID,

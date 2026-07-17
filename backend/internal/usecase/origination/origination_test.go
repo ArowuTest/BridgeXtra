@@ -34,9 +34,10 @@ import (
 )
 
 type fixture struct {
-	db  *testutil.DB
-	svc *origination.Service
-	cfg *configsvc.Service
+	db     *testutil.DB
+	svc    *origination.Service
+	cfg    *configsvc.Service
+	simURL string
 }
 
 func newFixture(t *testing.T, suffix string, simHold time.Duration, adapterTimeoutMs int) *fixture {
@@ -67,7 +68,7 @@ func newFixture(t *testing.T, suffix string, simHold time.Duration, adapterTimeo
 
 	appCfg := configsvc.New(db.App) // reads only, app role
 	svc := origination.New(db.App, appCfg, ledger.New(appCfg), mno.NewHTTPAdapter(appCfg), slog.Default())
-	return &fixture{db: db, svc: svc, cfg: cfg}
+	return &fixture{db: db, svc: svc, cfg: cfg, simURL: srv.URL}
 }
 
 // seedSubscriber adds a subscriber + current decision for a token (the 0004
