@@ -83,8 +83,12 @@ func validateScoringPolicy(ctx context.Context, tx pgx.Tx, content json.RawMessa
 	if ag.WindowDays == nil || *ag.WindowDays <= 0 {
 		return fmt.Errorf("anti_gaming.window_days must be > 0")
 	}
-	if ag.WinsorUpperBps == nil || *ag.WinsorUpperBps <= 0 || *ag.WinsorUpperBps > 10_000 {
-		return fmt.Errorf("anti_gaming.winsor_upper_bps must be in (0,10000] — a percentile of the subscriber's own distribution")
+	// The canonical feature window is 13 weeks. Nearest-rank percentile above
+	// 12/13 (9230 bps) selects the MAXIMUM itself — winsorisation would cap
+	// nothing and the anti-gaming control would be armed-but-dead. Found live:
+	// the EDG-013 wash-pattern test bought TIER_04 under a 9500 bps cap.
+	if ag.WinsorUpperBps == nil || *ag.WinsorUpperBps <= 0 || *ag.WinsorUpperBps > 9_230 {
+		return fmt.Errorf("anti_gaming.winsor_upper_bps must be in (0,9230] — above 12/13 the cap equals the max and winsorisation is disarmed (13-week canonical window)")
 	}
 	if ag.SpikeRatioMaxBps == nil || *ag.SpikeRatioMaxBps < 10_000 {
 		return fmt.Errorf("anti_gaming.spike_ratio_max_bps must be >= 10000 (a cap below 1x rejects everything)")

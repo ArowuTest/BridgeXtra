@@ -30,12 +30,12 @@ jobs:
           go mod tidy
           git diff --exit-code go.mod go.sum
 
-      - name: No floats in the money path (BC-1 guard)
+      - name: No floats in the money or scoring path (BC-1 guard)
         run: |
-          if grep -rEn 'float(32|64)' backend/internal/entity backend/internal/ledger 2>/dev/null; then
-            echo "float in money path — forbidden by ADR-0002 / BC-1"; exit 1
+          if grep -rEn 'float(32|64)' backend/internal/entity backend/internal/ledger backend/internal/scoring 2>/dev/null; then
+            echo "float in money/scoring path — forbidden by ADR-0002 / BC-1"; exit 1
           fi
-          echo "money path float-free"
+          echo "money and scoring paths float-free"
 
       - name: golangci-lint (BC-2 — zero warnings)
         uses: golangci/golangci-lint-action@v8
