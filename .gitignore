@@ -1,0 +1,19 @@
+# binaries / build
+*.exe
+*.test
+/bin/
+/dist/
+# env & secrets — never commit
+.env
+.env.*
+*.pem
+*.key
+# node
+node_modules/
+.next/
+# editor/os
+.DS_Store
+Thumbs.db
+# local scratch
+/tmp/
+coverage.out
