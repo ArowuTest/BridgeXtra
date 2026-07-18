@@ -137,3 +137,37 @@ export function riskRequestRearm(tripId: string, reason: string): Promise<unknow
 export function riskApproveRearm(tripId: string): Promise<unknown> {
   return request("POST", `/v1/portal/risk/trips/${tripId}/approve-rearm`);
 }
+
+// --- M4d finance workspace: ledger browser ---
+
+export type JournalHeader = {
+  journal_id: string;
+  event_type: string;
+  telco_id: string;
+  programme_id: string;
+  advance_id?: string;
+  correlation_id: string;
+  accounting_date: string;
+  posted_at: string;
+};
+
+export type JournalEntry = {
+  entry_id: string;
+  account_code: string;
+  debit: MoneyView;
+  credit: MoneyView;
+};
+
+export function ledgerJournals(params: { advance_id?: string; correlation_id?: string } = {}): Promise<{
+  journals: JournalHeader[];
+}> {
+  const q = new URLSearchParams();
+  if (params.advance_id) q.set("advance_id", params.advance_id);
+  if (params.correlation_id) q.set("correlation_id", params.correlation_id);
+  const qs = q.toString();
+  return request("GET", `/v1/portal/finance/ledger/journals${qs ? `?${qs}` : ""}`);
+}
+
+export function ledgerJournal(id: string): Promise<{ journal: JournalHeader; entries: JournalEntry[] }> {
+  return request("GET", `/v1/portal/finance/ledger/journals/${id}`);
+}

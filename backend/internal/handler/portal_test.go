@@ -314,6 +314,97 @@ func seedTrip(t *testing.T, f *portalFixture, tripID, telcoID, programmeID strin
 	}
 }
 
+// seedJournal inserts a balanced journal (debit + credit) for a tenant, via
+// the admin pool, returning the journal id.
+func seedJournal(t *testing.T, f *portalFixture, jid, telcoID, programmeID, corr string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id)
+		VALUES ($1, $1||':k', 'ADVANCE_ISSUED', $2, $3, 'adv_'||$1, $4)`, jid, telcoID, programmeID, corr); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO journal_entries (entry_id, journal_id, account_code, debit_minor, credit_minor, currency) VALUES
+		($1||'_d', $1, 'SUBSCRIBER_RECEIVABLE', 100000, 0, 'NGN'),
+		($1||'_c', $1, 'AIRTIME_FUNDING_CLEARING', 0, 100000, 'NGN')`, jid); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// M4d: the ledger browser is scope-bounded and taps through to entries. A
+// programme-scoped FINANCE operator sees only their tenant's journals, cannot
+// read another tenant's journal by id (no-oracle 404), and taps through to the
+// balanced entries of their own.
+func TestM4D_LedgerBrowser_ScopeAndTapThrough(t *testing.T) {
+	f := newPortalFixture(t, "portal_ledger")
+	// A second programme (out of the operator's scope) under the same telco.
+	if _, err := f.db.Admin.Exec(context.Background(), `
+		INSERT INTO programmes (programme_id, telco_id, code, name, status)
+		SELECT 'prg_other_9999', telco_id, 'OTHER', 'Other programme', 'ACTIVE'
+		FROM programmes WHERE programme_id = 'prg_sim_airtime01'`); err != nil {
+		t.Fatal(err)
+	}
+	seedJournal(t, f, "jrn_mine", "SIM_NG", "prg_sim_airtime01", "corr_x")
+	seedJournal(t, f, "jrn_other", "SIM_NG", "prg_other_9999", "corr_y")
+
+	admins := &repo.Admins{Pool: f.db.Admin}
+	if err := admins.CreateWithRole(context.Background(), "adm_fin", "fin_actor",
+		"portal-key-fin-scoped-1", "FINANCE", "programme:prg_sim_airtime01"); err != nil {
+		t.Fatal(err)
+	}
+	s := f.login(t, "portal-key-fin-scoped-1")
+
+	// The list shows only the in-scope journal.
+	status, body := f.callBody(t, &s, "GET", "/v1/portal/finance/ledger/journals", "")
+	if status != http.StatusOK {
+		t.Fatalf("journals list: %d", status)
+	}
+	var list struct {
+		Journals []struct {
+			JournalID string `json:"journal_id"`
+		} `json:"journals"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Journals) != 1 || list.Journals[0].JournalID != "jrn_mine" {
+		t.Fatalf("scoped ledger must show only the in-scope journal, got %+v", list.Journals)
+	}
+
+	// Tap-through to the balanced entries of the in-scope journal.
+	status, body = f.callBody(t, &s, "GET", "/v1/portal/finance/ledger/journals/jrn_mine", "")
+	if status != http.StatusOK {
+		t.Fatalf("tap-through: %d", status)
+	}
+	var detail struct {
+		Entries []struct {
+			Debit struct {
+				AmountMinor int64 `json:"amount_minor"`
+			} `json:"debit"`
+			Credit struct {
+				AmountMinor int64 `json:"amount_minor"`
+			} `json:"credit"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(body, &detail); err != nil {
+		t.Fatal(err)
+	}
+	var dr, cr int64
+	for _, e := range detail.Entries {
+		dr += e.Debit.AmountMinor
+		cr += e.Credit.AmountMinor
+	}
+	if len(detail.Entries) != 2 || dr != cr || dr != 100000 {
+		t.Fatalf("entries must balance (debit==credit==100000), got dr=%d cr=%d n=%d", dr, cr, len(detail.Entries))
+	}
+
+	// Another tenant's journal by id is a no-oracle 404, not a 200 leak.
+	if code := f.call(t, &s, "GET", "/v1/portal/finance/ledger/journals/jrn_other", ""); code != http.StatusNotFound {
+		t.Fatalf("cross-scope journal by id must be 404, got %d", code)
+	}
+}
+
 // M4c: the two-person guardrail re-arm through the portal — request (maker),
 // self-approve refused (409), distinct approver re-arms (200), programme
 // resumes, trip leaves the open list. The distinct-actor rule is the

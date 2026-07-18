@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.4.3  # EXT-1 — removed role-unaware legacy admin config API (portal is the sole config surface)
+  version: 0.4.4  # M4d — finance ledger browser (scope-bounded journals + entries)
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -319,6 +319,59 @@ paths:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
         "404":
           description: Trip not found, out of scope, or not in the required state (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/ledger/journals:
+    get:
+      operationId: portalLedgerJournals
+      summary: Browse ledger journals in the operator's scope (roles ADMIN, FINANCE)
+      description: >
+        Journals newest-first, bounded to the operator's telco/programme scope.
+        Filter by advance_id or correlation_id (the latter is the BC-6 lineage
+        of one business action across its journals).
+      parameters:
+        - { name: advance_id, in: query, required: false, schema: { type: string } }
+        - { name: correlation_id, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 500 } }
+      responses:
+        "200":
+          description: Journals
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [journals]
+                properties:
+                  journals:
+                    type: array
+                    items: { $ref: "#/components/schemas/JournalHeader" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/ledger/journals/{id}:
+    get:
+      operationId: portalLedgerJournal
+      summary: One journal with its balanced entries (tap-to-journal; roles ADMIN, FINANCE)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Journal header + entries
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [journal, entries]
+                properties:
+                  journal: { $ref: "#/components/schemas/JournalHeader" }
+                  entries:
+                    type: array
+                    items: { $ref: "#/components/schemas/JournalEntry" }
+        "404":
+          description: Journal not found or out of scope (no oracle)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -634,6 +687,28 @@ components:
         amount_minor: { type: integer, format: int64 }
         currency: { type: string, example: NGN }
         display: { type: string, example: "NGN 500,000.00" }
+    JournalHeader:
+      type: object
+      description: A ledger journal header (BC-6 correlation lineage; V2-LED).
+      required: [journal_id, event_type, telco_id, programme_id, correlation_id, accounting_date, posted_at]
+      properties:
+        journal_id: { type: string }
+        event_type: { type: string }
+        telco_id: { type: string }
+        programme_id: { type: string }
+        advance_id: { type: string }
+        correlation_id: { type: string }
+        accounting_date: { type: string, example: "2026-07-18" }
+        posted_at: { type: string, format: date-time }
+    JournalEntry:
+      type: object
+      description: One ledger entry (exactly one of debit/credit is non-zero).
+      required: [entry_id, account_code, debit, credit]
+      properties:
+        entry_id: { type: string }
+        account_code: { type: string }
+        debit: { $ref: "#/components/schemas/MoneyView" }
+        credit: { $ref: "#/components/schemas/MoneyView" }
     GuardrailTrip:
       type: object
       description: An open treasury guardrail trip (V1-TRE) awaiting two-person re-arm.

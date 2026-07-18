@@ -63,6 +63,10 @@ var routeRoles = map[string][]string{
 	"GET /v1/portal/risk/trips":                     {roleAdmin, roleRisk, roleFinance},
 	"POST /v1/portal/risk/trips/{id}/request-rearm": {roleAdmin, roleRisk},
 	"POST /v1/portal/risk/trips/{id}/approve-rearm": {roleAdmin, roleRisk},
+
+	// M4d finance workspace: ledger browser (read-only, scope-bounded).
+	"GET /v1/portal/finance/ledger/journals":      {roleAdmin, roleFinance},
+	"GET /v1/portal/finance/ledger/journals/{id}": {roleAdmin, roleFinance},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -98,6 +102,9 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/risk/trips", http.HandlerFunc(p.riskTrips))
 	p.mountRBAC(mux, "POST /v1/portal/risk/trips/{id}/request-rearm", http.HandlerFunc(p.riskRequestRearm))
 	p.mountRBAC(mux, "POST /v1/portal/risk/trips/{id}/approve-rearm", http.HandlerFunc(p.riskApproveRearm))
+
+	p.mountRBAC(mux, "GET /v1/portal/finance/ledger/journals", http.HandlerFunc(p.ledgerJournals))
+	p.mountRBAC(mux, "GET /v1/portal/finance/ledger/journals/{id}", http.HandlerFunc(p.ledgerJournal))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a
