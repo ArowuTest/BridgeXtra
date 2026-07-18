@@ -29,6 +29,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/collections"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/fulfilmentresolver"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/notify"
@@ -62,6 +63,8 @@ func main() {
 	replayRun := flag.String("replay", "",
 		"BC-4 operator job: replay-verify every decision of the given scoring run id and exit (exit 1 on any divergence); requires -telco")
 	replayTelco := flag.String("telco", "SIM_NG", "tenant for -replay")
+	delinquencyOnce := flag.Bool("delinquency", false,
+		"run delinquency classification once for every active telco/programme and exit (V2 §15 daily job)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -107,6 +110,40 @@ func main() {
 
 	if *reconOnce {
 		runRecon(ctx, log, appPool, appCfg, telcos)
+		return
+	}
+
+	if *delinquencyOnce {
+		col := collections.New(appPool, appCfg, ledger.New(appCfg), log)
+		ts, err := telcos.ListActive(ctx)
+		if err != nil {
+			log.Error("delinquency: list telcos", "err", err)
+			os.Exit(1)
+		}
+		programmes := repo.Programmes{}
+		for _, tc := range ts {
+			tctx := platform.WithTenant(ctx, tc.TelcoID)
+			var progs []entity.Programme
+			if err := repo.WithTenantTx(tctx, appPool, func(tx pgx.Tx) error {
+				var e error
+				progs, e = programmes.ListForTenant(tctx, tx)
+				return e
+			}); err != nil {
+				log.Error("delinquency: list programmes", "telco", tc.TelcoID, "err", err)
+				os.Exit(1)
+			}
+			for _, p := range progs {
+				if p.Status != entity.ProgrammeActive {
+					continue
+				}
+				changed, err := col.Classify(tctx, tc.TelcoID, p.ProgrammeID)
+				if err != nil {
+					log.Error("delinquency classification failed", "telco", tc.TelcoID, "programme", p.ProgrammeID, "err", err)
+					os.Exit(1)
+				}
+				fmt.Printf("delinquency %s/%s: %d bucket changes\n", tc.TelcoID, p.ProgrammeID, changed)
+			}
+		}
 		return
 	}
 
