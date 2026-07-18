@@ -6,10 +6,10 @@ package settlement_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -146,8 +146,8 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	err = set.VerifyReproducible(ctx, "SIM_NG", st.StatementID)
-	if err == nil || !strings.Contains(err.Error(), "NOT REPRODUCIBLE") {
-		t.Fatalf("tampered ledger must fail reproduction loudly, got %v", err)
+	if !errors.Is(err, settlement.ErrNotReproducible) {
+		t.Fatalf("tampered ledger must fail with ErrNotReproducible, got %v", err)
 	}
 }
 

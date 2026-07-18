@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -27,6 +28,13 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 )
+
+// ErrNotReproducible is the GENUINE finding: a FINAL statement's regenerated
+// hash disagrees with its pinned content hash (tampering, or a ledger/record
+// divergence). It is distinct from an operational error (DB, config) so a
+// caller can report "does not reproduce" WITHOUT conflating it with "couldn't
+// check" — a verification tool must never cry wolf on a transient failure.
+var ErrNotReproducible = errors.New("settlement: statement does not reproduce (ledger vs contractual record disagree)")
 
 type Service struct {
 	Pool   *pgxpool.Pool // tcp_app
@@ -244,7 +252,7 @@ func (s *Service) VerifyReproducible(ctx context.Context, telcoID, statementID s
 			return err
 		}
 		if hash != st.ContentHash {
-			return fmt.Errorf("STATEMENT NOT REPRODUCIBLE: regenerated %s != final %s — the ledger and the contractual record disagree", hash, st.ContentHash)
+			return fmt.Errorf("%w: statement %s regenerated %s != final %s", ErrNotReproducible, statementID, hash, st.ContentHash)
 		}
 		s.Log.Info("settlement statement reproduced bit-exactly", "statement", statementID)
 		return nil

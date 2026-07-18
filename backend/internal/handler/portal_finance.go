@@ -13,6 +13,7 @@ import (
 	"strconv"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 )
 
 type journalHeaderResponse struct {
@@ -254,10 +255,19 @@ func (p *Portal) financeSettlementVerify(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := p.Settlement.VerifyReproducible(r.Context(), d.TelcoID, d.StatementID); err != nil {
-		// Not a server error — the statement did not reproduce. Report the
-		// finding; log the detail server-side (no sensitive figures in it).
-		p.Log.Warn("settlement verification FAILED", "statement", d.StatementID, "actor", sess.Actor, "err", err)
-		writeJSON(w, http.StatusOK, map[string]any{"statement_id": d.StatementID, "verified": false})
+		if errors.Is(err, settlement.ErrNotReproducible) {
+			// A GENUINE finding — the statement did not reproduce. Report it as
+			// a result (the error message carries hashes, not amounts).
+			p.Log.Warn("settlement verification FAILED — does not reproduce",
+				"statement", d.StatementID, "actor", sess.Actor)
+			writeJSON(w, http.StatusOK, map[string]any{"statement_id": d.StatementID, "verified": false})
+			return
+		}
+		// An OPERATIONAL failure (DB, config) — NOT a verification result. Do not
+		// mislabel it verified:false; surface a real error so a transient blip is
+		// never mistaken for tampering (and vice versa).
+		p.Log.Error("settlement verify error (operational)", "statement", d.StatementID, "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "could not complete verification")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"statement_id": d.StatementID, "verified": true})

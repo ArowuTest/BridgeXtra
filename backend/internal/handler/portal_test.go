@@ -574,6 +574,32 @@ func TestM4D_Settlement_ScopeAndVerify(t *testing.T) {
 		t.Fatal("a genuine FINAL statement must verify (verified:true)")
 	}
 
+	// TAMPER: inject a journal into the statement's period AFTER finalisation
+	// (a late/edited posting). The recompute now disagrees with the pinned
+	// hash — verify must flip to verified:false (a RESULT, reaching the
+	// operator; not a 500).
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id, posted_at)
+		VALUES ('jrn_tamper','jrn_tamper:k','ADVANCE_ISSUED','SIM_NG','prg_sim_airtime01','adv_t','corr_t','2026-01-03T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO journal_entries (entry_id, journal_id, account_code, debit_minor, credit_minor, currency)
+		VALUES ('et_d','jrn_tamper','SUBSCRIBER_RECEIVABLE',5000,0,'NGN'),
+		       ('et_c','jrn_tamper','FEE_INCOME',0,5000,'NGN')`); err != nil {
+		t.Fatal(err)
+	}
+	status, body = f.callBody(t, &s, "POST", "/v1/portal/finance/settlements/"+st.StatementID+"/verify", "")
+	if status != http.StatusOK {
+		t.Fatalf("verify after tamper must still be 200 with a result: %d", status)
+	}
+	if err := json.Unmarshal(body, &vr); err != nil {
+		t.Fatal(err)
+	}
+	if vr.Verified {
+		t.Fatal("a tampered (post-finalisation ledger change) statement must NOT verify (verified:false)")
+	}
+
 	// Out-of-scope operator: no listing, and 404 on read + verify (no oracle).
 	os := f.login(t, "portal-key-fin-other-1")
 	_, body = f.callBody(t, &os, "GET", "/v1/portal/finance/settlements", "")
