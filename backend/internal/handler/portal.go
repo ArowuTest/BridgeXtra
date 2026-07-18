@@ -17,8 +17,11 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
 const (
@@ -37,6 +40,8 @@ type Portal struct {
 	Admins   *repo.Admins
 	Sessions *repo.PortalSessions
 	Config   *configsvc.Service // ADMIN config lifecycle (M4b UI sits on this)
+	Treasury *treasury.Service  // M4c guardrail re-arm actions (tenant tx)
+	ReadPool *pgxpool.Pool      // M4c operator cross-tenant reads (worker/BYPASSRLS)
 	Log      *slog.Logger
 }
 
@@ -52,6 +57,12 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/config/{id}/submit":   {roleAdmin},
 	"POST /v1/portal/config/{id}/approve":  {roleAdmin},
 	"POST /v1/portal/config/{id}/activate": {roleAdmin},
+
+	// M4c risk workspace: reads for oversight roles; re-arm actions for the
+	// risk actioners (two-person rule schema-enforced regardless).
+	"GET /v1/portal/risk/trips":                     {roleAdmin, roleRisk, roleFinance},
+	"POST /v1/portal/risk/trips/{id}/request-rearm": {roleAdmin, roleRisk},
+	"POST /v1/portal/risk/trips/{id}/approve-rearm": {roleAdmin, roleRisk},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -83,6 +94,10 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/config/{id}/submit", p.configLifecycle("submit"))
 	p.mountRBAC(mux, "POST /v1/portal/config/{id}/approve", p.configLifecycle("approve"))
 	p.mountRBAC(mux, "POST /v1/portal/config/{id}/activate", p.configLifecycle("activate"))
+
+	p.mountRBAC(mux, "GET /v1/portal/risk/trips", http.HandlerFunc(p.riskTrips))
+	p.mountRBAC(mux, "POST /v1/portal/risk/trips/{id}/request-rearm", http.HandlerFunc(p.riskRequestRearm))
+	p.mountRBAC(mux, "POST /v1/portal/risk/trips/{id}/approve-rearm", http.HandlerFunc(p.riskApproveRearm))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a

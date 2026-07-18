@@ -13,7 +13,8 @@ export type NavItem = {
 export const NAV: NavItem[] = [
   { href: "/dashboard", label: "Overview", roles: ["ADMIN", "RISK", "FINANCE", "OPS", "SUPPORT"] },
   { href: "/config", label: "Configuration", roles: ["ADMIN", "RISK", "FINANCE"] },
-  // M4c–M4e slices mount here: Risk, Finance, Ops, Support workspaces.
+  { href: "/risk", label: "Risk", roles: ["ADMIN", "RISK", "FINANCE"] },
+  // M4d–M4e slices mount here: Finance, Ops, Support workspaces.
 ];
 
 export function navFor(role: Session["role"]): NavItem[] {

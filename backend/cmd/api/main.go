@@ -24,6 +24,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 	"github.com/ArowuTest/telco-credit-platform/backend/migrations"
 )
 
@@ -99,6 +100,10 @@ func main() {
 		Admins:   &repo.Admins{Pool: appPool},
 		Sessions: &repo.PortalSessions{Pool: appPool},
 		Config:   configsvc.New(workerPool),
+		// Re-arm actions run as the app role in a tenant tx; operator reads span
+		// telcos on the worker pool (BYPASSRLS) bounded by the operator's scope.
+		Treasury: treasury.New(appPool, configsvc.New(appPool), log),
+		ReadPool: workerPool,
 		Log:      log,
 	}
 	portal.Mount(mux)

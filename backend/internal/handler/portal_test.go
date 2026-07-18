@@ -21,6 +21,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
 type portalFixture struct {
@@ -58,6 +59,8 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Admins:   &repo.Admins{Pool: db.App},
 		Sessions: &repo.PortalSessions{Pool: db.App},
 		Config:   configsvc.New(db.Worker),
+		Treasury: treasury.New(db.App, configsvc.New(db.App), slog.Default()),
+		ReadPool: db.Worker,
 		Log:      slog.Default(),
 	}
 	mux := http.NewServeMux()
@@ -292,6 +295,114 @@ func TestM4A_MakerChecker_ThroughPortalSessions(t *testing.T) {
 	}
 	if code := f.call(t, &approver, "POST", "/v1/portal/config/"+cv.ConfigVersionID+"/activate", ""); code != http.StatusOK {
 		t.Fatalf("activate: %d", code)
+	}
+}
+
+// seedTrip inserts an open guardrail trip and suspends its programme (the real
+// state after a breach), returning the trip id. Uses the admin pool.
+func seedTrip(t *testing.T, f *portalFixture, tripID, telcoID, programmeID string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO guardrail_trips (trip_id, telco_id, programme_id, guardrail, measured_minor, limit_minor, currency)
+		VALUES ($1,$2,$3,'DAILY_DISBURSED',600000000,500000000,'NGN')`, tripID, telcoID, programmeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Admin.Exec(ctx,
+		`UPDATE programmes SET status='SUSPENDED' WHERE programme_id=$1`, programmeID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// M4c: the two-person guardrail re-arm through the portal — request (maker),
+// self-approve refused (409), distinct approver re-arms (200), programme
+// resumes, trip leaves the open list. The distinct-actor rule is the
+// schema CHECK; this proves it holds when driven by real session identities.
+func TestM4C_GuardrailRearm_TwoPersonThroughPortal(t *testing.T) {
+	f := newPortalFixture(t, "portal_rearm")
+	seedTrip(t, f, "trp_test_1", "SIM_NG", "prg_sim_airtime01")
+	maker := f.login(t, roleKeys["RISK"])
+	approver := f.login(t, roleKeys["ADMIN"]) // '*' scope, distinct actor
+
+	// Maker sees the open trip.
+	status, body := f.callBody(t, &maker, "GET", "/v1/portal/risk/trips", "")
+	if status != http.StatusOK {
+		t.Fatalf("list trips: %d", status)
+	}
+	var list struct {
+		Trips []struct {
+			TripID string `json:"trip_id"`
+			State  string `json:"state"`
+		} `json:"trips"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Trips) != 1 || list.Trips[0].TripID != "trp_test_1" {
+		t.Fatalf("expected the seeded open trip, got %+v", list.Trips)
+	}
+
+	// Maker requests re-arm.
+	if code := f.call(t, &maker, "POST", "/v1/portal/risk/trips/trp_test_1/request-rearm",
+		`{"reason":"surge subsided, verified"}`); code != http.StatusOK {
+		t.Fatalf("request-rearm: %d", code)
+	}
+	// Maker cannot approve their own request — two-person, 409.
+	if code := f.call(t, &maker, "POST", "/v1/portal/risk/trips/trp_test_1/approve-rearm", ""); code != http.StatusConflict {
+		t.Fatalf("self-approve must be 409, got %d", code)
+	}
+	// A distinct actor approves — re-armed.
+	if code := f.call(t, &approver, "POST", "/v1/portal/risk/trips/trp_test_1/approve-rearm", ""); code != http.StatusOK {
+		t.Fatalf("distinct approve-rearm: %d", code)
+	}
+	// The trip has left the open list and the programme resumed.
+	_, body = f.callBody(t, &maker, "GET", "/v1/portal/risk/trips", "")
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Trips) != 0 {
+		t.Fatalf("re-armed trip must leave the open list, got %+v", list.Trips)
+	}
+	var pstatus string
+	if err := f.db.Admin.QueryRow(context.Background(),
+		`SELECT status FROM programmes WHERE programme_id='prg_sim_airtime01'`).Scan(&pstatus); err != nil {
+		t.Fatal(err)
+	}
+	if pstatus != "ACTIVE" {
+		t.Fatalf("programme must resume to ACTIVE after re-arm, got %s", pstatus)
+	}
+}
+
+// M4c scope: a programme-scoped operator for a DIFFERENT programme must not see
+// or act on this trip — cross-scope reads/actions return a no-oracle 404.
+func TestM4C_TripScope_CrossTenantHidden(t *testing.T) {
+	f := newPortalFixture(t, "portal_trip_scope")
+	seedTrip(t, f, "trp_test_2", "SIM_NG", "prg_sim_airtime01")
+	admins := &repo.Admins{Pool: f.db.Admin}
+	if err := admins.CreateWithRole(context.Background(), "adm_otherprog", "other_prog_risk",
+		"portal-key-otherprog-1", "RISK", "programme:prg_other_9999"); err != nil {
+		t.Fatal(err)
+	}
+	s := f.login(t, "portal-key-otherprog-1")
+
+	// The trip is invisible in the scoped list.
+	status, body := f.callBody(t, &s, "GET", "/v1/portal/risk/trips", "")
+	if status != http.StatusOK {
+		t.Fatalf("list: %d", status)
+	}
+	var list struct {
+		Trips []struct{ TripID string } `json:"trips"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Trips) != 0 {
+		t.Fatalf("out-of-scope trip must not appear, got %+v", list.Trips)
+	}
+	// And acting on it by id returns the same 404 as a nonexistent trip.
+	if code := f.call(t, &s, "POST", "/v1/portal/risk/trips/trp_test_2/request-rearm",
+		`{"reason":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("cross-scope action must be 404 (no oracle), got %d", code)
 	}
 }
 

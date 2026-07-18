@@ -42,6 +42,33 @@ func (s PortalSession) PermitsWrite(recordScope string) bool {
 	return s.Scope == "*" || s.Scope == recordScope
 }
 
+// PermitsTenant reports whether this session covers a tenant record that is
+// scoped by BOTH a telco and a programme (guardrail trips, advances,
+// settlements — the operator-read surfaces from M4c on). A '*' operator sees
+// all; a telco- or programme-scoped operator sees only matching rows; a
+// 'global'-only operator has no tenant authority and sees none.
+func (s PortalSession) PermitsTenant(telcoID, programmeID string) bool {
+	return s.Scope == "*" || s.Scope == "telco:"+telcoID || s.Scope == "programme:"+programmeID
+}
+
+// TenantFilter translates the session scope into (telco, programme) SQL bounds
+// for operator reads, plus authority: authority=false means the operator has
+// no tenant scope at all (e.g. 'global') and the caller must return an empty
+// set rather than query. Bounds are mutually exclusive; '*' yields empty
+// bounds with authority=true (sees all).
+func (s PortalSession) TenantFilter() (telco, programme string, authority bool) {
+	switch {
+	case s.Scope == "*":
+		return "", "", true
+	case len(s.Scope) > 6 && s.Scope[:6] == "telco:":
+		return s.Scope[6:], "", true
+	case len(s.Scope) > 10 && s.Scope[:10] == "programme:":
+		return "", s.Scope[10:], true
+	default:
+		return "", "", false // 'global' or unrecognised: no tenant authority
+	}
+}
+
 // ResolveCredentialWithRole authenticates an admin key and returns identity,
 // role, and authorization scope (the RBAC inputs).
 func (r *Admins) ResolveCredentialWithRole(ctx context.Context, apiKey string) (actor, role, scope string, err error) {

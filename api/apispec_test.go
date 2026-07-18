@@ -53,6 +53,10 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/config/{id}/submit":   true,
 		"/v1/portal/config/{id}/approve":  true,
 		"/v1/portal/config/{id}/activate": true,
+		// M4c risk workspace (guardrail trips + two-person re-arm)
+		"/v1/portal/risk/trips":                    true,
+		"/v1/portal/risk/trips/{id}/request-rearm": true,
+		"/v1/portal/risk/trips/{id}/approve-rearm": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

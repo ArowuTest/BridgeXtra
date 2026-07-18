@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.4.1  # M4b — portal config governance reads (overview/versions/by-id)
+  version: 0.4.2  # M4c — portal risk workspace (guardrail trips + two-person re-arm)
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -249,6 +249,79 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/LifecycleAck" }
+  /v1/portal/risk/trips:
+    get:
+      operationId: portalRiskTrips
+      summary: List open guardrail trips in the operator's scope (roles ADMIN, RISK, FINANCE)
+      description: >
+        Trips still holding a programme (state != REARMED), bounded to the
+        operator's telco/programme scope. A platform admin ('*') sees all; a
+        'global'-only operator sees none.
+      responses:
+        "200":
+          description: Open trips
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [trips]
+                properties:
+                  trips:
+                    type: array
+                    items: { $ref: "#/components/schemas/GuardrailTrip" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/risk/trips/{id}/request-rearm:
+    post:
+      operationId: portalRiskRequestRearm
+      summary: Request re-arm of a tripped guardrail (maker step; roles ADMIN, RISK)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Re-arm requested
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RearmAck" }
+        "404":
+          description: Trip not found, out of scope, or not in the required state (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/risk/trips/{id}/approve-rearm:
+    post:
+      operationId: portalRiskApproveRearm
+      summary: Approve a re-arm (checker step, distinct actor schema-enforced; roles ADMIN, RISK)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Re-armed; programme resumes when no other guardrail holds it
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RearmAck" }
+        "409":
+          description: Two-person violation (approver == requester)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          description: Trip not found, out of scope, or not in the required state (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth
@@ -678,6 +751,35 @@ components:
       properties:
         config_version_id: { type: string }
         step: { type: string }
+    MoneyView:
+      type: object
+      description: Money as integer minor units plus a server-formatted display string (the UI never computes money — BC-1).
+      required: [amount_minor, currency, display]
+      properties:
+        amount_minor: { type: integer, format: int64 }
+        currency: { type: string, example: NGN }
+        display: { type: string, example: "NGN 500,000.00" }
+    GuardrailTrip:
+      type: object
+      description: An open treasury guardrail trip (V1-TRE) awaiting two-person re-arm.
+      required: [trip_id, telco_id, programme_id, guardrail, measured, limit, state, tripped_at]
+      properties:
+        trip_id: { type: string }
+        telco_id: { type: string }
+        programme_id: { type: string }
+        guardrail: { type: string, enum: [DAILY_DISBURSED, OPEN_EXPOSURE] }
+        measured: { $ref: "#/components/schemas/MoneyView" }
+        limit: { $ref: "#/components/schemas/MoneyView" }
+        state: { type: string, enum: [TRIPPED, REARM_REQUESTED, REARMED] }
+        tripped_at: { type: string, format: date-time }
+        rearm_requested_by: { type: string }
+        rearm_approved_by: { type: string }
+    RearmAck:
+      type: object
+      required: [trip_id, state]
+      properties:
+        trip_id: { type: string }
+        state: { type: string, enum: [REARM_REQUESTED, REARMED] }
     ConfigSummary:
       type: object
       description: Per-(domain,scope) governance overview row.

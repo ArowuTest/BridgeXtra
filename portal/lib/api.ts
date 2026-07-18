@@ -108,3 +108,32 @@ export function configDraft(
 export function configLifecycle(id: string, step: "submit" | "approve" | "activate"): Promise<unknown> {
   return request("POST", `/v1/portal/config/${id}/${step}`);
 }
+
+// --- M4c risk workspace ---
+
+export type MoneyView = { amount_minor: number; currency: string; display: string };
+
+export type GuardrailTrip = {
+  trip_id: string;
+  telco_id: string;
+  programme_id: string;
+  guardrail: "DAILY_DISBURSED" | "OPEN_EXPOSURE";
+  measured: MoneyView;
+  limit: MoneyView;
+  state: "TRIPPED" | "REARM_REQUESTED" | "REARMED";
+  tripped_at: string;
+  rearm_requested_by?: string;
+  rearm_approved_by?: string;
+};
+
+export function riskTrips(): Promise<{ trips: GuardrailTrip[] }> {
+  return request("GET", "/v1/portal/risk/trips");
+}
+
+export function riskRequestRearm(tripId: string, reason: string): Promise<unknown> {
+  return request("POST", `/v1/portal/risk/trips/${tripId}/request-rearm`, { reason });
+}
+
+export function riskApproveRearm(tripId: string): Promise<unknown> {
+  return request("POST", `/v1/portal/risk/trips/${tripId}/approve-rearm`);
+}
