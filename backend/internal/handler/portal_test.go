@@ -58,7 +58,6 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Sessions: &repo.PortalSessions{Pool: db.App},
 		Config:   configsvc.New(db.Worker),
 		Log:      slog.Default(),
-		Secure:   false, // httptest is plain http
 	}
 	mux := http.NewServeMux()
 	p.Mount(mux)
@@ -93,8 +92,8 @@ func (f *portalFixture) login(t *testing.T, key string) session {
 	}
 	for _, c := range resp.Cookies() {
 		if c.Name == "bx_portal_session" {
-			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode {
-				t.Fatalf("session cookie must be httpOnly SameSite=Strict: %+v", c)
+			if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode {
+				t.Fatalf("session cookie must be httpOnly Secure SameSite=Strict: %+v", c)
 			}
 			return session{cookie: c, csrf: lr.CSRFToken, actor: lr.Actor}
 		}

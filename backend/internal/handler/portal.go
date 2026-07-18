@@ -37,9 +37,6 @@ type Portal struct {
 	Sessions *repo.PortalSessions
 	Config   *configsvc.Service // ADMIN config lifecycle (M4b UI sits on this)
 	Log      *slog.Logger
-	// Secure controls the cookie Secure flag (true in production; the local
-	// dev server runs plain http).
-	Secure bool
 }
 
 // routeRoles is THE authorization map: method+pattern -> allowed roles.
@@ -171,9 +168,12 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 		return
 	}
+	// Secure is unconditional — a cookie-security attribute must not be
+	// env-disarmable (browsers accept Secure cookies on localhost, so local
+	// dev over plain http still works).
 	http.SetCookie(w, &http.Cookie{
 		Name: portalCookie, Value: token, Path: "/v1/portal",
-		HttpOnly: true, Secure: p.Secure, SameSite: http.SameSiteStrictMode,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 		MaxAge: int(sessionTTL.Seconds()),
 	})
 	p.Log.Info("portal login", "actor", actor, "role", role)
@@ -189,7 +189,7 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name: portalCookie, Value: "", Path: "/v1/portal",
-		HttpOnly: true, Secure: p.Secure, SameSite: http.SameSiteStrictMode, MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "signed_out"})
 }

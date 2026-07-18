@@ -100,7 +100,6 @@ func main() {
 		Sessions: &repo.PortalSessions{Pool: appPool},
 		Config:   configsvc.New(workerPool),
 		Log:      log,
-		Secure:   env("TCP_PORTAL_COOKIE_SECURE", "true") == "true",
 	}
 	portal.Mount(mux)
 
