@@ -33,6 +33,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/fulfilmentresolver"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/notify"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/outboxdispatch"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recon"
@@ -65,6 +66,8 @@ func main() {
 	replayTelco := flag.String("telco", "SIM_NG", "tenant for -replay")
 	delinquencyOnce := flag.Bool("delinquency", false,
 		"run delinquency classification once for every active telco/programme and exit (V2 §15 daily job)")
+	breaksOnce := flag.Bool("breaks", false,
+		"report unresolved reconciliation breaks older than the governed aging threshold and exit 1 if any (V2-REC-012)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -110,6 +113,49 @@ func main() {
 
 	if *reconOnce {
 		runRecon(ctx, log, appPool, appCfg, telcos)
+		return
+	}
+
+	if *breaksOnce {
+		opsSvc := ops.New(appPool, appCfg, log)
+		ts, err := telcos.ListActive(ctx)
+		if err != nil {
+			log.Error("breaks: list telcos", "err", err)
+			os.Exit(1)
+		}
+		programmes := repo.Programmes{}
+		total := 0
+		for _, tc := range ts {
+			tctx := platform.WithTenant(ctx, tc.TelcoID)
+			var progs []entity.Programme
+			if err := repo.WithTenantTx(tctx, appPool, func(tx pgx.Tx) error {
+				var e error
+				progs, e = programmes.ListForTenant(tctx, tx)
+				return e
+			}); err != nil {
+				log.Error("breaks: list programmes", "telco", tc.TelcoID, "err", err)
+				os.Exit(1)
+			}
+			for _, p := range progs {
+				if p.Status != entity.ProgrammeActive {
+					continue
+				}
+				aged, err := opsSvc.AgedBreaks(tctx, tc.TelcoID, p.ProgrammeID)
+				if err != nil {
+					log.Error("aged-breaks query failed", "telco", tc.TelcoID, "programme", p.ProgrammeID, "err", err)
+					os.Exit(1)
+				}
+				for _, b := range aged {
+					fmt.Printf("AGED BREAK %s: %s assigned=%q age=%dh\n", b.ReconItemID, b.Status, b.AssignedTo, b.AgeHours)
+				}
+				total += len(aged)
+			}
+		}
+		if total > 0 {
+			log.Error("aged reconciliation breaks demand attention", "count", total)
+			os.Exit(1)
+		}
+		fmt.Println("no aged reconciliation breaks")
 		return
 	}
 

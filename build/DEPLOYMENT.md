@@ -32,8 +32,11 @@ store) — never in this repo (V2-SEC-005).
 ## Operator jobs (Render shell or any host with the DSNs)
 
 ```
-./worker -invariants   # BC-3 sweep: exit 1 on any violation
-./worker -recon        # fulfilment reconciliation: exit 1 on any break
+./worker -invariants         # BC-3 sweep: exit 1 on any violation
+./worker -recon              # fulfilment reconciliation: exit 1 on any break
+./worker -delinquency        # daily bucket classification (V2 §15)
+./worker -breaks             # aged unresolved breaks: exit 1 if any (V2-REC-012)
+./worker -replay <run> -telco <id>  # BC-4: replay-verify a scoring run
 ```
 
 ## Live verification (17 Jul 2026, first deploy)
