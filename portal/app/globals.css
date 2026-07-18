@@ -114,3 +114,23 @@ table.data th, table.data td {
   border-bottom: 1px solid var(--line);
 }
 table.data th { color: var(--muted); font-weight: 500; font-size: 13px; }
+
+button.small { padding: 3px 10px; font-size: 13px; }
+
+.state {
+  display: inline-block;
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.state-ACTIVE { color: var(--accent); border-color: var(--accent-dim); }
+.state-DRAFT { color: var(--text); }
+.state-SUBMITTED { color: var(--warn); border-color: var(--warn); }
+.state-APPROVED { color: var(--warn); }
+.state-REJECTED, .state-ROLLED_BACK { color: var(--danger); }
+
+textarea { resize: vertical; }

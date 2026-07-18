@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.4.0  # M4a — portal session auth + deny-by-default RBAC
+  version: 0.4.1  # M4b — portal config governance reads (overview/versions/by-id)
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -115,6 +115,69 @@ paths:
               schema: { $ref: "#/components/schemas/ConfigVersion" }
         "403":
           description: Role not permitted (deny-by-default RBAC)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/overview:
+    get:
+      operationId: portalConfigOverview
+      summary: Per-(domain,scope) governance summary (roles ADMIN, RISK, FINANCE)
+      responses:
+        "200":
+          description: One row per (domain, scope) with active version and pending pipeline count
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [domains]
+                properties:
+                  domains:
+                    type: array
+                    items: { $ref: "#/components/schemas/ConfigSummary" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/versions:
+    get:
+      operationId: portalConfigVersions
+      summary: List config versions newest-first (roles ADMIN, RISK, FINANCE)
+      parameters:
+        - { name: domain, in: query, required: false, schema: { type: string } }
+        - { name: scope, in: query, required: false, schema: { type: string } }
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 200 } }
+      responses:
+        "200":
+          description: Versions (limit clamped server-side)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [versions]
+                properties:
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/ConfigVersion" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/{id}:
+    get:
+      operationId: portalConfigGet
+      summary: Read one config version in any lifecycle state (roles ADMIN, RISK, FINANCE)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigVersion" }
+        "404":
+          description: Unknown version id
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
@@ -615,6 +678,16 @@ components:
       properties:
         config_version_id: { type: string }
         step: { type: string }
+    ConfigSummary:
+      type: object
+      description: Per-(domain,scope) governance overview row.
+      required: [domain, scope, active_version_no, pending_count]
+      properties:
+        domain: { type: string }
+        scope: { type: string }
+        active_version_no: { type: integer, description: "0 = nothing active" }
+        active_since: { type: string, format: date-time }
+        pending_count: { type: integer, description: "DRAFT + SUBMITTED + APPROVED versions" }
     ConfigVersion:
       type: object
       description: Immutable, effective-dated configuration version (V2-CFG-004).

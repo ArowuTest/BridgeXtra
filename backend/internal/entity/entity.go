@@ -82,6 +82,16 @@ type ConfigVersion struct {
 	UpdatedAt       time.Time
 }
 
+// ConfigSummary is the per-(domain,scope) governance overview: the version
+// currently in force plus how many versions sit in the pre-active pipeline.
+type ConfigSummary struct {
+	Domain          string
+	Scope           string
+	ActiveVersionNo int // 0 = nothing active
+	ActiveSince     *time.Time
+	PendingCount    int // DRAFT + SUBMITTED + APPROVED
+}
+
 // ---------------------------------------------------------------------------
 // Idempotency (V2-API-003)
 // ---------------------------------------------------------------------------

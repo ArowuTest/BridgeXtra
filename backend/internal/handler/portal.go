@@ -14,6 +14,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
@@ -44,6 +45,9 @@ type Portal struct {
 var routeRoles = map[string][]string{
 	"GET /v1/portal/me":                    {roleAdmin, roleRisk, roleFinance, roleOps, roleSupport},
 	"GET /v1/portal/config/active":         {roleAdmin, roleRisk, roleFinance},
+	"GET /v1/portal/config/overview":       {roleAdmin, roleRisk, roleFinance},
+	"GET /v1/portal/config/versions":       {roleAdmin, roleRisk, roleFinance},
+	"GET /v1/portal/config/{id}":           {roleAdmin, roleRisk, roleFinance},
 	"POST /v1/portal/config/drafts":        {roleAdmin},
 	"POST /v1/portal/config/{id}/submit":   {roleAdmin},
 	"POST /v1/portal/config/{id}/approve":  {roleAdmin},
@@ -58,6 +62,9 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 
 	mux.Handle("GET /v1/portal/me", p.rbac("GET /v1/portal/me", http.HandlerFunc(p.me)))
 	mux.Handle("GET /v1/portal/config/active", p.rbac("GET /v1/portal/config/active", http.HandlerFunc(p.configActive)))
+	mux.Handle("GET /v1/portal/config/overview", p.rbac("GET /v1/portal/config/overview", http.HandlerFunc(p.configOverview)))
+	mux.Handle("GET /v1/portal/config/versions", p.rbac("GET /v1/portal/config/versions", http.HandlerFunc(p.configVersions)))
+	mux.Handle("GET /v1/portal/config/{id}", p.rbac("GET /v1/portal/config/{id}", http.HandlerFunc(p.configGet)))
 	mux.Handle("POST /v1/portal/config/drafts", p.rbac("POST /v1/portal/config/drafts", http.HandlerFunc(p.configDraft)))
 	mux.Handle("POST /v1/portal/config/{id}/submit", p.rbac("POST /v1/portal/config/{id}/submit", p.configLifecycle("submit")))
 	mux.Handle("POST /v1/portal/config/{id}/approve", p.rbac("POST /v1/portal/config/{id}/approve", p.configLifecycle("approve")))
@@ -247,6 +254,63 @@ func (p *Portal) configActive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cv, err := p.Config.ActiveAt(r.Context(), domain, scope, time.Now().UTC())
+	if err != nil {
+		p.writeConfigErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toConfigResponse(cv))
+}
+
+type configSummaryResponse struct {
+	Domain          string     `json:"domain"`
+	Scope           string     `json:"scope"`
+	ActiveVersionNo int        `json:"active_version_no"`
+	ActiveSince     *time.Time `json:"active_since,omitempty"`
+	PendingCount    int        `json:"pending_count"`
+}
+
+func (p *Portal) configOverview(w http.ResponseWriter, r *http.Request) {
+	ss, err := p.Config.Overview(r.Context())
+	if err != nil {
+		p.writeConfigErr(w, err)
+		return
+	}
+	out := make([]configSummaryResponse, 0, len(ss))
+	for _, s := range ss {
+		out = append(out, configSummaryResponse{
+			Domain: s.Domain, Scope: s.Scope,
+			ActiveVersionNo: s.ActiveVersionNo, ActiveSince: s.ActiveSince,
+			PendingCount: s.PendingCount,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"domains": out})
+}
+
+func (p *Portal) configVersions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit := 0
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "limit must be a positive integer")
+			return
+		}
+		limit = n
+	}
+	vs, err := p.Config.ListVersions(r.Context(), q.Get("domain"), q.Get("scope"), limit)
+	if err != nil {
+		p.writeConfigErr(w, err)
+		return
+	}
+	out := make([]configVersionResponse, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, toConfigResponse(v))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"versions": out})
+}
+
+func (p *Portal) configGet(w http.ResponseWriter, r *http.Request) {
+	cv, err := p.Config.GetVersion(r.Context(), r.PathValue("id"))
 	if err != nil {
 		p.writeConfigErr(w, err)
 		return

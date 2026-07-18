@@ -59,7 +59,51 @@ export function me(): Promise<Session> {
   return request<Session>("GET", "/v1/portal/me");
 }
 
-export function configActive(domain: string, scope: string): Promise<unknown> {
+export type ConfigVersion = {
+  config_version_id: string;
+  domain: string;
+  scope: string;
+  version_no: number;
+  state: "DRAFT" | "SUBMITTED" | "APPROVED" | "ACTIVE" | "SUPERSEDED" | "ROLLED_BACK" | "REJECTED";
+  content: unknown;
+  content_hash: string;
+  effective_from?: string;
+  created_by: string;
+  approved_by?: string;
+  reason: string;
+};
+
+export type ConfigSummary = {
+  domain: string;
+  scope: string;
+  active_version_no: number;
+  active_since?: string;
+  pending_count: number;
+};
+
+export function configActive(domain: string, scope: string): Promise<ConfigVersion> {
   const q = new URLSearchParams({ domain, scope });
   return request("GET", `/v1/portal/config/active?${q}`);
+}
+
+export function configOverview(): Promise<{ domains: ConfigSummary[] }> {
+  return request("GET", "/v1/portal/config/overview");
+}
+
+export function configVersions(domain: string, scope: string): Promise<{ versions: ConfigVersion[] }> {
+  const q = new URLSearchParams({ domain, scope });
+  return request("GET", `/v1/portal/config/versions?${q}`);
+}
+
+export function configDraft(
+  domain: string,
+  scope: string,
+  reason: string,
+  content: unknown,
+): Promise<ConfigVersion> {
+  return request("POST", "/v1/portal/config/drafts", { domain, scope, reason, content });
+}
+
+export function configLifecycle(id: string, step: "submit" | "approve" | "activate"): Promise<unknown> {
+  return request("POST", `/v1/portal/config/${id}/${step}`);
 }

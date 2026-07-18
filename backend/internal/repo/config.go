@@ -114,6 +114,59 @@ func (ConfigVersions) GetActiveAt(ctx context.Context, tx pgx.Tx, domain, scope 
 		domain, scope, t))
 }
 
+// List returns versions newest-first, optionally filtered by domain and/or
+// scope (” = no filter). Bounded by limit (caller validates).
+func (ConfigVersions) List(ctx context.Context, tx pgx.Tx, domain, scope string, limit int) ([]entity.ConfigVersion, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT config_version_id, domain, scope, version_no, state, content, content_hash,
+		       effective_from, effective_to, created_by, COALESCE(approved_by,''), reason,
+		       created_at, updated_at
+		FROM config_versions
+		WHERE ($1 = '' OR domain = $1) AND ($2 = '' OR scope = $2)
+		ORDER BY domain, scope, version_no DESC
+		LIMIT $3`, domain, scope, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []entity.ConfigVersion
+	for rows.Next() {
+		c, err := scanConfig(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// Overview aggregates one row per (domain, scope): the currently ACTIVE
+// version (if any) and how many versions sit in the pre-active pipeline.
+// Set-based — one statement regardless of domain count.
+func (ConfigVersions) Overview(ctx context.Context, tx pgx.Tx) ([]entity.ConfigSummary, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT domain, scope,
+		       COALESCE(MAX(version_no) FILTER (WHERE state = 'ACTIVE'), 0),
+		       MAX(effective_from) FILTER (WHERE state = 'ACTIVE'),
+		       COUNT(*) FILTER (WHERE state IN ('DRAFT','SUBMITTED','APPROVED'))
+		FROM config_versions
+		GROUP BY domain, scope
+		ORDER BY domain, scope`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []entity.ConfigSummary
+	for rows.Next() {
+		var s entity.ConfigSummary
+		if err := rows.Scan(&s.Domain, &s.Scope, &s.ActiveVersionNo, &s.ActiveSince, &s.PendingCount); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 func scanConfig(row pgx.Row) (entity.ConfigVersion, error) {
 	var c entity.ConfigVersion
 	err := row.Scan(&c.ConfigVersionID, &c.Domain, &c.Scope, &c.VersionNo, &c.State,

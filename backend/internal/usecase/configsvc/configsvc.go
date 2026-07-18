@@ -155,6 +155,32 @@ func (s *Service) GetVersion(ctx context.Context, id string) (entity.ConfigVersi
 	return out, err
 }
 
+// ListVersions returns versions newest-first, optionally filtered. The limit
+// is clamped server-side — a caller can never request an unbounded scan.
+func (s *Service) ListVersions(ctx context.Context, domain, scope string, limit int) ([]entity.ConfigVersion, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var out []entity.ConfigVersion
+	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		vs, err := s.configs.List(ctx, tx, domain, scope, limit)
+		out = vs
+		return err
+	})
+	return out, err
+}
+
+// Overview returns the per-(domain,scope) governance summary.
+func (s *Service) Overview(ctx context.Context) ([]entity.ConfigSummary, error) {
+	var out []entity.ConfigSummary
+	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		ss, err := s.configs.Overview(ctx, tx)
+		out = ss
+		return err
+	})
+	return out, err
+}
+
 func (s *Service) ActiveAt(ctx context.Context, domain, scope string, t time.Time) (entity.ConfigVersion, error) {
 	var out entity.ConfigVersion
 	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {
