@@ -23,6 +23,7 @@ const (
 	AdvClosed             AdvanceState = "CLOSED"
 	AdvFulfilmentFailed   AdvanceState = "FULFILMENT_FAILED"
 	AdvDeclined           AdvanceState = "DECLINED"
+	AdvWrittenOff         AdvanceState = "WRITTEN_OFF" // M3: loss crystallised (maker-checker)
 )
 
 // advanceTransitions is THE transition table (V2-ADV-008: only permitted
@@ -33,10 +34,11 @@ var advanceTransitions = map[AdvanceState][]AdvanceState{
 	AdvExposureReserved:   {AdvPendingFulfilment, AdvDeclined},
 	AdvPendingFulfilment:  {AdvActive, AdvFulfilmentFailed, AdvFulfilmentUnknown},
 	AdvFulfilmentUnknown:  {AdvActive, AdvFulfilmentFailed},
-	AdvActive:             {AdvPartiallyRecovered, AdvClosed},
-	AdvPartiallyRecovered: {AdvPartiallyRecovered, AdvClosed},
-	// CLOSED / FULFILMENT_FAILED / DECLINED are terminal in M1 (controlled
-	// reversal workflows arrive at M3).
+	AdvActive:             {AdvPartiallyRecovered, AdvClosed, AdvWrittenOff},
+	AdvPartiallyRecovered: {AdvPartiallyRecovered, AdvClosed, AdvWrittenOff},
+	// CLOSED / FULFILMENT_FAILED / DECLINED / WRITTEN_OFF are terminal.
+	// Post-write-off recoveries are recovery INCOME (EDG-021) — they never
+	// re-open the advance; the loss stays crystallised in the record.
 }
 
 // CanTransition reports whether from → to is a legal advance transition.
@@ -54,7 +56,7 @@ func AdvanceStates() []AdvanceState {
 	return []AdvanceState{
 		AdvRequested, AdvValidated, AdvExposureReserved, AdvPendingFulfilment,
 		AdvFulfilmentUnknown, AdvActive, AdvPartiallyRecovered, AdvClosed,
-		AdvFulfilmentFailed, AdvDeclined,
+		AdvFulfilmentFailed, AdvDeclined, AdvWrittenOff,
 	}
 }
 
