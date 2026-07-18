@@ -1,0 +1,116 @@
+/* BridgeXtra portal — vanilla CSS, no UI framework (owner directive). */
+:root {
+  --bg: #0e1420;
+  --panel: #161f2e;
+  --panel-2: #1c2738;
+  --line: #263447;
+  --text: #e8edf4;
+  --muted: #8fa1b8;
+  --accent: #34c98e;
+  --accent-dim: #1f7a58;
+  --danger: #e5646c;
+  --warn: #e0b15e;
+  --radius: 10px;
+  --mono: ui-monospace, "Cascadia Code", Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--accent-dim);
+  background: var(--accent-dim);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: var(--radius);
+}
+button:hover { background: var(--accent); border-color: var(--accent); color: #06281a; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+input, select, textarea {
+  font: inherit;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  width: 100%;
+}
+input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent-dim); }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.muted { color: var(--muted); }
+.mono { font-family: var(--mono); font-size: 13px; }
+.error { color: var(--danger); }
+
+/* --- login --- */
+.login-wrap {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-card { width: 100%; max-width: 380px; display: grid; gap: 14px; }
+.login-card h1 { margin: 0 0 4px; font-size: 22px; }
+.brand-x { color: var(--accent); }
+
+/* --- shell --- */
+.shell { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+.sidebar {
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 20px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sidebar .brand { font-weight: 700; font-size: 17px; margin-bottom: 16px; padding: 0 8px; }
+.sidebar nav { display: grid; gap: 2px; flex: 1; }
+.sidebar nav a {
+  color: var(--muted);
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+.sidebar nav a:hover { background: var(--panel-2); color: var(--text); text-decoration: none; }
+.sidebar nav a.active { background: var(--panel-2); color: var(--accent); }
+.whoami { border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; }
+.whoami .role {
+  display: inline-block;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+.main { padding: 28px 32px; max-width: 1100px; }
+.main h1 { font-size: 20px; margin: 0 0 18px; }
+
+table.data { width: 100%; border-collapse: collapse; }
+table.data th, table.data td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+table.data th { color: var(--muted); font-weight: 500; font-size: 13px; }

@@ -41,6 +41,15 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/admin/config/{id}/approve":  true,
 		"/v1/admin/config/{id}/activate": true,
 		"/v1/admin/config/active":        true,
+		// M4a portal (session-authenticated, deny-by-default RBAC)
+		"/v1/portal/login":                true,
+		"/v1/portal/logout":               true,
+		"/v1/portal/me":                   true,
+		"/v1/portal/config/active":        true,
+		"/v1/portal/config/drafts":        true,
+		"/v1/portal/config/{id}/submit":   true,
+		"/v1/portal/config/{id}/approve":  true,
+		"/v1/portal/config/{id}/activate": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

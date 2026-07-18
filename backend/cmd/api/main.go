@@ -94,6 +94,16 @@ func main() {
 	cfgAdmin := &handler.ConfigAdmin{Svc: configsvc.New(workerPool), Log: log}
 	cfgAdmin.Mount(mux, adminAuth)
 
+	// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC.
+	portal := &handler.Portal{
+		Admins:   &repo.Admins{Pool: appPool},
+		Sessions: &repo.PortalSessions{Pool: appPool},
+		Config:   configsvc.New(workerPool),
+		Log:      log,
+		Secure:   env("TCP_PORTAL_COOKIE_SECURE", "true") == "true",
+	}
+	portal.Mount(mux)
+
 	// Channel + recovery surface (M1 walking skeleton).
 	appCfg := configsvc.New(appPool)
 	led := ledger.New(appCfg)

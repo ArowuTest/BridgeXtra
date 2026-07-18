@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.1.1  # M1b — channel (offers/advances) + recovery events surface
+  version: 0.4.0  # M4a — portal session auth + deny-by-default RBAC
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -26,6 +26,166 @@ security:
   - ApiKeyAuth: []
 
 paths:
+  /v1/portal/login:
+    post:
+      operationId: portalLogin
+      summary: Portal sign-in (M4a) — sets the httpOnly session cookie
+      description: >
+        Authenticates an operator credential and establishes a server-side
+        session: httpOnly SameSite=Strict cookie plus a per-session CSRF
+        token the client must echo in X-CSRF-Token on every mutating call.
+        Invalid, expired and revoked credentials are indistinguishable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [api_key]
+              properties:
+                api_key: { type: string }
+      responses:
+        "200":
+          description: Session established (cookie set)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [actor, role, csrf_token, expires_at]
+                properties:
+                  actor: { type: string }
+                  role: { type: string, enum: [ADMIN, RISK, FINANCE, OPS, SUPPORT] }
+                  csrf_token: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/logout:
+    post:
+      operationId: portalLogout
+      summary: Revoke the current portal session
+      responses:
+        "200":
+          description: Signed out (cookie cleared, session revoked)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+        "401":
+          description: No live session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/me:
+    get:
+      operationId: portalMe
+      summary: Current operator identity + role (all roles)
+      responses:
+        "200":
+          description: Session identity
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  actor: { type: string }
+                  role: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "401":
+          description: No live session
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/active:
+    get:
+      operationId: portalConfigActive
+      summary: Read the ACTIVE config version (roles ADMIN, RISK, FINANCE)
+      parameters:
+        - { name: domain, in: query, required: true, schema: { type: string } }
+        - { name: scope, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The active version
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigVersion" }
+        "403":
+          description: Role not permitted (deny-by-default RBAC)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/drafts:
+    post:
+      operationId: portalConfigDraft
+      summary: Create a config draft (role ADMIN; actor = session identity)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain, scope, reason, content]
+              properties:
+                domain: { type: string }
+                scope: { type: string }
+                reason: { type: string }
+                content: { type: object }
+      responses:
+        "201":
+          description: Draft created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigVersion" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/{id}/submit:
+    post:
+      operationId: portalConfigSubmit
+      summary: Submit a draft (role ADMIN)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Submitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LifecycleAck" }
+  /v1/portal/config/{id}/approve:
+    post:
+      operationId: portalConfigApprove
+      summary: Approve a submission (role ADMIN; maker-checker enforced server-side)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Approved
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LifecycleAck" }
+        "409":
+          description: Maker-checker violation (approver == maker)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/config/{id}/activate:
+    post:
+      operationId: portalConfigActivate
+      summary: Activate an approved version (role ADMIN)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Activated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/LifecycleAck" }
   /healthz:
     get:
       operationId: getHealth
@@ -443,6 +603,18 @@ components:
         excess: { $ref: "#/components/schemas/Money" }
         advance_closed: { type: boolean }
         replayed: { type: boolean }
+    ErrorEnvelope:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code: { type: string }
+        message: { type: string }
+    LifecycleAck:
+      type: object
+      required: [config_version_id, step]
+      properties:
+        config_version_id: { type: string }
+        step: { type: string }
     ConfigVersion:
       type: object
       description: Immutable, effective-dated configuration version (V2-CFG-004).
