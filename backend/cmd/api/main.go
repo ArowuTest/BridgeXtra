@@ -22,6 +22,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbroles"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
@@ -104,6 +105,7 @@ func main() {
 		// Re-arm actions run as the app role in a tenant tx; operator reads span
 		// telcos on the worker pool (BYPASSRLS) bounded by the operator's scope.
 		Treasury: treasury.New(appPool, configsvc.New(appPool), log),
+		Ops:      ops.New(appPool, configsvc.New(appPool), log),
 		ReadPool: workerPool,
 		Log:      log,
 	}

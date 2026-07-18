@@ -21,6 +21,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
@@ -60,6 +61,7 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Sessions: &repo.PortalSessions{Pool: db.App},
 		Config:   configsvc.New(db.Worker),
 		Treasury: treasury.New(db.App, configsvc.New(db.App), slog.Default()),
+		Ops:      ops.New(db.App, configsvc.New(db.App), slog.Default()),
 		ReadPool: db.Worker,
 		Log:      slog.Default(),
 	}
@@ -402,6 +404,98 @@ func TestM4D_LedgerBrowser_ScopeAndTapThrough(t *testing.T) {
 	// Another tenant's journal by id is a no-oracle 404, not a 200 leak.
 	if code := f.call(t, &s, "GET", "/v1/portal/finance/ledger/journals/jrn_other", ""); code != http.StatusNotFound {
 		t.Fatalf("cross-scope journal by id must be 404, got %d", code)
+	}
+}
+
+// seedBreak inserts an open reconciliation break for a telco via the admin pool.
+func seedBreak(t *testing.T, f *portalFixture, id, telcoID string) {
+	t.Helper()
+	if _, err := f.db.Admin.Exec(context.Background(), `
+		INSERT INTO recon_items (recon_item_id, run_id, telco_id, item_type, status, platform_ref)
+		VALUES ($1, 'run_test', $2, 'FULFILMENT', 'BREAK_MISSING_TELCO', 'plat_'||$1)`, id, telcoID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// M4d part 2: the breaks queue is TELCO-grained. A telco-scoped FINANCE
+// operator sees and works their telco's breaks (assign -> resolve, which
+// removes it from the open queue). A PROGRAMME-scoped operator has no
+// telco-level authority — they see NO breaks and get a no-oracle 404 on an
+// action (this is the M4C-F1 leak-class guard: a programme operator must not
+// fall through to "all telcos").
+func TestM4D_BreaksQueue_TelcoScopeAndWorkflow(t *testing.T) {
+	f := newPortalFixture(t, "portal_breaks")
+	seedBreak(t, f, "rec_break_1", "SIM_NG")
+	admins := &repo.Admins{Pool: f.db.Admin}
+	if err := admins.CreateWithRole(context.Background(), "adm_finT", "fin_telco",
+		"portal-key-fin-telco-1", "FINANCE", "telco:SIM_NG"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admins.CreateWithRole(context.Background(), "adm_finP", "fin_prog",
+		"portal-key-fin-prog-1", "FINANCE", "programme:prg_sim_airtime01"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Programme-scoped operator: NO telco-level authority -> empty, and a
+	// 404 on any action (no cross-grain leak).
+	ps := f.login(t, "portal-key-fin-prog-1")
+	status, body := f.callBody(t, &ps, "GET", "/v1/portal/finance/breaks", "")
+	if status != http.StatusOK {
+		t.Fatalf("breaks list (programme op): %d", status)
+	}
+	var pl struct {
+		Breaks []struct {
+			ReconItemID string `json:"recon_item_id"`
+		} `json:"breaks"`
+	}
+	if err := json.Unmarshal(body, &pl); err != nil {
+		t.Fatal(err)
+	}
+	if len(pl.Breaks) != 0 {
+		t.Fatalf("programme-scoped operator must see NO telco-level breaks, got %+v", pl.Breaks)
+	}
+	if code := f.call(t, &ps, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
+		`{"action":"RESOLVE","reason":"x"}`); code != http.StatusNotFound {
+		t.Fatalf("programme-scoped action on a telco break must be 404, got %d", code)
+	}
+
+	// Telco-scoped operator: sees the break, assigns, resolves — and it leaves
+	// the open queue.
+	ts := f.login(t, "portal-key-fin-telco-1")
+	_, body = f.callBody(t, &ts, "GET", "/v1/portal/finance/breaks", "")
+	var tl struct {
+		Breaks []struct {
+			ReconItemID string `json:"recon_item_id"`
+			Status      string `json:"status"`
+		} `json:"breaks"`
+	}
+	if err := json.Unmarshal(body, &tl); err != nil {
+		t.Fatal(err)
+	}
+	if len(tl.Breaks) != 1 || tl.Breaks[0].ReconItemID != "rec_break_1" {
+		t.Fatalf("telco-scoped operator must see its telco's break, got %+v", tl.Breaks)
+	}
+	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
+		`{"action":"ASSIGN","reason":"investigating"}`); code != http.StatusOK {
+		t.Fatalf("assign: %d", code)
+	}
+	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
+		`{"action":"RESOLVE","reason":"telco confirmed off-platform settlement"}`); code != http.StatusOK {
+		t.Fatalf("resolve: %d", code)
+	}
+	// Resolved -> gone from the open queue.
+	_, body = f.callBody(t, &ts, "GET", "/v1/portal/finance/breaks", "")
+	if err := json.Unmarshal(body, &tl); err != nil {
+		t.Fatal(err)
+	}
+	if len(tl.Breaks) != 0 {
+		t.Fatalf("resolved break must leave the open queue, got %+v", tl.Breaks)
+	}
+	// A reason is mandatory on actions.
+	seedBreak(t, f, "rec_break_2", "SIM_NG")
+	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_2/action",
+		`{"action":"RESOLVE","reason":""}`); code != http.StatusBadRequest {
+		t.Fatalf("action without a reason must be 400, got %d", code)
 	}
 }
 

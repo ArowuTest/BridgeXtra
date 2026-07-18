@@ -58,6 +58,20 @@ type OperatorScope struct {
 	authority bool // false ('global'/unrecognised) => no tenant reads at all
 }
 
+// TelcoLevelBound resolves the scope for a TELCO-GRAINED resource that has no
+// programme dimension (e.g. reconciliation breaks). Because such rows can't be
+// filtered by programme, a programme-scoped operator's empty telco bound would
+// silently mean "all telcos" — the M4C-F1 leak class. So only a '*' admin
+// (telco ” = all) or a telco-scoped operator has authority here; a
+// programme- or global-scoped operator gets ok=false and reads NOTHING. The
+// operator sees telco-level data only when their grant is at or above telco.
+func (s OperatorScope) TelcoLevelBound() (telco string, ok bool) {
+	if !s.authority || s.programme != "" {
+		return "", false
+	}
+	return s.telco, true
+}
+
 // OperatorScope derives the read boundary from the session — the ONLY
 // constructor. Its fields are unexported, so no other package can forge a
 // see-all scope with empty bounds.

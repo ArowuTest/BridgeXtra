@@ -132,3 +132,75 @@ func GetJournalWithEntries(ctx context.Context, pool *pgxpool.Pool, scope Operat
 	}
 	return d, rows.Err()
 }
+
+// --- reconciliation breaks queue (telco-grained; M4d part 2) ----------------
+
+type BreakItem struct {
+	ReconItemID string
+	RunID       string
+	TelcoID     string
+	ItemType    string
+	Status      string
+	PlatformRef string
+	TelcoRef    string
+	AssignedTo  string
+	CreatedAt   string // RFC3339
+}
+
+const breakCols = `recon_item_id, run_id, telco_id, item_type, status,
+	COALESCE(platform_ref,''), COALESCE(telco_ref,''), COALESCE(assigned_to,''),
+	to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')`
+
+func scanBreak(row pgx.Row) (BreakItem, error) {
+	var b BreakItem
+	err := row.Scan(&b.ReconItemID, &b.RunID, &b.TelcoID, &b.ItemType, &b.Status,
+		&b.PlatformRef, &b.TelcoRef, &b.AssignedTo, &b.CreatedAt)
+	return b, err
+}
+
+// ListOpenBreaks returns unresolved reconciliation breaks in the operator's
+// telco-level scope (M4C-F1 via TelcoLevelBound — a programme/global operator
+// reads none, never "all telcos").
+func ListOpenBreaks(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope) ([]BreakItem, error) {
+	telco, ok := scope.TelcoLevelBound()
+	if !ok {
+		return nil, nil
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT `+breakCols+`
+		FROM recon_items
+		WHERE status LIKE 'BREAK_%' AND resolved_at IS NULL
+		  AND ($1 = '' OR telco_id = $1)
+		ORDER BY created_at`, telco)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BreakItem
+	for rows.Next() {
+		b, err := scanBreak(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// GetOpenBreak loads one open break within the operator's telco-level scope —
+// out-of-scope or absent both return ErrNotFound (no oracle). Used to resolve
+// the telco for an action after authorization.
+func GetOpenBreak(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, reconItemID string) (BreakItem, error) {
+	telco, ok := scope.TelcoLevelBound()
+	if !ok {
+		return BreakItem{}, fmt.Errorf("recon break %q: %w", reconItemID, ErrNotFound)
+	}
+	b, err := scanBreak(pool.QueryRow(ctx, `
+		SELECT `+breakCols+` FROM recon_items
+		WHERE recon_item_id = $1 AND status LIKE 'BREAK_%' AND resolved_at IS NULL
+		  AND ($2 = '' OR telco_id = $2)`, reconItemID, telco))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return BreakItem{}, fmt.Errorf("recon break %q: %w", reconItemID, ErrNotFound)
+	}
+	return b, err
+}

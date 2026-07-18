@@ -171,3 +171,27 @@ export function ledgerJournals(params: { advance_id?: string; correlation_id?: s
 export function ledgerJournal(id: string): Promise<{ journal: JournalHeader; entries: JournalEntry[] }> {
   return request("GET", `/v1/portal/finance/ledger/journals/${id}`);
 }
+
+export type ReconBreak = {
+  recon_item_id: string;
+  run_id: string;
+  telco_id: string;
+  item_type: string;
+  status: string;
+  platform_ref?: string;
+  telco_ref?: string;
+  assigned_to?: string;
+  created_at: string;
+};
+
+export function financeBreaks(): Promise<{ breaks: ReconBreak[] }> {
+  return request("GET", "/v1/portal/finance/breaks");
+}
+
+export function financeBreakAction(
+  id: string,
+  action: "ASSIGN" | "RESOLVE" | "ESCALATE" | "NOTE",
+  reason: string,
+): Promise<unknown> {
+  return request("POST", `/v1/portal/finance/breaks/${id}/action`, { action, reason });
+}

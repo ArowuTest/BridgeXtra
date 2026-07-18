@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.4.4  # M4d — finance ledger browser (scope-bounded journals + entries)
+  version: 0.4.5  # M4d — finance breaks queue (telco-scoped, assign/resolve)
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -375,6 +375,66 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/breaks:
+    get:
+      operationId: portalFinanceBreaks
+      summary: Open reconciliation breaks in the operator's telco scope (roles ADMIN, FINANCE)
+      description: >
+        Unresolved recon breaks. Telco-grained: a '*' admin sees all, a
+        telco-scoped operator sees their telco; a programme- or global-scoped
+        operator has no telco-level authority and sees none.
+      responses:
+        "200":
+          description: Open breaks
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [breaks]
+                properties:
+                  breaks:
+                    type: array
+                    items: { $ref: "#/components/schemas/ReconBreak" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/breaks/{id}/action:
+    post:
+      operationId: portalFinanceBreakAction
+      summary: Act on a reconciliation break (ASSIGN/RESOLVE/ESCALATE/NOTE; roles ADMIN, FINANCE)
+      description: >
+        Reason is required; the actor is the session identity. A break is never
+        edited away — RESOLVE stamps a reason, and every action is append-only
+        logged and audited.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, reason]
+              properties:
+                action: { type: string, enum: [ASSIGN, RESOLVE, ESCALATE, NOTE] }
+                reason: { type: string }
+      responses:
+        "200":
+          description: Action applied
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recon_item_id: { type: string }
+                  action: { type: string }
+        "404":
+          description: Break not found, out of scope, or already resolved (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth
@@ -687,6 +747,20 @@ components:
         amount_minor: { type: integer, format: int64 }
         currency: { type: string, example: NGN }
         display: { type: string, example: "NGN 500,000.00" }
+    ReconBreak:
+      type: object
+      description: An unresolved reconciliation break (V2-REC).
+      required: [recon_item_id, run_id, telco_id, item_type, status, created_at]
+      properties:
+        recon_item_id: { type: string }
+        run_id: { type: string }
+        telco_id: { type: string }
+        item_type: { type: string, enum: [FULFILMENT, RECOVERY] }
+        status: { type: string, enum: [BREAK_MISSING_PLATFORM, BREAK_MISSING_TELCO, BREAK_AMOUNT_MISMATCH] }
+        platform_ref: { type: string }
+        telco_ref: { type: string }
+        assigned_to: { type: string }
+        created_at: { type: string, format: date-time }
     JournalHeader:
       type: object
       description: A ledger journal header (BC-6 correlation lineage; V2-LED).
