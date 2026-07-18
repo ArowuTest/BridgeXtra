@@ -53,6 +53,10 @@ func TestSelfAudit_SettlementFinalIsImmutable(t *testing.T) {
 	}
 }
 
+// (The write_offs FINAL-frozen TRIGGER is exercised end-to-end in the
+// collections usecase test, which builds a real POSTED write-off through the
+// maker-checker flow and then attacks its immutability.)
+
 // The tcp_app UPDATE grant is column-scoped: it may touch lifecycle columns but
 // NOT the recorded evidence / identity.
 func TestSelfAudit_GrantScopes(t *testing.T) {
@@ -74,6 +78,11 @@ func TestSelfAudit_GrantScopes(t *testing.T) {
 		{"settlement_statements", "state", true},
 		{"settlement_statements", "period_start", false},
 		{"settlement_statements", "terms_version_id", false},
+		// write_offs: lifecycle yes, amounts/requester no.
+		{"write_offs", "state", true},
+		{"write_offs", "approved_by", true},
+		{"write_offs", "principal_minor", false},
+		{"write_offs", "requested_by", false},
 	} {
 		var can bool
 		if err := db.Admin.QueryRow(ctx,

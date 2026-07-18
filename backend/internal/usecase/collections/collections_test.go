@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -213,6 +214,19 @@ func TestM3C_WriteOff_FullMakerCheckerJourney(t *testing.T) {
 	}
 	if woState != "POSTED" {
 		t.Fatalf("evidence must be POSTED, got %s", woState)
+	}
+
+	// Self-audit (0021): a POSTED write-off is a frozen audit record — even the
+	// table owner cannot rewrite its amount or its maker-checker approver.
+	if _, err := f.db.Admin.Exec(ctx,
+		`UPDATE write_offs SET principal_minor=0 WHERE write_off_id=$1`, wo.WriteOffID); err == nil ||
+		!strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("POSTED write-off amount must be immutable, got %v", err)
+	}
+	if _, err := f.db.Admin.Exec(ctx,
+		`UPDATE write_offs SET approved_by='mallory' WHERE write_off_id=$1`, wo.WriteOffID); err == nil ||
+		!strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("POSTED write-off approver must be immutable, got %v", err)
 	}
 
 	// EDG-021 through the REAL path: a later recovery books as income.

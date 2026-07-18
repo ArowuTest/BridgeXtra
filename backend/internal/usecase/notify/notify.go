@@ -29,6 +29,7 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 )
@@ -42,7 +43,7 @@ type Service struct {
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service {
 	return &Service{Pool: pool, Config: cfg, Log: log,
-		HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+		HTTPClient: egress.SafeClient(10 * time.Second)} // SSRF egress guard (VR-32)
 }
 
 type templatesCfg struct {

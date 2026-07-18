@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 )
 
@@ -87,7 +88,9 @@ type HTTPAdapter struct {
 }
 
 func NewHTTPAdapter(cfg *configsvc.Service) *HTTPAdapter {
-	return &HTTPAdapter{Config: cfg, HTTPClient: &http.Client{}}
+	// SSRF egress guard (VR-32): 0 = no client timeout, the per-call context
+	// deadline governs.
+	return &HTTPAdapter{Config: cfg, HTTPClient: egress.SafeClient(0)}
 }
 
 type adapterCfg struct {
