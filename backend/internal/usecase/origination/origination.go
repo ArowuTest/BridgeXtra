@@ -59,9 +59,12 @@ type Service struct {
 	Ledger  *ledger.Service
 	Adapter mno.Client
 	Log     *slog.Logger
-	// Treasury guards the confirm path (M3d). Nil only in tests that predate
-	// guardrails — production wiring always sets it.
-	Treasury *treasury.Service
+	// treasury guards the confirm path (M3d). UNEXPORTED and set only by New
+	// (M3D-F1): no struct-literal construction can produce a Service with a
+	// disarmed guardrail, and there is no nil-skip anywhere — an absent
+	// guardrail FAILS, it never silently waves money through (BC-5
+	// arm-or-refuse; reachability invariant).
+	treasury *treasury.Service
 
 	subscribers repo.Subscribers
 	decisions   repo.Decisions
@@ -77,7 +80,7 @@ type Service struct {
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, adapter mno.Client, log *slog.Logger) *Service {
 	return &Service{Pool: pool, Config: cfg, Ledger: led, Adapter: adapter, Log: log,
-		Treasury: treasury.New(pool, cfg, log)}
+		treasury: treasury.New(pool, cfg, log)}
 }
 
 type productCfg struct {
@@ -419,10 +422,9 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		// M3d: guardrails measure HERE, with the pool row locked — the
 		// serialization point concurrent confirms queue behind (EDG-024). A
 		// breach aborts this confirm; the trip records out-of-band below.
-		if s.Treasury != nil {
-			if err := s.Treasury.EvaluateInTx(ctx, tx, offer.ProgrammeID, poolID, offer.Disbursed); err != nil {
-				return err
-			}
+		// NO nil-skip (M3D-F1): the guardrail is structurally always armed.
+		if err := s.treasury.EvaluateInTx(ctx, tx, offer.ProgrammeID, poolID, offer.Disbursed); err != nil {
+			return err
 		}
 		adv.FundingPoolID = poolID
 		if err := s.advances.ReserveTransition(ctx, tx, adv.AdvanceID, 2, poolID); err != nil {
@@ -496,11 +498,9 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		// suspend the programme in a SEPARATE transaction (it must survive
 		// the abort), then decline customer-safe. Crash between the two:
 		// the next confirm re-detects and converges.
-		if s.Treasury != nil {
-			if telcoID, terr := platform.TenantFrom(ctx); terr == nil {
-				if terr := s.Treasury.RecordTrip(ctx, telcoID, cmd.ProgrammeID, breach); terr != nil {
-					s.Log.Error("guardrail trip recording failed — next confirm will re-detect", "err", terr)
-				}
+		if telcoID, terr := platform.TenantFrom(ctx); terr == nil {
+			if terr := s.treasury.RecordTrip(ctx, telcoID, cmd.ProgrammeID, breach); terr != nil {
+				s.Log.Error("guardrail trip recording failed — next confirm will re-detect", "err", terr)
 			}
 		}
 		return ConfirmResult{}, fmt.Errorf("%w: %s", treasury.ErrProgrammeSuspended, breach.Guardrail)
