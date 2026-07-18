@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.4.5  # M4d — finance breaks queue (telco-scoped, assign/resolve)
+  version: 0.4.6  # M4d — finance settlement verify (scope-bounded statements + reproducibility)
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -435,6 +435,86 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/settlements:
+    get:
+      operationId: portalFinanceSettlements
+      summary: List settlement statements in the operator's scope (roles ADMIN, FINANCE)
+      responses:
+        "200":
+          description: Statements
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [statements]
+                properties:
+                  statements:
+                    type: array
+                    items: { $ref: "#/components/schemas/SettlementStatement" }
+        "403":
+          description: Role not permitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/settlements/{id}:
+    get:
+      operationId: portalFinanceSettlement
+      summary: One settlement statement with its lines (roles ADMIN, FINANCE)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Statement + lines
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [statement, lines]
+                properties:
+                  statement: { $ref: "#/components/schemas/SettlementStatement" }
+                  lines:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        line_code: { type: string }
+                        amount: { $ref: "#/components/schemas/MoneyView" }
+        "404":
+          description: Statement not found or out of scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/finance/settlements/{id}/verify:
+    post:
+      operationId: portalFinanceSettlementVerify
+      summary: Recompute a FINAL statement and report whether it reproduces (roles ADMIN, FINANCE)
+      description: >
+        Re-derives the statement's lines from the ledger with the PINNED terms
+        version and compares the content hash. A mismatch is a data-integrity
+        finding, reported as verified=false (a result, not an error).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [statement_id, verified]
+                properties:
+                  statement_id: { type: string }
+                  verified: { type: boolean }
+        "409":
+          description: Statement is not FINAL (nothing to verify)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          description: Statement not found or out of scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth
@@ -747,6 +827,20 @@ components:
         amount_minor: { type: integer, format: int64 }
         currency: { type: string, example: NGN }
         display: { type: string, example: "NGN 500,000.00" }
+    SettlementStatement:
+      type: object
+      description: A settlement statement (ledger-derived; V1-SET / CFG-012).
+      required: [statement_id, telco_id, programme_id, period_start, period_end, state, currency, terms_version_id]
+      properties:
+        statement_id: { type: string }
+        telco_id: { type: string }
+        programme_id: { type: string }
+        period_start: { type: string, format: date-time }
+        period_end: { type: string, format: date-time }
+        state: { type: string, enum: [DRAFT, FINAL] }
+        currency: { type: string }
+        terms_version_id: { type: string }
+        finalised_at: { type: string, format: date-time }
     ReconBreak:
       type: object
       description: An unresolved reconciliation break (V2-REC).

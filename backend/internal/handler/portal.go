@@ -22,6 +22,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
@@ -38,13 +39,14 @@ const (
 
 // Portal serves the operator console API.
 type Portal struct {
-	Admins   *repo.Admins
-	Sessions *repo.PortalSessions
-	Config   *configsvc.Service // ADMIN config lifecycle (M4b UI sits on this)
-	Treasury *treasury.Service  // M4c guardrail re-arm actions (tenant tx)
-	Ops      *ops.Service       // M4d breaks-queue actions (tenant tx)
-	ReadPool *pgxpool.Pool      // M4c operator cross-tenant reads (worker/BYPASSRLS)
-	Log      *slog.Logger
+	Admins     *repo.Admins
+	Sessions   *repo.PortalSessions
+	Config     *configsvc.Service  // ADMIN config lifecycle (M4b UI sits on this)
+	Treasury   *treasury.Service   // M4c guardrail re-arm actions (tenant tx)
+	Ops        *ops.Service        // M4d breaks-queue actions (tenant tx)
+	Settlement *settlement.Service // M4d settlement verification (tenant tx)
+	ReadPool   *pgxpool.Pool       // M4c operator cross-tenant reads (worker/BYPASSRLS)
+	Log        *slog.Logger
 }
 
 // routeRoles is THE authorization map: method+pattern -> allowed roles.
@@ -66,11 +68,14 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/risk/trips/{id}/request-rearm": {roleAdmin, roleRisk},
 	"POST /v1/portal/risk/trips/{id}/approve-rearm": {roleAdmin, roleRisk},
 
-	// M4d finance workspace: ledger browser (read-only) + breaks queue.
-	"GET /v1/portal/finance/ledger/journals":      {roleAdmin, roleFinance},
-	"GET /v1/portal/finance/ledger/journals/{id}": {roleAdmin, roleFinance},
-	"GET /v1/portal/finance/breaks":               {roleAdmin, roleFinance},
-	"POST /v1/portal/finance/breaks/{id}/action":  {roleAdmin, roleFinance},
+	// M4d finance workspace: ledger browser + breaks queue + settlement verify.
+	"GET /v1/portal/finance/ledger/journals":          {roleAdmin, roleFinance},
+	"GET /v1/portal/finance/ledger/journals/{id}":     {roleAdmin, roleFinance},
+	"GET /v1/portal/finance/breaks":                   {roleAdmin, roleFinance},
+	"POST /v1/portal/finance/breaks/{id}/action":      {roleAdmin, roleFinance},
+	"GET /v1/portal/finance/settlements":              {roleAdmin, roleFinance},
+	"GET /v1/portal/finance/settlements/{id}":         {roleAdmin, roleFinance},
+	"POST /v1/portal/finance/settlements/{id}/verify": {roleAdmin, roleFinance},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -111,6 +116,9 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/finance/ledger/journals/{id}", http.HandlerFunc(p.ledgerJournal))
 	p.mountRBAC(mux, "GET /v1/portal/finance/breaks", http.HandlerFunc(p.financeBreaks))
 	p.mountRBAC(mux, "POST /v1/portal/finance/breaks/{id}/action", http.HandlerFunc(p.financeBreakAction))
+	p.mountRBAC(mux, "GET /v1/portal/finance/settlements", http.HandlerFunc(p.financeSettlements))
+	p.mountRBAC(mux, "GET /v1/portal/finance/settlements/{id}", http.HandlerFunc(p.financeSettlement))
+	p.mountRBAC(mux, "POST /v1/portal/finance/settlements/{id}/verify", http.HandlerFunc(p.financeSettlementVerify))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a

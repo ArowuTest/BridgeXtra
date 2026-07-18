@@ -16,6 +16,7 @@ export const NAV: NavItem[] = [
   { href: "/risk", label: "Risk", roles: ["ADMIN", "RISK", "FINANCE"] },
   { href: "/finance", label: "Ledger", roles: ["ADMIN", "FINANCE"] },
   { href: "/breaks", label: "Breaks", roles: ["ADMIN", "FINANCE"] },
+  { href: "/settlements", label: "Settlements", roles: ["ADMIN", "FINANCE"] },
   // M4e slices mount here: Ops, Support workspaces.
 ];
 

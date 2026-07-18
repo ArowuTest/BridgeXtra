@@ -52,11 +52,14 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/risk/trips":                    true,
 		"/v1/portal/risk/trips/{id}/request-rearm": true,
 		"/v1/portal/risk/trips/{id}/approve-rearm": true,
-		// M4d finance workspace (ledger browser + breaks queue)
-		"/v1/portal/finance/ledger/journals":      true,
-		"/v1/portal/finance/ledger/journals/{id}": true,
-		"/v1/portal/finance/breaks":               true,
-		"/v1/portal/finance/breaks/{id}/action":   true,
+		// M4d finance workspace (ledger browser + breaks queue + settlement verify)
+		"/v1/portal/finance/ledger/journals":         true,
+		"/v1/portal/finance/ledger/journals/{id}":    true,
+		"/v1/portal/finance/breaks":                  true,
+		"/v1/portal/finance/breaks/{id}/action":      true,
+		"/v1/portal/finance/settlements":             true,
+		"/v1/portal/finance/settlements/{id}":        true,
+		"/v1/portal/finance/settlements/{id}/verify": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

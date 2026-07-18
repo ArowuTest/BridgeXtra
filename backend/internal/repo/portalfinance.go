@@ -204,3 +204,112 @@ func GetOpenBreak(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, 
 	}
 	return b, err
 }
+
+// --- settlement statements (telco+programme grained; M4d part 3) ------------
+
+type SettlementSummary struct {
+	StatementID    string
+	TelcoID        string
+	ProgrammeID    string
+	PeriodStart    string // RFC3339
+	PeriodEnd      string
+	State          string
+	Currency       string
+	TermsVersionID string
+	FinalisedAt    string // '' when DRAFT
+}
+
+type SettlementLineRow struct {
+	LineCode string
+	Amount   entity.Money
+}
+
+type SettlementDetail struct {
+	SettlementSummary
+	Lines []SettlementLineRow
+}
+
+const settlementCols = `statement_id, telco_id, programme_id,
+	to_char(period_start,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
+	to_char(period_end,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
+	state, currency, terms_version_id,
+	COALESCE(to_char(finalised_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')`
+
+func scanSettlement(row pgx.Row) (SettlementSummary, error) {
+	var s SettlementSummary
+	err := row.Scan(&s.StatementID, &s.TelcoID, &s.ProgrammeID, &s.PeriodStart, &s.PeriodEnd,
+		&s.State, &s.Currency, &s.TermsVersionID, &s.FinalisedAt)
+	return s, err
+}
+
+// ListSettlements returns settlement statements newest-first within the
+// operator's telco/programme scope (standard OperatorScope; M4C-F1).
+func ListSettlements(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]SettlementSummary, error) {
+	if !scope.authority {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT `+settlementCols+`
+		FROM settlement_statements
+		WHERE ($1 = '' OR telco_id = $1) AND ($2 = '' OR programme_id = $2)
+		ORDER BY period_end DESC, statement_id
+		LIMIT $3`, scope.telco, scope.programme, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SettlementSummary
+	for rows.Next() {
+		s, err := scanSettlement(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// GetSettlementWithLines loads one statement + its lines within the operator's
+// scope — out-of-scope or absent both return ErrNotFound (no oracle).
+func GetSettlementWithLines(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, statementID string) (SettlementDetail, error) {
+	var d SettlementDetail
+	if !scope.authority {
+		return d, fmt.Errorf("settlement %q: %w", statementID, ErrNotFound)
+	}
+	s, err := scanSettlement(pool.QueryRow(ctx, `
+		SELECT `+settlementCols+` FROM settlement_statements
+		WHERE statement_id = $1
+		  AND ($2 = '' OR telco_id = $2) AND ($3 = '' OR programme_id = $3)`,
+		statementID, scope.telco, scope.programme))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return d, fmt.Errorf("settlement %q: %w", statementID, ErrNotFound)
+	}
+	if err != nil {
+		return d, err
+	}
+	d.SettlementSummary = s
+
+	rows, err := pool.Query(ctx, `
+		SELECT line_code, amount_minor, currency FROM settlement_lines
+		WHERE statement_id = $1 ORDER BY line_code`, statementID)
+	if err != nil {
+		return d, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var l SettlementLineRow
+		var amt int64
+		var cur string
+		if err := rows.Scan(&l.LineCode, &amt, &cur); err != nil {
+			return d, err
+		}
+		if l.Amount, err = scanMoney(amt, cur); err != nil {
+			return d, err
+		}
+		d.Lines = append(d.Lines, l)
+	}
+	return d, rows.Err()
+}

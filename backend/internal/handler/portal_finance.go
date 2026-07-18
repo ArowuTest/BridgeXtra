@@ -176,3 +176,89 @@ func (p *Portal) financeBreakAction(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"recon_item_id": brk.ReconItemID, "action": req.Action})
 }
+
+// --- settlement statements + verification (M4d part 3) ---------------------
+
+type settlementResponse struct {
+	StatementID    string `json:"statement_id"`
+	TelcoID        string `json:"telco_id"`
+	ProgrammeID    string `json:"programme_id"`
+	PeriodStart    string `json:"period_start"`
+	PeriodEnd      string `json:"period_end"`
+	State          string `json:"state"`
+	Currency       string `json:"currency"`
+	TermsVersionID string `json:"terms_version_id"`
+	FinalisedAt    string `json:"finalised_at,omitempty"`
+}
+
+func toSettlement(s repo.SettlementSummary) settlementResponse {
+	return settlementResponse{
+		StatementID: s.StatementID, TelcoID: s.TelcoID, ProgrammeID: s.ProgrammeID,
+		PeriodStart: s.PeriodStart, PeriodEnd: s.PeriodEnd, State: s.State,
+		Currency: s.Currency, TermsVersionID: s.TermsVersionID, FinalisedAt: s.FinalisedAt,
+	}
+}
+
+func (p *Portal) financeSettlements(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	list, err := repo.ListSettlements(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	if err != nil {
+		p.Log.Error("portal settlements list", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	out := make([]settlementResponse, 0, len(list))
+	for _, s := range list {
+		out = append(out, toSettlement(s))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"statements": out})
+}
+
+func (p *Portal) financeSettlement(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	d, err := repo.GetSettlementWithLines(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "SETTLEMENT_NOT_FOUND", "settlement not found")
+			return
+		}
+		p.Log.Error("portal settlement get", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	lines := make([]map[string]any, 0, len(d.Lines))
+	for _, l := range d.Lines {
+		lines = append(lines, map[string]any{"line_code": l.LineCode, "amount": toMoneyView(l.Amount)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"statement": toSettlement(d.SettlementSummary), "lines": lines})
+}
+
+// financeSettlementVerify recomputes a FINAL statement from the ledger against
+// its pinned terms and reports whether it reproduces its content hash. A
+// mismatch is a data-integrity FINDING reported as verified:false (a result,
+// not a 500) — the whole point of the tool is to surface it.
+func (p *Portal) financeSettlementVerify(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	d, err := repo.GetSettlementWithLines(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "SETTLEMENT_NOT_FOUND", "settlement not found")
+			return
+		}
+		p.Log.Error("portal settlement verify load", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	if d.State != "FINAL" {
+		writeErr(w, http.StatusConflict, "SETTLEMENT_NOT_FINAL", "only FINAL statements can be verified")
+		return
+	}
+	if err := p.Settlement.VerifyReproducible(r.Context(), d.TelcoID, d.StatementID); err != nil {
+		// Not a server error — the statement did not reproduce. Report the
+		// finding; log the detail server-side (no sensitive figures in it).
+		p.Log.Warn("settlement verification FAILED", "statement", d.StatementID, "actor", sess.Actor, "err", err)
+		writeJSON(w, http.StatusOK, map[string]any{"statement_id": d.StatementID, "verified": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"statement_id": d.StatementID, "verified": true})
+}

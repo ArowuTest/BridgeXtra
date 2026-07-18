@@ -195,3 +195,29 @@ export function financeBreakAction(
 ): Promise<unknown> {
   return request("POST", `/v1/portal/finance/breaks/${id}/action`, { action, reason });
 }
+
+export type SettlementStatement = {
+  statement_id: string;
+  telco_id: string;
+  programme_id: string;
+  period_start: string;
+  period_end: string;
+  state: "DRAFT" | "FINAL";
+  currency: string;
+  terms_version_id: string;
+  finalised_at?: string;
+};
+
+export type SettlementLine = { line_code: string; amount: MoneyView };
+
+export function financeSettlements(): Promise<{ statements: SettlementStatement[] }> {
+  return request("GET", "/v1/portal/finance/settlements");
+}
+
+export function financeSettlement(id: string): Promise<{ statement: SettlementStatement; lines: SettlementLine[] }> {
+  return request("GET", `/v1/portal/finance/settlements/${id}`);
+}
+
+export function financeSettlementVerify(id: string): Promise<{ statement_id: string; verified: boolean }> {
+  return request("POST", `/v1/portal/finance/settlements/${id}/verify`);
+}

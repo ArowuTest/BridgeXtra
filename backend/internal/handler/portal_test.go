@@ -16,12 +16,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/handler"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
@@ -57,13 +59,14 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 	}
 
 	p := &handler.Portal{
-		Admins:   &repo.Admins{Pool: db.App},
-		Sessions: &repo.PortalSessions{Pool: db.App},
-		Config:   configsvc.New(db.Worker),
-		Treasury: treasury.New(db.App, configsvc.New(db.App), slog.Default()),
-		Ops:      ops.New(db.App, configsvc.New(db.App), slog.Default()),
-		ReadPool: db.Worker,
-		Log:      slog.Default(),
+		Admins:     &repo.Admins{Pool: db.App},
+		Sessions:   &repo.PortalSessions{Pool: db.App},
+		Config:     configsvc.New(db.Worker),
+		Treasury:   treasury.New(db.App, configsvc.New(db.App), slog.Default()),
+		Ops:        ops.New(db.App, configsvc.New(db.App), slog.Default()),
+		Settlement: settlement.New(db.App, configsvc.New(db.App), slog.Default()),
+		ReadPool:   db.Worker,
+		Log:        slog.Default(),
 	}
 	mux := http.NewServeMux()
 	p.Mount(mux)
@@ -496,6 +499,105 @@ func TestM4D_BreaksQueue_TelcoScopeAndWorkflow(t *testing.T) {
 	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_2/action",
 		`{"action":"RESOLVE","reason":""}`); code != http.StatusBadRequest {
 		t.Fatalf("action without a reason must be 400, got %d", code)
+	}
+}
+
+// M4d part 3: settlement statements are telco+programme scoped. A
+// programme-scoped FINANCE operator sees only their statements, taps to the
+// lines, and VERIFIES a FINAL statement reproduces (verified:true) — a
+// data-integrity check that recomputes from the ledger. Cross-scope reads are
+// no-oracle 404s; a DRAFT statement can't be verified (409).
+func TestM4D_Settlement_ScopeAndVerify(t *testing.T) {
+	f := newPortalFixture(t, "portal_settle")
+	ctx := context.Background()
+
+	// A second programme (out of scope) under the same telco.
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO programmes (programme_id, telco_id, code, name, status)
+		SELECT 'prg_other_9999', telco_id, 'OTHER', 'Other programme', 'ACTIVE'
+		FROM programmes WHERE programme_id = 'prg_sim_airtime01'`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Generate + finalise a genuine FINAL statement for an empty period (zero
+	// aggregates, but a real reproducible statement) via the settlement service.
+	set := settlement.New(f.db.App, configsvc.New(f.db.App), slog.Default())
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 8, 0, 0, 0, 0, time.UTC)
+	st, err := set.Generate(ctx, "SIM_NG", "prg_sim_airtime01", start, end)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if err := set.Finalise(ctx, "SIM_NG", st.StatementID); err != nil {
+		t.Fatalf("finalise: %v", err)
+	}
+
+	admins := &repo.Admins{Pool: f.db.Admin}
+	if err := admins.CreateWithRole(ctx, "adm_finS", "fin_settle",
+		"portal-key-fin-settle-1", "FINANCE", "programme:prg_sim_airtime01"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admins.CreateWithRole(ctx, "adm_finO", "fin_other",
+		"portal-key-fin-other-1", "FINANCE", "programme:prg_other_9999"); err != nil {
+		t.Fatal(err)
+	}
+
+	// In-scope operator: sees the statement, and it VERIFIES.
+	s := f.login(t, "portal-key-fin-settle-1")
+	status, body := f.callBody(t, &s, "GET", "/v1/portal/finance/settlements", "")
+	if status != http.StatusOK {
+		t.Fatalf("settlements list: %d", status)
+	}
+	var list struct {
+		Statements []struct {
+			StatementID string `json:"statement_id"`
+			State       string `json:"state"`
+		} `json:"statements"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Statements) != 1 || list.Statements[0].StatementID != st.StatementID || list.Statements[0].State != "FINAL" {
+		t.Fatalf("scoped operator must see its FINAL statement, got %+v", list.Statements)
+	}
+	status, body = f.callBody(t, &s, "POST", "/v1/portal/finance/settlements/"+st.StatementID+"/verify", "")
+	if status != http.StatusOK {
+		t.Fatalf("verify: %d", status)
+	}
+	var vr struct {
+		Verified bool `json:"verified"`
+	}
+	if err := json.Unmarshal(body, &vr); err != nil {
+		t.Fatal(err)
+	}
+	if !vr.Verified {
+		t.Fatal("a genuine FINAL statement must verify (verified:true)")
+	}
+
+	// Out-of-scope operator: no listing, and 404 on read + verify (no oracle).
+	os := f.login(t, "portal-key-fin-other-1")
+	_, body = f.callBody(t, &os, "GET", "/v1/portal/finance/settlements", "")
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Statements) != 0 {
+		t.Fatalf("out-of-scope operator must see no statements, got %+v", list.Statements)
+	}
+	if code := f.call(t, &os, "GET", "/v1/portal/finance/settlements/"+st.StatementID, ""); code != http.StatusNotFound {
+		t.Fatalf("cross-scope settlement read must be 404, got %d", code)
+	}
+	if code := f.call(t, &os, "POST", "/v1/portal/finance/settlements/"+st.StatementID+"/verify", ""); code != http.StatusNotFound {
+		t.Fatalf("cross-scope settlement verify must be 404, got %d", code)
+	}
+
+	// A DRAFT statement can't be verified (409).
+	draft, err := set.Generate(ctx, "SIM_NG", "prg_sim_airtime01",
+		time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 2, 8, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := f.call(t, &s, "POST", "/v1/portal/finance/settlements/"+draft.StatementID+"/verify", ""); code != http.StatusConflict {
+		t.Fatalf("verifying a DRAFT statement must be 409, got %d", code)
 	}
 }
 
