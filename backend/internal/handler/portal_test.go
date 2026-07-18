@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -44,12 +45,12 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 	i := 0
 	for role, key := range roleKeys {
 		i++
-		if err := admins.CreateWithRole(ctx, fmt.Sprintf("adm_p%d", i), strings.ToLower(role)+"_actor", key, role); err != nil {
+		if err := admins.CreateWithRole(ctx, fmt.Sprintf("adm_p%d", i), strings.ToLower(role)+"_actor", key, role, "*"); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A second ADMIN for the maker-checker journey.
-	if err := admins.CreateWithRole(ctx, "adm_p9", "admin_actor_2", "portal-key-admin-000002", "ADMIN"); err != nil {
+	if err := admins.CreateWithRole(ctx, "adm_p9", "admin_actor_2", "portal-key-admin-000002", "ADMIN", "*"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -127,46 +128,85 @@ func (f *portalFixture) call(t *testing.T, s *session, method, path, body string
 	return resp.StatusCode
 }
 
-// The G4 groundwork matrix: every route × every role × no session. 401
-// without a session; 403 for a role outside the allowlist; never a 200 the
-// map does not grant.
+// callBody is call() but returns the response body too (for read assertions).
+func (f *portalFixture) callBody(t *testing.T, s *session, method, path, body string) (int, []byte) {
+	t.Helper()
+	var rdr *bytes.Reader
+	if body == "" {
+		rdr = bytes.NewReader(nil)
+	} else {
+		rdr = bytes.NewReader([]byte(body))
+	}
+	req, err := http.NewRequest(method, f.srv.URL+path, rdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if s != nil {
+		req.AddCookie(s.cookie)
+		req.Header.Set("X-CSRF-Token", s.csrf)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, data
+}
+
+// concreteRoute turns an RBAC map key ("METHOD /pattern", with {id}
+// placeholders) into a request the matrix can actually issue.
+func concreteRoute(key string) (method, path string) {
+	parts := strings.SplitN(key, " ", 2)
+	method, pattern := parts[0], parts[1]
+	path = strings.ReplaceAll(pattern, "{id}", "cfg_seed_outbox_v1")
+	switch pattern {
+	case "/v1/portal/config/active":
+		path += "?domain=platform.outbox&scope=global"
+	case "/v1/portal/config/versions":
+		path += "?domain=platform.outbox"
+	}
+	return method, path
+}
+
+// The G4 groundwork matrix, DRIVEN BY THE PRODUCTION MAP (M4A-F2): every
+// route in routeRoles × every role × no session. 401 without a session; 403
+// for a role outside the allowlist; never a 401/403 for an allowed role. The
+// matrix iterates handler.RBACRoutes() so it can never drift from the policy
+// the server actually enforces — and mountRBAC panics at boot if any mounted
+// route lacks a map entry, so newPortalFixture would fail first.
 func TestM4A_RBACMatrix_DenyByDefault(t *testing.T) {
 	f := newPortalFixture(t, "portal_rbac")
+	routes := handler.RBACRoutes()
+	body := `{"domain":"platform.outbox","scope":"global","reason":"t","content":{}}`
 
-	routes := []struct {
-		method, path string
-		allowed      map[string]bool
-	}{
-		{"GET", "/v1/portal/me", map[string]bool{"ADMIN": true, "RISK": true, "FINANCE": true, "OPS": true, "SUPPORT": true}},
-		{"GET", "/v1/portal/config/active?domain=product.airtime&scope=programme:prg_sim_airtime01",
-			map[string]bool{"ADMIN": true, "RISK": true, "FINANCE": true}},
-		{"GET", "/v1/portal/config/overview", map[string]bool{"ADMIN": true, "RISK": true, "FINANCE": true}},
-		{"GET", "/v1/portal/config/versions?domain=platform.outbox", map[string]bool{"ADMIN": true, "RISK": true, "FINANCE": true}},
-		{"GET", "/v1/portal/config/cfg_seed_outbox_v1", map[string]bool{"ADMIN": true, "RISK": true, "FINANCE": true}},
-		{"POST", "/v1/portal/config/drafts", map[string]bool{"ADMIN": true}},
-		{"POST", "/v1/portal/config/cfg_none/submit", map[string]bool{"ADMIN": true}},
-		{"POST", "/v1/portal/config/cfg_none/approve", map[string]bool{"ADMIN": true}},
-		{"POST", "/v1/portal/config/cfg_none/activate", map[string]bool{"ADMIN": true}},
-	}
-
-	// No session: everything is 401.
-	for _, rt := range routes {
-		if code := f.call(t, nil, rt.method, rt.path, `{}`); code != http.StatusUnauthorized {
-			t.Errorf("%s %s without session: want 401, got %d", rt.method, rt.path, code)
+	// No session: every route is 401.
+	for key := range routes {
+		method, path := concreteRoute(key)
+		if code := f.call(t, nil, method, path, `{}`); code != http.StatusUnauthorized {
+			t.Errorf("%s without session: want 401, got %d", key, code)
 		}
 	}
 
 	// Every role against every route.
 	for role, key := range roleKeys {
 		s := f.login(t, key)
-		for _, rt := range routes {
-			code := f.call(t, &s, rt.method, rt.path, `{"domain":"platform.outbox","scope":"global","reason":"t","content":{}}`)
-			if rt.allowed[role] {
+		for route, allowedRoles := range routes {
+			method, path := concreteRoute(route)
+			allowed := false
+			for _, ar := range allowedRoles {
+				if ar == role {
+					allowed = true
+				}
+			}
+			code := f.call(t, &s, method, path, body)
+			if allowed {
 				if code == http.StatusUnauthorized || code == http.StatusForbidden {
-					t.Errorf("role %s on %s %s: allowed by map but got %d", role, rt.method, rt.path, code)
+					t.Errorf("role %s on %s: allowed by map but got %d", role, route, code)
 				}
 			} else if code != http.StatusForbidden {
-				t.Errorf("role %s on %s %s: want 403 (deny-by-default), got %d", role, rt.method, rt.path, code)
+				t.Errorf("role %s on %s: want 403 (deny-by-default), got %d", role, route, code)
 			}
 		}
 	}
@@ -252,5 +292,97 @@ func TestM4A_MakerChecker_ThroughPortalSessions(t *testing.T) {
 	}
 	if code := f.call(t, &approver, "POST", "/v1/portal/config/"+cv.ConfigVersionID+"/activate", ""); code != http.StatusOK {
 		t.Fatalf("activate: %d", code)
+	}
+}
+
+// M4A-F1: offboarding a credential (status -> REVOKED) must kill its LIVE
+// sessions immediately, not leave them valid for the 8h TTL — a stale admin
+// on money-config is exactly the session that must not survive.
+func TestM4A_F1_OffboardKillsLiveSession(t *testing.T) {
+	f := newPortalFixture(t, "portal_offboard")
+	s := f.login(t, roleKeys["OPS"])
+	if code := f.call(t, &s, "GET", "/v1/portal/me", ""); code != http.StatusOK {
+		t.Fatalf("live session must serve /me: %d", code)
+	}
+	// The session row is untouched and unexpired; only the credential dies.
+	if _, err := f.db.Admin.Exec(context.Background(),
+		`UPDATE admin_credentials SET status='REVOKED' WHERE actor='ops_actor'`); err != nil {
+		t.Fatal(err)
+	}
+	if code := f.call(t, &s, "GET", "/v1/portal/me", ""); code != http.StatusUnauthorized {
+		t.Fatalf("offboarded credential must kill the live session: want 401, got %d", code)
+	}
+	// The mutating path (which also hits the credential join) is refused too.
+	if code := f.call(t, &s, "POST", "/v1/portal/config/drafts",
+		`{"domain":"platform.outbox","scope":"global","reason":"t","content":{}}`); code != http.StatusUnauthorized {
+		t.Fatalf("offboarded credential must fail the mutating path: want 401, got %d", code)
+	}
+}
+
+// M4A-F3: a programme-scoped operator has full role power but ONLY within its
+// scope — reads global defaults, reads/writes its own scope, and is refused on
+// every other tenant's scope. This is the cross-scope property G4 attacks.
+func TestM4B_F3_ScopeEnforcement(t *testing.T) {
+	f := newPortalFixture(t, "portal_scope")
+	admins := &repo.Admins{Pool: f.db.Admin}
+	if err := admins.CreateWithRole(context.Background(), "adm_scoped", "scoped_admin",
+		"portal-key-scoped-adm-01", "ADMIN", "programme:prg_sim_airtime01"); err != nil {
+		t.Fatal(err)
+	}
+	s := f.login(t, "portal-key-scoped-adm-01")
+	if s.actor == "" {
+		t.Fatal("scoped login failed")
+	}
+
+	// READ: shared global default — permitted.
+	if code := f.call(t, &s, "GET",
+		"/v1/portal/config/active?domain=platform.outbox&scope=global", ""); code != http.StatusOK {
+		t.Fatalf("scoped operator must read global config: %d", code)
+	}
+	// READ own scope — permitted.
+	if code := f.call(t, &s, "GET",
+		"/v1/portal/config/active?domain=treasury.guardrails&scope=programme:prg_sim_airtime01", ""); code != http.StatusOK {
+		t.Fatalf("scoped operator must read own-scope config: %d", code)
+	}
+	// READ another tenant's scope — refused.
+	if code := f.call(t, &s, "GET",
+		"/v1/portal/config/active?domain=telco.adapter&scope=telco:SIM_NG", ""); code != http.StatusForbidden {
+		t.Fatalf("scoped operator must NOT read another scope: want 403, got %d", code)
+	}
+	// WRITE own scope — permitted (not 403; the draft is created).
+	if code := f.call(t, &s, "POST", "/v1/portal/config/drafts",
+		`{"domain":"treasury.guardrails","scope":"programme:prg_sim_airtime01","reason":"scoped write","content":{}}`); code == http.StatusForbidden {
+		t.Fatalf("scoped operator must be allowed to write its own scope, got 403")
+	}
+	// WRITE global — refused (mutating shared defaults needs '*').
+	if code := f.call(t, &s, "POST", "/v1/portal/config/drafts",
+		`{"domain":"platform.outbox","scope":"global","reason":"x","content":{}}`); code != http.StatusForbidden {
+		t.Fatalf("scoped operator must NOT write global: want 403, got %d", code)
+	}
+	// WRITE another scope — refused.
+	if code := f.call(t, &s, "POST", "/v1/portal/config/drafts",
+		`{"domain":"telco.adapter","scope":"telco:SIM_NG","reason":"x","content":{}}`); code != http.StatusForbidden {
+		t.Fatalf("scoped operator must NOT write another scope: want 403, got %d", code)
+	}
+
+	// OVERVIEW must not leak rows outside the operator's authority: no
+	// telco:SIM_NG scope may appear (only own scope + global).
+	status, body := f.callBody(t, &s, "GET", "/v1/portal/config/overview", "")
+	if status != http.StatusOK {
+		t.Fatalf("overview: %d", status)
+	}
+	var ov struct {
+		Domains []struct{ Scope string } `json:"domains"`
+	}
+	if err := json.Unmarshal(body, &ov); err != nil {
+		t.Fatal(err)
+	}
+	if len(ov.Domains) == 0 {
+		t.Fatal("overview returned no rows for scoped operator")
+	}
+	for _, d := range ov.Domains {
+		if d.Scope != "global" && d.Scope != "programme:prg_sim_airtime01" {
+			t.Errorf("overview leaked out-of-scope row: %s", d.Scope)
+		}
 	}
 }

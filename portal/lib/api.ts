@@ -8,6 +8,7 @@ const CSRF_KEY = "bx_csrf";
 export type Session = {
   actor: string;
   role: "ADMIN" | "RISK" | "FINANCE" | "OPS" | "SUPPORT";
+  scope: string; // '*' = all scopes (platform admin), else a single config scope
   expires_at: string;
 };
 
@@ -44,7 +45,7 @@ export async function login(apiKey: string): Promise<Session> {
     api_key: apiKey,
   });
   sessionStorage.setItem(CSRF_KEY, r.csrf_token);
-  return { actor: r.actor, role: r.role, expires_at: r.expires_at };
+  return { actor: r.actor, role: r.role, scope: r.scope, expires_at: r.expires_at };
 }
 
 export async function logout(): Promise<void> {

@@ -115,16 +115,19 @@ func (ConfigVersions) GetActiveAt(ctx context.Context, tx pgx.Tx, domain, scope 
 }
 
 // List returns versions newest-first, optionally filtered by domain and/or
-// scope (” = no filter). Bounded by limit (caller validates).
-func (ConfigVersions) List(ctx context.Context, tx pgx.Tx, domain, scope string, limit int) ([]entity.ConfigVersion, error) {
+// scope (” = no filter). restrictScope (” = unrestricted) bounds the result
+// to a scoped operator's authority: their own scope plus shared 'global'
+// defaults (M4A-F3). Bounded by limit (caller validates).
+func (ConfigVersions) List(ctx context.Context, tx pgx.Tx, domain, scope, restrictScope string, limit int) ([]entity.ConfigVersion, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT config_version_id, domain, scope, version_no, state, content, content_hash,
 		       effective_from, effective_to, created_by, COALESCE(approved_by,''), reason,
 		       created_at, updated_at
 		FROM config_versions
 		WHERE ($1 = '' OR domain = $1) AND ($2 = '' OR scope = $2)
+		  AND ($3 = '' OR scope = $3 OR scope = 'global')
 		ORDER BY domain, scope, version_no DESC
-		LIMIT $3`, domain, scope, limit)
+		LIMIT $4`, domain, scope, restrictScope, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -142,16 +145,19 @@ func (ConfigVersions) List(ctx context.Context, tx pgx.Tx, domain, scope string,
 
 // Overview aggregates one row per (domain, scope): the currently ACTIVE
 // version (if any) and how many versions sit in the pre-active pipeline.
-// Set-based — one statement regardless of domain count.
-func (ConfigVersions) Overview(ctx context.Context, tx pgx.Tx) ([]entity.ConfigSummary, error) {
+// restrictScope (” = unrestricted) bounds the rows to a scoped operator's
+// authority (own scope + shared 'global'; M4A-F3). Set-based — one statement
+// regardless of domain count.
+func (ConfigVersions) Overview(ctx context.Context, tx pgx.Tx, restrictScope string) ([]entity.ConfigSummary, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT domain, scope,
 		       COALESCE(MAX(version_no) FILTER (WHERE state = 'ACTIVE'), 0),
 		       MAX(effective_from) FILTER (WHERE state = 'ACTIVE'),
 		       COUNT(*) FILTER (WHERE state IN ('DRAFT','SUBMITTED','APPROVED'))
 		FROM config_versions
+		WHERE ($1 = '' OR scope = $1 OR scope = 'global')
 		GROUP BY domain, scope
-		ORDER BY domain, scope`)
+		ORDER BY domain, scope`, restrictScope)
 	if err != nil {
 		return nil, err
 	}

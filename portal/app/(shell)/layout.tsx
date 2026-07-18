@@ -49,8 +49,9 @@ export default function ShellLayout({ children }: { children: React.ReactNode })
         </nav>
         <div className="whoami">
           <div>{session.actor}</div>
-          <div style={{ margin: "4px 0 10px" }}>
+          <div style={{ margin: "4px 0 10px", display: "flex", gap: 6, flexWrap: "wrap" }}>
             <span className="role">{session.role}</span>
+            {session.scope !== "*" && <span className="role" title="Authorization scope">{session.scope}</span>}
           </div>
           <button onClick={onSignOut} style={{ width: "100%" }}>
             Sign out

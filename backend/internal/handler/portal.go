@@ -54,21 +54,57 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/config/{id}/activate": {roleAdmin},
 }
 
+// RBACRoutes returns a copy of the route->roles authorization map. It exists
+// so tests (and future tooling) can drive their coverage from the SAME map
+// production enforces — the matrix cannot silently drift from the real policy
+// (M4A-F2).
+func RBACRoutes() map[string][]string {
+	out := make(map[string][]string, len(routeRoles))
+	for k, v := range routeRoles {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
 // Mount registers the portal routes. Login/logout sit OUTSIDE rbac (login
-// creates the session; logout only needs a valid session).
+// creates the session; logout only needs a valid session). Every other route
+// is mounted through mountRBAC so the mux pattern, the RBAC key, and the role
+// list are ONE fact (M4A-F2).
 func (p *Portal) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/portal/login", p.login)
 	mux.Handle("POST /v1/portal/logout", p.withSession(http.HandlerFunc(p.logout)))
 
-	mux.Handle("GET /v1/portal/me", p.rbac("GET /v1/portal/me", http.HandlerFunc(p.me)))
-	mux.Handle("GET /v1/portal/config/active", p.rbac("GET /v1/portal/config/active", http.HandlerFunc(p.configActive)))
-	mux.Handle("GET /v1/portal/config/overview", p.rbac("GET /v1/portal/config/overview", http.HandlerFunc(p.configOverview)))
-	mux.Handle("GET /v1/portal/config/versions", p.rbac("GET /v1/portal/config/versions", http.HandlerFunc(p.configVersions)))
-	mux.Handle("GET /v1/portal/config/{id}", p.rbac("GET /v1/portal/config/{id}", http.HandlerFunc(p.configGet)))
-	mux.Handle("POST /v1/portal/config/drafts", p.rbac("POST /v1/portal/config/drafts", http.HandlerFunc(p.configDraft)))
-	mux.Handle("POST /v1/portal/config/{id}/submit", p.rbac("POST /v1/portal/config/{id}/submit", p.configLifecycle("submit")))
-	mux.Handle("POST /v1/portal/config/{id}/approve", p.rbac("POST /v1/portal/config/{id}/approve", p.configLifecycle("approve")))
-	mux.Handle("POST /v1/portal/config/{id}/activate", p.rbac("POST /v1/portal/config/{id}/activate", p.configLifecycle("activate")))
+	p.mountRBAC(mux, "GET /v1/portal/me", http.HandlerFunc(p.me))
+	p.mountRBAC(mux, "GET /v1/portal/config/active", http.HandlerFunc(p.configActive))
+	p.mountRBAC(mux, "GET /v1/portal/config/overview", http.HandlerFunc(p.configOverview))
+	p.mountRBAC(mux, "GET /v1/portal/config/versions", http.HandlerFunc(p.configVersions))
+	p.mountRBAC(mux, "GET /v1/portal/config/{id}", http.HandlerFunc(p.configGet))
+	p.mountRBAC(mux, "POST /v1/portal/config/drafts", http.HandlerFunc(p.configDraft))
+	p.mountRBAC(mux, "POST /v1/portal/config/{id}/submit", p.configLifecycle("submit"))
+	p.mountRBAC(mux, "POST /v1/portal/config/{id}/approve", p.configLifecycle("approve"))
+	p.mountRBAC(mux, "POST /v1/portal/config/{id}/activate", p.configLifecycle("activate"))
+}
+
+// mountRBAC registers a route through the RBAC middleware and REQUIRES a
+// routeRoles entry for the exact pattern — a mount without a role list panics
+// at boot (fail-closed: a portal route can never become reachable without an
+// explicit allowlist). This collapses the three former copies of the
+// route->roles fact — mux pattern, rbac key, map key — into one (M4A-F2).
+func (p *Portal) mountRBAC(mux *http.ServeMux, pattern string, h http.Handler) {
+	if _, ok := routeRoles[pattern]; !ok {
+		panic("portal: route mounted without an RBAC entry: " + pattern)
+	}
+	mux.Handle(pattern, p.rbac(pattern, h))
+}
+
+// restrictFor returns the config-scope filter for a session: ” (unrestricted)
+// for a platform admin ('*'), otherwise the operator's single scope. Reads are
+// bounded to this plus shared 'global' defaults in the repo layer (M4A-F3).
+func restrictFor(s repo.PortalSession) string {
+	if s.Scope == "*" {
+		return ""
+	}
+	return s.Scope
 }
 
 // --- session + RBAC middleware ---------------------------------------------
@@ -141,6 +177,7 @@ type loginRequest struct {
 type loginResponse struct {
 	Actor     string    `json:"actor"`
 	Role      string    `json:"role"`
+	Scope     string    `json:"scope"`
 	CSRFToken string    `json:"csrf_token"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -151,7 +188,7 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "api_key is required")
 		return
 	}
-	actor, role, err := p.Admins.ResolveCredentialWithRole(r.Context(), req.APIKey)
+	actor, role, scope, err := p.Admins.ResolveCredentialWithRole(r.Context(), req.APIKey)
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusUnauthorized, "PORTAL_UNAUTHENTICATED", "invalid credentials")
@@ -170,7 +207,7 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 		return
 	}
-	if err := p.Sessions.Create(r.Context(), token, csrf, actor, role, sessionTTL); err != nil {
+	if err := p.Sessions.Create(r.Context(), token, csrf, actor, role, scope, sessionTTL); err != nil {
 		p.Log.Error("session create failed", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 		return
@@ -185,7 +222,7 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 	})
 	p.Log.Info("portal login", "actor", actor, "role", role)
 	writeJSON(w, http.StatusOK, loginResponse{
-		Actor: actor, Role: role, CSRFToken: csrf,
+		Actor: actor, Role: role, Scope: scope, CSRFToken: csrf,
 		ExpiresAt: time.Now().UTC().Add(sessionTTL),
 	})
 }
@@ -204,7 +241,7 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 func (p *Portal) me(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"actor": sess.Actor, "role": sess.Role, "expires_at": sess.ExpiresAt,
+		"actor": sess.Actor, "role": sess.Role, "scope": sess.Scope, "expires_at": sess.ExpiresAt,
 	})
 }
 
@@ -215,6 +252,11 @@ func (p *Portal) configDraft(w http.ResponseWriter, r *http.Request) {
 	var req draftRequest // shared with the header-authenticated admin API
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "malformed JSON body")
+		return
+	}
+	if !sess.PermitsWrite(req.Scope) {
+		p.Log.Warn("portal scope refusal (draft)", "actor", sess.Actor, "session_scope", sess.Scope, "record_scope", req.Scope)
+		writeErr(w, http.StatusForbidden, "PORTAL_FORBIDDEN", "not permitted for this scope")
 		return
 	}
 	cv, err := p.Config.CreateDraft(r.Context(), req.Domain, req.Scope, sess.Actor, req.Reason, req.Content)
@@ -229,7 +271,18 @@ func (p *Portal) configLifecycle(step string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r.Context())
 		id := r.PathValue("id")
-		var err error
+		// Load the target version to authorize against ITS scope — a scoped
+		// operator can only move versions within their own scope (M4A-F3).
+		cv, err := p.Config.GetVersion(r.Context(), id)
+		if err != nil {
+			p.writeConfigErr(w, err)
+			return
+		}
+		if !sess.PermitsWrite(cv.Scope) {
+			p.Log.Warn("portal scope refusal (lifecycle)", "actor", sess.Actor, "step", step, "session_scope", sess.Scope, "record_scope", cv.Scope)
+			writeErr(w, http.StatusForbidden, "PORTAL_FORBIDDEN", "not permitted for this scope")
+			return
+		}
 		switch step {
 		case "submit":
 			err = p.Config.Submit(r.Context(), id, sess.Actor)
@@ -247,10 +300,15 @@ func (p *Portal) configLifecycle(step string) http.HandlerFunc {
 }
 
 func (p *Portal) configActive(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
 	domain := r.URL.Query().Get("domain")
 	scope := r.URL.Query().Get("scope")
 	if domain == "" || scope == "" {
 		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "domain and scope are required")
+		return
+	}
+	if !sess.PermitsRead(scope) {
+		writeErr(w, http.StatusForbidden, "PORTAL_FORBIDDEN", "not permitted for this scope")
 		return
 	}
 	cv, err := p.Config.ActiveAt(r.Context(), domain, scope, time.Now().UTC())
@@ -270,7 +328,7 @@ type configSummaryResponse struct {
 }
 
 func (p *Portal) configOverview(w http.ResponseWriter, r *http.Request) {
-	ss, err := p.Config.Overview(r.Context())
+	ss, err := p.Config.Overview(r.Context(), restrictFor(sessionFrom(r.Context())))
 	if err != nil {
 		p.writeConfigErr(w, err)
 		return
@@ -287,7 +345,14 @@ func (p *Portal) configOverview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Portal) configVersions(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
 	q := r.URL.Query()
+	// If a specific scope is requested, a scoped operator must be permitted to
+	// read it; otherwise results are bounded to their authority in the repo.
+	if s := q.Get("scope"); s != "" && !sess.PermitsRead(s) {
+		writeErr(w, http.StatusForbidden, "PORTAL_FORBIDDEN", "not permitted for this scope")
+		return
+	}
 	limit := 0
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -297,7 +362,7 @@ func (p *Portal) configVersions(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	vs, err := p.Config.ListVersions(r.Context(), q.Get("domain"), q.Get("scope"), limit)
+	vs, err := p.Config.ListVersions(r.Context(), q.Get("domain"), q.Get("scope"), restrictFor(sess), limit)
 	if err != nil {
 		p.writeConfigErr(w, err)
 		return
@@ -310,9 +375,16 @@ func (p *Portal) configVersions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Portal) configGet(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
 	cv, err := p.Config.GetVersion(r.Context(), r.PathValue("id"))
 	if err != nil {
 		p.writeConfigErr(w, err)
+		return
+	}
+	if !sess.PermitsRead(cv.Scope) {
+		// A scoped operator asking for another tenant's version by id gets the
+		// same 404 as a nonexistent id — no cross-scope existence oracle.
+		writeErr(w, http.StatusNotFound, "CONFIG_NOT_FOUND", "config version not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, toConfigResponse(cv))
