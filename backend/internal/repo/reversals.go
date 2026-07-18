@@ -25,6 +25,7 @@ type PendingReversal struct {
 	ReversalSourceEventID string
 	Amount                entity.Money
 	State                 string // PARKED | APPLIED | EXPIRED
+	ParkReason            string // why it waits (M3B-F1 operator signal)
 	ReceivedAt            time.Time
 	AppliedAt             *time.Time
 }
@@ -33,18 +34,30 @@ type PendingReversal struct {
 // parking (same original or same reversal source) returns false — the first
 // record wins, replays are no-ops.
 func (PendingReversals) Park(ctx context.Context, tx pgx.Tx, p PendingReversal) (bool, error) {
+	if p.ParkReason == "" {
+		p.ParkReason = "ORIGINAL_UNSEEN"
+	}
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO pending_reversals
 		  (pending_reversal_id, telco_id, original_source_event_id, reversal_source_event_id,
-		   amount_minor, currency, state)
-		VALUES ($1,$2,$3,$4,$5,$6,'PARKED')
+		   amount_minor, currency, state, park_reason)
+		VALUES ($1,$2,$3,$4,$5,$6,'PARKED',$7)
 		ON CONFLICT DO NOTHING`,
 		p.PendingReversalID, p.TelcoID, p.OriginalSourceEventID, p.ReversalSourceEventID,
-		p.Amount.Amount(), string(p.Amount.Currency()))
+		p.Amount.Amount(), string(p.Amount.Currency()), p.ParkReason)
 	if err != nil {
 		return false, fmt.Errorf("park reversal: %w", err)
 	}
 	return ct.RowsAffected() == 1, nil
+}
+
+// SetParkReason updates why a PARKED reversal waits (e.g. its original
+// arrived but application collided with an invariant — M3B-F1).
+func (PendingReversals) SetParkReason(ctx context.Context, tx pgx.Tx, pendingReversalID, reason string) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE pending_reversals SET park_reason = $2
+		WHERE pending_reversal_id = $1 AND state = 'PARKED'`, pendingReversalID, reason)
+	return err
 }
 
 // FindParkedForOriginal returns the PARKED reversal awaiting this original
@@ -55,11 +68,11 @@ func (PendingReversals) FindParkedForOriginal(ctx context.Context, tx pgx.Tx, or
 	var cur string
 	err := tx.QueryRow(ctx, `
 		SELECT pending_reversal_id, telco_id, original_source_event_id, reversal_source_event_id,
-		       amount_minor, currency, state, received_at, applied_at
+		       amount_minor, currency, state, park_reason, received_at, applied_at
 		FROM pending_reversals
 		WHERE original_source_event_id = $1 AND state = 'PARKED'`, originalSourceEventID).
 		Scan(&p.PendingReversalID, &p.TelcoID, &p.OriginalSourceEventID, &p.ReversalSourceEventID,
-			&minor, &cur, &p.State, &p.ReceivedAt, &p.AppliedAt)
+			&minor, &cur, &p.State, &p.ParkReason, &p.ReceivedAt, &p.AppliedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return p, fmt.Errorf("parked reversal for %q: %w", originalSourceEventID, ErrNotFound)
 	}

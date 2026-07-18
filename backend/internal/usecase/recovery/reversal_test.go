@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 )
 
@@ -210,6 +211,103 @@ func TestDD19_Quarantine_TelcoLevelJournal(t *testing.T) {
 		t.Fatalf("suspense liability must be booked: %d", suspense)
 	}
 	assertBalancedBook(t, f)
+}
+
+// M3B-F1 (VR-16): a reversal whose reopen collides with the subscriber's NEW
+// open advance parks with a distinct reason — never aborted into nowhere —
+// and the telco's retry APPLIES once the blocker clears, draining the queue.
+func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) {
+	f := newFixture(t, "rev_collide")
+	advA := f.activeAdvance(t)
+
+	// A fully recovers and closes; the subscriber legally takes advance B.
+	if res := f.ingest(t, "src-A-full", 5_000); !res.AdvanceClosed {
+		t.Fatalf("A must close: %+v", res)
+	}
+	offers, err := f.orig.GetOffers(tenantCtx(), "prg_sim_airtime01", "tok_sim_0001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resB, err := f.orig.Confirm(tenantCtx(), origination.ConfirmCmd{
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
+		IdemKey: "rec-adv-B", CorrelationID: "cor-rec-B",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The telco reverses a recovery on A: the reopen would collide with B's
+	// one-active slot — the reversal must PARK with the collision recorded.
+	rev := f.reverse(t, "rvsl-A", "src-A-full", 5_000)
+	if !rev.Parked || rev.AdvanceReopened {
+		t.Fatalf("collision must park, not apply: %+v", rev)
+	}
+	var reason, prState string
+	if err := f.db.Admin.QueryRow(context.Background(), `
+		SELECT park_reason, state FROM pending_reversals
+		WHERE original_source_event_id='src-A-full'`).Scan(&reason, &prState); err != nil {
+		t.Fatal(err)
+	}
+	if prState != "PARKED" || reason != "SUBSCRIBER_HAS_OPEN_ADVANCE" {
+		t.Fatalf("must park with the collision as reason: state=%s reason=%s", prState, reason)
+	}
+	// A is untouched (still CLOSED) and B is untouched (still ACTIVE).
+	if state, _ := f.advanceRow(t, advA.AdvanceID); state != "CLOSED" {
+		t.Fatalf("A must stay CLOSED while parked: %s", state)
+	}
+	if state, _ := f.advanceRow(t, resB.Advance.AdvanceID); state != "ACTIVE" {
+		t.Fatalf("B must be unaffected: %s", state)
+	}
+
+	// B closes (B took the next rung on the still-valid ladder, so recover
+	// its ACTUAL outstanding); the telco retries the SAME reversal — it now
+	// applies and the parked row drains from the operator queue.
+	if res := f.ingest(t, "src-B-full", resB.Advance.Outstanding.Amount()); !res.AdvanceClosed {
+		t.Fatalf("B must close: %+v", res)
+	}
+	rev2 := f.reverse(t, "rvsl-A", "src-A-full", 5_000)
+	if rev2.Parked || !rev2.AdvanceReopened {
+		t.Fatalf("retry after blocker clears must apply: %+v", rev2)
+	}
+	if err := f.db.Admin.QueryRow(context.Background(), `
+		SELECT state FROM pending_reversals WHERE original_source_event_id='src-A-full'`).Scan(&prState); err != nil {
+		t.Fatal(err)
+	}
+	if prState != "APPLIED" {
+		t.Fatalf("parked row must drain to APPLIED: %s", prState)
+	}
+	if state, outstanding := f.advanceRow(t, advA.AdvanceID); state != string(entity.AdvPartiallyRecovered) || outstanding != 5_000 {
+		t.Fatalf("A must re-open with restored outstanding: %s/%d", state, outstanding)
+	}
+	assertBalancedBook(t, f)
+}
+
+// M3B-F1 second collision class: the pool no longer has headroom to re-fund
+// the reopened obligation — park with POOL_HEADROOM, never a raw abort.
+func TestM3BF1_PoolHeadroomCollision_Parks(t *testing.T) {
+	f := newFixture(t, "rev_headroom")
+	f.activeAdvance(t)
+	if res := f.ingest(t, "src-H-full", 5_000); !res.AdvanceClosed {
+		t.Fatalf("must close: %+v", res)
+	}
+	// Shrink the pool so the reopen cannot be funded.
+	if _, err := f.db.Admin.Exec(context.Background(),
+		`UPDATE funding_pools SET committed_minor = 1000 WHERE pool_id='pool_sim_01'`); err != nil {
+		t.Fatal(err)
+	}
+
+	rev := f.reverse(t, "rvsl-H", "src-H-full", 5_000)
+	if !rev.Parked {
+		t.Fatalf("headroom collision must park: %+v", rev)
+	}
+	var reason string
+	if err := f.db.Admin.QueryRow(context.Background(), `
+		SELECT park_reason FROM pending_reversals WHERE original_source_event_id='src-H-full'`).Scan(&reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason != "POOL_HEADROOM" {
+		t.Fatalf("reason must be POOL_HEADROOM, got %s", reason)
+	}
 }
 
 // assertBalancedBook: every journal balances per currency (INV-004 shape).

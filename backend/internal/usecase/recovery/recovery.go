@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
@@ -325,6 +326,7 @@ func (s *Service) Reverse(ctx context.Context, cmd ReverseCmd) (ReverseResult, e
 				OriginalSourceEventID: cmd.OriginalSourceEventID,
 				ReversalSourceEventID: cmd.ReversalSourceEventID,
 				Amount:                cmd.Amount,
+				ParkReason:            "ORIGINAL_NOT_ALLOCATED",
 			})
 			if err != nil {
 				return err
@@ -332,9 +334,83 @@ func (s *Service) Reverse(ctx context.Context, cmd ReverseCmd) (ReverseResult, e
 			out = ReverseResult{Parked: true, Replayed: !created}
 			return nil
 		}
-		return s.applyReversal(ctx, tx, &out, original, cmd.Amount, cmd.CorrelationID, cmd.ReversalSourceEventID)
+
+		// M3B-F1: application runs under a SAVEPOINT — an invariant collision
+		// (subscriber's new open advance blocks the reopen; pool lacks
+		// headroom) rolls back the attempt WITHOUT aborting this transaction,
+		// and the reversal PARKS with the collision as its reason. It lands
+		// in the operator queue, never nowhere.
+		collision, err := s.applyReversalGuarded(ctx, tx, &out, original, cmd.Amount, cmd.CorrelationID, cmd.ReversalSourceEventID)
+		if err != nil {
+			return err
+		}
+		if collision != "" {
+			created, err := s.reversals.Park(ctx, tx, repo.PendingReversal{
+				PendingReversalID:     platform.NewID("prv"),
+				TelcoID:               telcoID,
+				OriginalSourceEventID: cmd.OriginalSourceEventID,
+				ReversalSourceEventID: cmd.ReversalSourceEventID,
+				Amount:                cmd.Amount,
+				ParkReason:            collision,
+			})
+			if err != nil {
+				return err
+			}
+			if !created {
+				// Already parked (telco retry): keep the freshest reason.
+				parked, err := s.reversals.FindParkedForOriginal(ctx, tx, cmd.OriginalSourceEventID)
+				if err != nil {
+					return err
+				}
+				if err := s.reversals.SetParkReason(ctx, tx, parked.PendingReversalID, collision); err != nil {
+					return err
+				}
+			}
+			out = ReverseResult{Parked: true, Replayed: !created}
+			s.Log.Warn("reversal parked on invariant collision (M3B-F1)",
+				"original", cmd.OriginalSourceEventID, "reason", collision)
+			return nil
+		}
+		// Applied: if a prior attempt had parked this reversal (collision
+		// since cleared), close the parked row so the queue drains.
+		if parked, err := s.reversals.FindParkedForOriginal(ctx, tx, cmd.OriginalSourceEventID); err == nil {
+			if err := s.reversals.MarkApplied(ctx, tx, parked.PendingReversalID); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, repo.ErrNotFound) {
+			return err
+		}
+		return nil
 	})
 	return out, err
+}
+
+// applyReversalGuarded runs applyReversal inside a savepoint. A collision
+// with the one-active index or the pool-headroom CHECK returns a non-empty
+// park reason with the outer transaction still healthy; every other error is
+// returned as-is.
+func (s *Service) applyReversalGuarded(ctx context.Context, tx pgx.Tx, out *ReverseResult,
+	original entity.RecoveryEvent, amount entity.Money, correlationID, reversalSourceID string) (string, error) {
+
+	sp, err := tx.Begin(ctx) // pgx nested Begin = SAVEPOINT
+	if err != nil {
+		return "", err
+	}
+	err = s.applyReversal(ctx, sp, out, original, amount, correlationID, reversalSourceID)
+	if err == nil {
+		return "", sp.Commit(ctx)
+	}
+	_ = sp.Rollback(ctx)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		switch {
+		case pgErr.Code == "23505" && pgErr.ConstraintName == "advances_one_active_uq":
+			return "SUBSCRIBER_HAS_OPEN_ADVANCE", nil
+		case pgErr.Code == "23514" && pgErr.ConstraintName == "funding_no_overallocation":
+			return "POOL_HEADROOM", nil
+		}
+	}
+	return "", err
 }
 
 // applyParkedIfAny applies a parked reversal right after its original
@@ -351,9 +427,17 @@ func (s *Service) applyParkedIfAny(ctx context.Context, tx pgx.Tx, ingest *Inges
 	if err != nil {
 		return err
 	}
+	// M3B-F1: guarded — a collision must NOT sink the original's ingest.
+	// The reversal stays PARKED with the collision recorded for operators.
 	var rev ReverseResult
-	if err := s.applyReversal(ctx, tx, &rev, original, parked.Amount, cmd.CorrelationID, parked.ReversalSourceEventID); err != nil {
+	collision, err := s.applyReversalGuarded(ctx, tx, &rev, original, parked.Amount, cmd.CorrelationID, parked.ReversalSourceEventID)
+	if err != nil {
 		return err
+	}
+	if collision != "" {
+		s.Log.Warn("parked reversal still blocked after original arrived (M3B-F1)",
+			"original", cmd.SourceEventID, "reason", collision)
+		return s.reversals.SetParkReason(ctx, tx, parked.PendingReversalID, collision)
 	}
 	if err := s.reversals.MarkApplied(ctx, tx, parked.PendingReversalID); err != nil {
 		return err
