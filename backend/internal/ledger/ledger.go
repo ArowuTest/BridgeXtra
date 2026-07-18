@@ -72,12 +72,26 @@ type Journal struct {
 	Lines            []Line
 }
 
-// Well-known M1 event types.
+// Well-known event types.
 const (
 	EventAdvanceIssued    = "ADVANCE_ISSUED"
 	EventRecoveryApplied  = "RECOVERY_APPLIED"
 	EventRecoverySuspense = "RECOVERY_SUSPENSE" // over-recovery held as explicit liability (EDG-020)
+
+	// M3 money-core events.
+	EventRecoveryReversed    = "RECOVERY_REVERSED"     // EDG-019: applied recovery clawed back
+	EventRecoveryQuarantined = "RECOVERY_QUARANTINED"  // DD-19: telco-level liability, NO programme
+	EventWriteoffRecovery    = "WRITEOFF_RECOVERY_INC" // EDG-021: post-write-off recovery is income
+	EventWriteOff            = "WRITE_OFF"             // loss crystallisation (maker-checker upstream)
 )
+
+// telcoLevelEvents may post WITHOUT a programme: the money belongs to the
+// telco relationship as a whole (a quarantined event has no programme by
+// nature). Everything else requires one — the 0012 schema CHECK is the
+// structural twin of this map.
+var telcoLevelEvents = map[string]bool{
+	EventRecoveryQuarantined: true,
+}
 
 // Service posts journals. Chart-of-accounts comes from governed config —
 // admin-managed, never hardcoded.
@@ -118,8 +132,11 @@ func (s *Service) Post(ctx context.Context, tx pgx.Tx, j Journal) (posted bool, 
 	if len(j.Lines) < 2 {
 		return false, "", ErrEmptyJournal
 	}
-	if j.BusinessEventKey == "" || j.EventType == "" || j.TelcoID == "" || j.ProgrammeID == "" || j.CorrelationID == "" {
-		return false, "", fmt.Errorf("ledger: business_event_key, event_type, telco, programme and correlation_id are required")
+	if j.BusinessEventKey == "" || j.EventType == "" || j.TelcoID == "" || j.CorrelationID == "" {
+		return false, "", fmt.Errorf("ledger: business_event_key, event_type, telco and correlation_id are required")
+	}
+	if j.ProgrammeID == "" && !telcoLevelEvents[j.EventType] {
+		return false, "", fmt.Errorf("ledger: programme is required for event type %s (only telco-level events may omit it)", j.EventType)
 	}
 
 	allowed, err := s.allowedAccounts(ctx, time.Now().UTC())
@@ -155,7 +172,7 @@ func (s *Service) Post(ctx context.Context, tx pgx.Tx, j Journal) (posted bool, 
 	journalID = platform.NewID("jrn")
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id, lines_hash)
-		VALUES ($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8)
+		VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8)
 		ON CONFLICT (business_event_key, event_type) DO NOTHING`,
 		journalID, j.BusinessEventKey, j.EventType, j.TelcoID, j.ProgrammeID, j.AdvanceID, j.CorrelationID, hash)
 	if err != nil {

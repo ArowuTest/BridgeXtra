@@ -36,9 +36,14 @@ var advanceTransitions = map[AdvanceState][]AdvanceState{
 	AdvFulfilmentUnknown:  {AdvActive, AdvFulfilmentFailed},
 	AdvActive:             {AdvPartiallyRecovered, AdvClosed, AdvWrittenOff},
 	AdvPartiallyRecovered: {AdvPartiallyRecovered, AdvClosed, AdvWrittenOff},
-	// CLOSED / FULFILMENT_FAILED / DECLINED / WRITTEN_OFF are terminal.
-	// Post-write-off recoveries are recovery INCOME (EDG-021) — they never
-	// re-open the advance; the loss stays crystallised in the record.
+	// CLOSED re-opens ONLY on recovery reversal (EDG-019 matrix): the
+	// clawed-back amount is owed again, so the book must say so. This is the
+	// controlled-reversal transition — it happens inside the reversal
+	// transaction, never by hand.
+	AdvClosed: {AdvPartiallyRecovered},
+	// FULFILMENT_FAILED / DECLINED / WRITTEN_OFF are terminal. Post-write-off
+	// recoveries are recovery INCOME (EDG-021) — they never re-open the
+	// advance; the loss stays crystallised in the record.
 }
 
 // CanTransition reports whether from → to is a legal advance transition.
@@ -237,6 +242,7 @@ const (
 	RecoveryAllocated   RecoveryEventState = "ALLOCATED"
 	RecoveryQuarantined RecoveryEventState = "QUARANTINED"
 	RecoveryUnmatched   RecoveryEventState = "UNMATCHED"
+	RecoveryReversed    RecoveryEventState = "REVERSED" // M3b: fully clawed back (EDG-019)
 )
 
 type RecoveryEvent struct {
@@ -255,6 +261,9 @@ type AllocationComponent string
 const (
 	ComponentFee       AllocationComponent = "FEE"
 	ComponentPrincipal AllocationComponent = "PRINCIPAL"
+	// ComponentWriteoffIncome marks post-write-off recoveries (EDG-021):
+	// income against a crystallised loss, never receivable repayment.
+	ComponentWriteoffIncome AllocationComponent = "WRITEOFF_INCOME"
 )
 
 type RecoveryAllocation struct {

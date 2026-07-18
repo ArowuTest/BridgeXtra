@@ -36,6 +36,7 @@ type Service struct {
 	advances    repo.Advances
 	pools       repo.FundingPools
 	outbox      repo.Outbox
+	reversals   repo.PendingReversals
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, log *slog.Logger) *Service {
@@ -127,13 +128,25 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 			}
 			out = IngestResult{RecoveryEventID: evt.RecoveryEventID, State: entity.RecoveryUnmatched}
 			s.Log.Warn("recovery event unmatched", "source_event_id", cmd.SourceEventID)
+			// A reversal parked against an UNMATCHED original stays PARKED:
+			// no money was booked, so releasing it is an operator decision in
+			// the breaks workflow, never automatic.
 			return nil
 		}
 
 		adv, err := s.advances.FindOpenBySubscriber(ctx, tx, subscriberID)
 		if errors.Is(err, repo.ErrNotFound) {
-			// No recoverable advance: full quarantine (EDG-020 flavor).
-			return s.quarantine(ctx, tx, &out, evt, cmd.Amount, "NO_OPEN_ADVANCE")
+			// EDG-021: a WRITTEN_OFF advance takes recoveries as INCOME —
+			// the loss stays crystallised, the money is honestly booked.
+			wo, woErr := s.advances.FindWrittenOffBySubscriber(ctx, tx, subscriberID)
+			if woErr == nil {
+				return s.writeoffIncome(ctx, tx, &out, evt, wo, cmd)
+			}
+			if !errors.Is(woErr, repo.ErrNotFound) {
+				return woErr
+			}
+			// No recoverable advance at all: full quarantine (EDG-020 flavor).
+			return s.quarantine(ctx, tx, &out, evt, cmd.Amount, "NO_OPEN_ADVANCE", cmd.CorrelationID)
 		}
 		if err != nil {
 			return err
@@ -235,21 +248,304 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 		out.State = entity.RecoveryAllocated
 		out.Applied = applied
 		out.Excess = excess
-		return nil
+
+		// EDG-019: a reversal that arrived BEFORE this original was parked —
+		// apply it now, in the same transaction, so the pair nets exactly.
+		return s.applyParkedIfAny(ctx, tx, &out, cmd)
 	})
 	return out, err
 }
 
+// ReverseCmd is a telco reversal of a prior recovery event.
+type ReverseCmd struct {
+	ReversalSourceEventID string
+	OriginalSourceEventID string
+	Amount                entity.Money
+	CorrelationID         string
+}
+
+// ReverseResult reports what happened to the reversal.
+type ReverseResult struct {
+	Parked            bool         // original unseen — parked (EDG-019)
+	Applied           entity.Money // amount clawed back from the advance book
+	AdvanceReopened   bool         // CLOSED -> PARTIALLY_RECOVERED
+	Replayed          bool
+	PendingReversalID string
+}
+
+// Reverse processes a recovery reversal. Original seen and allocated ->
+// applied now; original unseen -> parked until it arrives (EDG-019). A
+// reversal exceeding the event's net applied amount is REFUSED loudly — the
+// discrepancy surfaces in reconciliation, it is never partially guessed.
+func (s *Service) Reverse(ctx context.Context, cmd ReverseCmd) (ReverseResult, error) {
+	if cmd.ReversalSourceEventID == "" || cmd.OriginalSourceEventID == "" || cmd.CorrelationID == "" {
+		return ReverseResult{}, fmt.Errorf("reversal source, original source and correlation id are required")
+	}
+	if !cmd.Amount.IsPositive() {
+		return ReverseResult{}, fmt.Errorf("reversal amount must be positive")
+	}
+
+	var out ReverseResult
+	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		telcoID, err := platform.TenantFrom(ctx)
+		if err != nil {
+			return err
+		}
+		original, err := s.events.GetBySource(ctx, tx, cmd.OriginalSourceEventID)
+		if errors.Is(err, repo.ErrNotFound) {
+			// EDG-019: reversal BEFORE original — park it (idempotent).
+			created, err := s.reversals.Park(ctx, tx, repo.PendingReversal{
+				PendingReversalID:     platform.NewID("prv"),
+				TelcoID:               telcoID,
+				OriginalSourceEventID: cmd.OriginalSourceEventID,
+				ReversalSourceEventID: cmd.ReversalSourceEventID,
+				Amount:                cmd.Amount,
+			})
+			if err != nil {
+				return err
+			}
+			parked, err := s.reversals.FindParkedForOriginal(ctx, tx, cmd.OriginalSourceEventID)
+			if err != nil {
+				return err
+			}
+			out = ReverseResult{Parked: true, Replayed: !created, PendingReversalID: parked.PendingReversalID}
+			s.Log.Warn("reversal parked before original (EDG-019)",
+				"original", cmd.OriginalSourceEventID, "reversal", cmd.ReversalSourceEventID)
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if original.State != entity.RecoveryAllocated {
+			// Money never reached the book (UNMATCHED/QUARANTINED): operator
+			// territory — park for the breaks workflow, never guess.
+			created, err := s.reversals.Park(ctx, tx, repo.PendingReversal{
+				PendingReversalID:     platform.NewID("prv"),
+				TelcoID:               telcoID,
+				OriginalSourceEventID: cmd.OriginalSourceEventID,
+				ReversalSourceEventID: cmd.ReversalSourceEventID,
+				Amount:                cmd.Amount,
+			})
+			if err != nil {
+				return err
+			}
+			out = ReverseResult{Parked: true, Replayed: !created}
+			return nil
+		}
+		return s.applyReversal(ctx, tx, &out, original, cmd.Amount, cmd.CorrelationID, cmd.ReversalSourceEventID)
+	})
+	return out, err
+}
+
+// applyParkedIfAny applies a parked reversal right after its original
+// allocated (same transaction — the pair commits or rolls back together).
+func (s *Service) applyParkedIfAny(ctx context.Context, tx pgx.Tx, ingest *IngestResult, cmd IngestCmd) error {
+	parked, err := s.reversals.FindParkedForOriginal(ctx, tx, cmd.SourceEventID)
+	if errors.Is(err, repo.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	original, err := s.events.GetBySource(ctx, tx, cmd.SourceEventID)
+	if err != nil {
+		return err
+	}
+	var rev ReverseResult
+	if err := s.applyReversal(ctx, tx, &rev, original, parked.Amount, cmd.CorrelationID, parked.ReversalSourceEventID); err != nil {
+		return err
+	}
+	if err := s.reversals.MarkApplied(ctx, tx, parked.PendingReversalID); err != nil {
+		return err
+	}
+	s.Log.Info("parked reversal applied with its original (EDG-019)",
+		"original", cmd.SourceEventID, "reversed", parked.Amount.String())
+	return nil
+}
+
+// applyReversal claws back an applied recovery: reverse-waterfall negative
+// allocations, outstanding restored, pool utilisation re-added (headroom
+// CHECK guards), CLOSED re-opens, mirrored balanced journal.
+func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResult,
+	original entity.RecoveryEvent, amount entity.Money, correlationID, reversalSourceID string) error {
+
+	netApplied, advanceID, err := s.allocations.NetAppliedByEvent(ctx, tx, original.RecoveryEventID)
+	if err != nil {
+		return err
+	}
+	if c, err := amount.Cmp(netApplied); err != nil {
+		return err
+	} else if c > 0 {
+		return fmt.Errorf("reversal %s exceeds the event's net applied %s — refused; resolve via the breaks workflow, never guessed",
+			amount, netApplied)
+	}
+
+	adv, err := s.advances.Get(ctx, tx, advanceID)
+	if err != nil {
+		return err
+	}
+	switch adv.State {
+	case entity.AdvActive, entity.AdvPartiallyRecovered, entity.AdvClosed:
+		// reversible book states
+	default:
+		// WRITTEN_OFF etc.: the receivable no longer exists — park for the
+		// breaks workflow (income adjustment is an operator decision).
+		return fmt.Errorf("reversal against advance in state %s requires operator resolution", adv.State)
+	}
+
+	// Reverse-waterfall un-allocation: negative rows against the components
+	// in REVERSE of the allocation order (principal back first under the
+	// seeded fee-first waterfall).
+	perComp, err := s.allocations.ListNetByEventComponent(ctx, tx, original.RecoveryEventID)
+	if err != nil {
+		return err
+	}
+	cfgV, err := s.Config.ActiveAt(ctx, "recovery.allocation", "programme:"+adv.ProgrammeID, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("recovery.allocation config: %w", err)
+	}
+	var ac allocationCfg
+	if err := json.Unmarshal(cfgV.Content, &ac); err != nil {
+		return err
+	}
+	remaining := amount
+	for i := len(ac.Waterfall) - 1; i >= 0 && remaining.IsPositive(); i-- {
+		comp := entity.AllocationComponent(ac.Waterfall[i])
+		have, ok := perComp[comp]
+		if !ok || !have.IsPositive() {
+			continue
+		}
+		take := remaining
+		if c, err := take.Cmp(have); err != nil {
+			return err
+		} else if c > 0 {
+			take = have
+		}
+		neg, err := take.Neg()
+		if err != nil {
+			return err
+		}
+		if err := s.allocations.Insert(ctx, tx, entity.RecoveryAllocation{
+			AllocationID:    platform.NewID("alc"),
+			RecoveryEventID: original.RecoveryEventID,
+			AdvanceID:       adv.AdvanceID,
+			Component:       comp,
+			Amount:          neg,
+		}); err != nil {
+			return err
+		}
+		if remaining, err = remaining.Sub(take); err != nil {
+			return err
+		}
+	}
+	if remaining.IsPositive() {
+		return fmt.Errorf("reversal un-allocation did not consume %s", remaining)
+	}
+
+	// Book restoration: outstanding grows back, pool funds it again.
+	newOutstanding, err := adv.Outstanding.Add(amount)
+	if err != nil {
+		return err
+	}
+	toState := adv.State
+	if adv.State == entity.AdvClosed {
+		toState = entity.AdvPartiallyRecovered
+		out.AdvanceReopened = true
+	}
+	if err := s.advances.ApplyReversal(ctx, tx, adv.AdvanceID, adv.Version, adv.State, toState, newOutstanding); err != nil {
+		return err
+	}
+	if err := s.pools.ReAddUtilisation(ctx, tx, adv.FundingPoolID, amount); err != nil {
+		return err
+	}
+
+	// Mirrored journal: receivable rebuilds, telco claws back.
+	if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+		BusinessEventKey: original.RecoveryEventID + "/reversed/" + reversalSourceID,
+		EventType:        ledger.EventRecoveryReversed,
+		TelcoID:          original.TelcoID,
+		ProgrammeID:      adv.ProgrammeID,
+		AdvanceID:        adv.AdvanceID,
+		CorrelationID:    correlationID,
+		Lines: []ledger.Line{
+			{Account: "SUBSCRIBER_RECEIVABLE", Side: ledger.Debit, Amount: amount},
+			{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Credit, Amount: amount},
+		},
+	}); err != nil {
+		return err
+	}
+
+	// Fully-reversed events become visible as such.
+	if c, err := amount.Cmp(netApplied); err == nil && c == 0 {
+		if err := s.events.SetState(ctx, tx, original.RecoveryEventID, entity.RecoveryAllocated, entity.RecoveryReversed); err != nil {
+			return err
+		}
+	}
+	out.Applied = amount
+	return nil
+}
+
+// writeoffIncome books a post-write-off recovery as income (EDG-021): the
+// advance stays WRITTEN_OFF, outstanding stays zero, the money is honestly
+// recognised against the crystallised loss.
+func (s *Service) writeoffIncome(ctx context.Context, tx pgx.Tx, out *IngestResult,
+	evt entity.RecoveryEvent, wo entity.Advance, cmd IngestCmd) error {
+
+	if err := s.allocations.Insert(ctx, tx, entity.RecoveryAllocation{
+		AllocationID:    platform.NewID("alc"),
+		RecoveryEventID: evt.RecoveryEventID,
+		AdvanceID:       wo.AdvanceID,
+		Component:       entity.ComponentWriteoffIncome,
+		Amount:          cmd.Amount,
+	}); err != nil {
+		return err
+	}
+	if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+		BusinessEventKey: evt.RecoveryEventID + "/writeoff-income",
+		EventType:        ledger.EventWriteoffRecovery,
+		TelcoID:          evt.TelcoID,
+		ProgrammeID:      wo.ProgrammeID,
+		AdvanceID:        wo.AdvanceID,
+		CorrelationID:    cmd.CorrelationID,
+		Lines: []ledger.Line{
+			{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Debit, Amount: cmd.Amount},
+			{Account: "WRITEOFF_RECOVERY_INCOME", Side: ledger.Credit, Amount: cmd.Amount},
+		},
+	}); err != nil {
+		return err
+	}
+	if err := s.events.SetState(ctx, tx, evt.RecoveryEventID, entity.RecoveryPending, entity.RecoveryAllocated); err != nil {
+		return err
+	}
+	out.RecoveryEventID = evt.RecoveryEventID
+	out.State = entity.RecoveryAllocated
+	out.Applied = cmd.Amount
+	s.Log.Info("post-write-off recovery booked as income (EDG-021)",
+		"advance", wo.AdvanceID, "amount", cmd.Amount.String())
+	return nil
+}
+
 // quarantine handles events with no allocatable advance: an explicit
-// suspense record — never silently retained, never discarded (EDG-020,
-// V2-REP-004). NO ledger posting here: a programme-less event has no honest
-// journal attribution yet (which programme's settlement position it affects
-// is a DD-19 settlement-design decision); booking it against an arbitrary
-// programme would be a hardcode masquerading as accounting. The suspense
-// item IS the operational record; ledger attribution lands with the M3
-// settlement engine (BUILD_PLAN §9 deferred register).
-func (s *Service) quarantine(ctx context.Context, tx pgx.Tx, out *IngestResult, evt entity.RecoveryEvent, amount entity.Money, reason string) error {
+// suspense record AND — DD-19, resolved at M3b — a TELCO-LEVEL ledger
+// attribution. A programme-less event has no programme to book against, so
+// the liability posts without one (the only event type the 0012 schema
+// permits that for): the books now say exactly what the operations table
+// says — money held, owed onward, attributable to the telco relationship.
+func (s *Service) quarantine(ctx context.Context, tx pgx.Tx, out *IngestResult, evt entity.RecoveryEvent, amount entity.Money, reason, correlationID string) error {
 	if err := s.suspense.Insert(ctx, tx, evt.TelcoID, evt.RecoveryEventID, amount, reason); err != nil {
+		return err
+	}
+	if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+		BusinessEventKey: evt.RecoveryEventID + "/quarantined",
+		EventType:        ledger.EventRecoveryQuarantined,
+		TelcoID:          evt.TelcoID,
+		// NO ProgrammeID: telco-level by nature (DD-19).
+		CorrelationID: correlationID,
+		Lines: []ledger.Line{
+			{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Debit, Amount: amount},
+			{Account: "RECOVERY_SUSPENSE", Side: ledger.Credit, Amount: amount},
+		},
+	}); err != nil {
 		return err
 	}
 	if err := s.events.SetState(ctx, tx, evt.RecoveryEventID, entity.RecoveryPending, entity.RecoveryQuarantined); err != nil {
