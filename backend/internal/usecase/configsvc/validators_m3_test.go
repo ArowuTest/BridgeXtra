@@ -66,6 +66,50 @@ func TestM3_SettlementTermsValidator_SharesPartitionExactly(t *testing.T) {
 	}
 }
 
+// CFG-012 (M3e): a template that could EVER post unbalanced cannot activate;
+// the proof is symbolic, so it covers every binding and every
+// omit_when_zero branch.
+func TestM3E_TemplateValidator_SymbolicBalanceProof(t *testing.T) {
+	svc, _ := newSvc(t, "cfg_m3etpl")
+	cases := map[string]string{
+		"plainly unbalanced": `{"templates":{"X":{"lines":[
+			{"account":"SUBSCRIBER_RECEIVABLE","side":"DEBIT","amount":"AMOUNT"},
+			{"account":"FEE_INCOME","side":"CREDIT","amount":"FEE"}]}}}`,
+		"subtle: outstanding vs disbursed only": `{"templates":{"X":{"lines":[
+			{"account":"SUBSCRIBER_RECEIVABLE","side":"DEBIT","amount":"OUTSTANDING"},
+			{"account":"AIRTIME_FUNDING_CLEARING","side":"CREDIT","amount":"DISBURSED"}]}}}`,
+		"unknown symbol": `{"templates":{"X":{"lines":[
+			{"account":"SUBSCRIBER_RECEIVABLE","side":"DEBIT","amount":"MAGIC"},
+			{"account":"FEE_INCOME","side":"CREDIT","amount":"MAGIC"}]}}}`,
+		"account not on chart": `{"templates":{"X":{"lines":[
+			{"account":"SLUSH_FUND","side":"DEBIT","amount":"AMOUNT"},
+			{"account":"FEE_INCOME","side":"CREDIT","amount":"AMOUNT"}]}}}`,
+		"single line": `{"templates":{"X":{"lines":[
+			{"account":"FEE_INCOME","side":"DEBIT","amount":"AMOUNT"}]}}}`,
+		"empty set halts posting": `{"templates":{}}`,
+	}
+	for label, content := range cases {
+		mustReject(t, svc, "ledger.templates", "global", label, content)
+	}
+
+	// The seeded shape (OUTSTANDING = DISBURSED + FEE identity, optional fee
+	// line) approves — the identity is what makes it balance.
+	ctx := context.Background()
+	good, err := svc.CreateDraft(ctx, "ledger.templates", "global", "alice", "valid", []byte(`{"templates":{"ADVANCE_ISSUED":{"lines":[
+		{"account":"SUBSCRIBER_RECEIVABLE","side":"DEBIT","amount":"OUTSTANDING"},
+		{"account":"AIRTIME_FUNDING_CLEARING","side":"CREDIT","amount":"DISBURSED"},
+		{"account":"FEE_INCOME","side":"CREDIT","amount":"FEE","omit_when_zero":true}]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Submit(ctx, good.ConfigVersionID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Approve(ctx, good.ConfigVersionID, "bob"); err != nil {
+		t.Fatalf("the balanced identity template must approve: %v", err)
+	}
+}
+
 func TestM3_SeededDomainsActive(t *testing.T) {
 	svc, _ := newSvc(t, "cfg_m3seeds")
 	ctx := context.Background()

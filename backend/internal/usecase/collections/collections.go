@@ -176,19 +176,16 @@ func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, appr
 			return err
 		}
 
-		// Balanced movement: the receivable dies, the loss is recognised.
-		if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+		// Balanced movement: the receivable dies, the loss is recognised
+		// (template-rendered, CFG-012).
+		if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 			BusinessEventKey: wo.WriteOffID + "/posted",
 			EventType:        ledger.EventWriteOff,
 			TelcoID:          telcoID,
 			ProgrammeID:      adv.ProgrammeID,
 			AdvanceID:        adv.AdvanceID,
 			CorrelationID:    correlationID,
-			Lines: []ledger.Line{
-				{Account: "WRITE_OFF_EXPENSE", Side: ledger.Debit, Amount: adv.Outstanding},
-				{Account: "SUBSCRIBER_RECEIVABLE", Side: ledger.Credit, Amount: adv.Outstanding},
-			},
-		}); err != nil {
+		}, ledger.Bindings{ledger.SymAmount: adv.Outstanding}); err != nil {
 			return err
 		}
 		if err := s.writeoffs.MarkPosted(ctx, tx, writeOffID); err != nil {

@@ -70,6 +70,7 @@ type Journal struct {
 	AdvanceID        string
 	CorrelationID    string
 	Lines            []Line
+	TemplateVersion  string // set by PostEvent: the governed template rendered from (CFG-012)
 }
 
 // Well-known event types.
@@ -171,10 +172,10 @@ func (s *Service) Post(ctx context.Context, tx pgx.Tx, j Journal) (posted bool, 
 	hash := linesHash(j.Lines)
 	journalID = platform.NewID("jrn")
 	ct, err := tx.Exec(ctx, `
-		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id, lines_hash)
-		VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8)
+		INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, advance_id, correlation_id, lines_hash, template_version)
+		VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8,NULLIF($9,''))
 		ON CONFLICT (business_event_key, event_type) DO NOTHING`,
-		journalID, j.BusinessEventKey, j.EventType, j.TelcoID, j.ProgrammeID, j.AdvanceID, j.CorrelationID, hash)
+		journalID, j.BusinessEventKey, j.EventType, j.TelcoID, j.ProgrammeID, j.AdvanceID, j.CorrelationID, hash, j.TemplateVersion)
 	if err != nil {
 		return false, "", err
 	}

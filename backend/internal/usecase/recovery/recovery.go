@@ -187,19 +187,16 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 			return err
 		}
 
-		// Balanced journal for the applied portion (idempotent by event id).
-		if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+		// Balanced journal for the applied portion (idempotent by event id;
+		// template-rendered, CFG-012).
+		if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 			BusinessEventKey: evt.RecoveryEventID + "/applied",
 			EventType:        ledger.EventRecoveryApplied,
 			TelcoID:          telcoID,
 			ProgrammeID:      adv.ProgrammeID,
 			AdvanceID:        adv.AdvanceID,
 			CorrelationID:    cmd.CorrelationID,
-			Lines: []ledger.Line{
-				{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Debit, Amount: applied},
-				{Account: "SUBSCRIBER_RECEIVABLE", Side: ledger.Credit, Amount: applied},
-			},
-		}); err != nil {
+		}, ledger.Bindings{ledger.SymAmount: applied}); err != nil {
 			return err
 		}
 
@@ -209,18 +206,14 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 			if err := s.suspense.Insert(ctx, tx, telcoID, evt.RecoveryEventID, excess, "OVER_RECOVERY"); err != nil {
 				return err
 			}
-			if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+			if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 				BusinessEventKey: evt.RecoveryEventID + "/suspense",
 				EventType:        ledger.EventRecoverySuspense,
 				TelcoID:          telcoID,
 				ProgrammeID:      adv.ProgrammeID,
 				AdvanceID:        adv.AdvanceID,
 				CorrelationID:    cmd.CorrelationID,
-				Lines: []ledger.Line{
-					{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Debit, Amount: excess},
-					{Account: "RECOVERY_SUSPENSE", Side: ledger.Credit, Amount: excess},
-				},
-			}); err != nil {
+			}, ledger.Bindings{ledger.SymAmount: excess}); err != nil {
 				return err
 			}
 		}
@@ -544,18 +537,14 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 	}
 
 	// Mirrored journal: receivable rebuilds, telco claws back.
-	if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+	if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 		BusinessEventKey: original.RecoveryEventID + "/reversed/" + reversalSourceID,
 		EventType:        ledger.EventRecoveryReversed,
 		TelcoID:          original.TelcoID,
 		ProgrammeID:      adv.ProgrammeID,
 		AdvanceID:        adv.AdvanceID,
 		CorrelationID:    correlationID,
-		Lines: []ledger.Line{
-			{Account: "SUBSCRIBER_RECEIVABLE", Side: ledger.Debit, Amount: amount},
-			{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Credit, Amount: amount},
-		},
-	}); err != nil {
+	}, ledger.Bindings{ledger.SymAmount: amount}); err != nil {
 		return err
 	}
 
@@ -584,18 +573,14 @@ func (s *Service) writeoffIncome(ctx context.Context, tx pgx.Tx, out *IngestResu
 	}); err != nil {
 		return err
 	}
-	if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+	if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 		BusinessEventKey: evt.RecoveryEventID + "/writeoff-income",
 		EventType:        ledger.EventWriteoffRecovery,
 		TelcoID:          evt.TelcoID,
 		ProgrammeID:      wo.ProgrammeID,
 		AdvanceID:        wo.AdvanceID,
 		CorrelationID:    cmd.CorrelationID,
-		Lines: []ledger.Line{
-			{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Debit, Amount: cmd.Amount},
-			{Account: "WRITEOFF_RECOVERY_INCOME", Side: ledger.Credit, Amount: cmd.Amount},
-		},
-	}); err != nil {
+	}, ledger.Bindings{ledger.SymAmount: cmd.Amount}); err != nil {
 		return err
 	}
 	if err := s.events.SetState(ctx, tx, evt.RecoveryEventID, entity.RecoveryPending, entity.RecoveryAllocated); err != nil {
@@ -619,17 +604,13 @@ func (s *Service) quarantine(ctx context.Context, tx pgx.Tx, out *IngestResult, 
 	if err := s.suspense.Insert(ctx, tx, evt.TelcoID, evt.RecoveryEventID, amount, reason); err != nil {
 		return err
 	}
-	if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+	if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 		BusinessEventKey: evt.RecoveryEventID + "/quarantined",
 		EventType:        ledger.EventRecoveryQuarantined,
 		TelcoID:          evt.TelcoID,
 		// NO ProgrammeID: telco-level by nature (DD-19).
 		CorrelationID: correlationID,
-		Lines: []ledger.Line{
-			{Account: "TELCO_SETTLEMENT_RECEIVABLE", Side: ledger.Debit, Amount: amount},
-			{Account: "RECOVERY_SUSPENSE", Side: ledger.Credit, Amount: amount},
-		},
-	}); err != nil {
+	}, ledger.Bindings{ledger.SymAmount: amount}); err != nil {
 		return err
 	}
 	if err := s.events.SetState(ctx, tx, evt.RecoveryEventID, entity.RecoveryPending, entity.RecoveryQuarantined); err != nil {

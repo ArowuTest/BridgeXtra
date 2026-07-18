@@ -610,22 +610,19 @@ func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID strin
 			if err := s.pools.ConfirmUtilisation(ctx, tx, adv.FundingPoolID, adv.Outstanding); err != nil {
 				return err
 			}
-			// Ledger: recognition at confirmed fulfilment (A-10/V2-LED-006).
-			lines := []ledger.Line{
-				{Account: "SUBSCRIBER_RECEIVABLE", Side: ledger.Debit, Amount: adv.Outstanding},
-				{Account: "AIRTIME_FUNDING_CLEARING", Side: ledger.Credit, Amount: adv.Disbursed},
-			}
-			if adv.Fee.IsPositive() {
-				lines = append(lines, ledger.Line{Account: "FEE_INCOME", Side: ledger.Credit, Amount: adv.Fee})
-			}
-			if _, _, err := s.Ledger.Post(ctx, tx, ledger.Journal{
+			// Ledger: recognition at confirmed fulfilment (A-10/V2-LED-006),
+			// rendered from the governed template (CFG-012, M3e).
+			if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 				BusinessEventKey: adv.AdvanceID + "/issued",
 				EventType:        ledger.EventAdvanceIssued,
 				TelcoID:          adv.TelcoID,
 				ProgrammeID:      adv.ProgrammeID,
 				AdvanceID:        adv.AdvanceID,
 				CorrelationID:    adv.CorrelationID,
-				Lines:            lines,
+			}, ledger.Bindings{
+				ledger.SymOutstanding: adv.Outstanding,
+				ledger.SymDisbursed:   adv.Disbursed,
+				ledger.SymFee:         adv.Fee,
 			}); err != nil {
 				return err
 			}
