@@ -56,7 +56,7 @@ func validateScoringPolicy(ctx context.Context, tx pgx.Tx, content json.RawMessa
 		OneTierUpMax       *int    `json:"one_tier_up_max"`
 		DecisionValidHours *int    `json:"decision_valid_hours"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 
@@ -151,7 +151,7 @@ func validateOverlaysPolicy(ctx context.Context, tx pgx.Tx, content json.RawMess
 		SimSwapCooloffHours *int     `json:"sim_swap_cooloff_hours"`
 		CheckAt             []string `json:"check_at"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	// Zero-config floor: an empty blocking list would silently disable every
@@ -200,7 +200,7 @@ func validateNotifyTemplates(ctx context.Context, tx pgx.Tx, content json.RawMes
 			Body    *string `json:"body"`
 		} `json:"templates"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.SenderID == nil || *v.SenderID == "" {

@@ -90,10 +90,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.Health(appPool))
 
-	// Admin config API (owner directive: admin manages configuration).
-	adminAuth := &handler.AdminAuth{Admins: &repo.Admins{Pool: appPool}, Log: log}
-	cfgAdmin := &handler.ConfigAdmin{Svc: configsvc.New(workerPool), Log: log}
-	cfgAdmin.Mount(mux, adminAuth)
+	// Config is managed ONLY through the portal — RBAC- (ADMIN-only for
+	// mutations) and scope-gated. The former header-authenticated admin config
+	// API was removed in EXT-1: it was a role-unaware parallel door to the same
+	// configsvc. Any future config automation gets a distinctly-classified
+	// service principal on this same RBAC chain, never a header bypass.
 
 	// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC.
 	portal := &handler.Portal{

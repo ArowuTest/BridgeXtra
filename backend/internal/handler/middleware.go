@@ -86,6 +86,12 @@ func writeErr(w http.ResponseWriter, status int, code, msg string) {
 	})
 }
 
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
 // Health is the unauthenticated liveness endpoint (V2-SRV-008).
 func Health(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

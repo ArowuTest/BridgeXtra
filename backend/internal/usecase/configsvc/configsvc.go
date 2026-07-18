@@ -222,7 +222,7 @@ func validateConcurrency(ctx context.Context, tx pgx.Tx, content json.RawMessage
 	var v struct {
 		MaxConcurrentAdvances *int `json:"max_concurrent_advances"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.MaxConcurrentAdvances == nil {
@@ -255,7 +255,7 @@ func validateIdempotencyTTL(ctx context.Context, tx pgx.Tx, content json.RawMess
 		TTLHours      *int `json:"ttl_hours"`
 		MinFloorHours *int `json:"min_floor_hours"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.TTLHours == nil || v.MinFloorHours == nil {
@@ -276,7 +276,7 @@ func validateOutbox(ctx context.Context, tx pgx.Tx, content json.RawMessage) err
 		MaxAttempts         *int `json:"max_attempts"`
 		RetryBackoffSeconds *int `json:"retry_backoff_seconds"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	switch {

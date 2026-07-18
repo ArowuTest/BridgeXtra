@@ -48,7 +48,7 @@ func validateLedgerTemplates(ctx context.Context, tx pgx.Tx, content json.RawMes
 			} `json:"lines"`
 		} `json:"templates"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if len(v.Templates) == 0 {
@@ -118,6 +118,11 @@ func activeChartAccounts(ctx context.Context, tx pgx.Tx) (map[string]bool, error
 			Code string `json:"code"`
 		} `json:"accounts"`
 	}
+	// Lenient decode by design: this is a PROJECTION read of an already-active,
+	// already-strict-validated chart (we only need the codes to cross-check).
+	// strictUnmarshal (EXT-4) guards VALIDATION of new drafts — the chart's
+	// other fields (kind, …) were fully modelled and checked at its own
+	// approval by validateLedgerAccounts.
 	if err := json.Unmarshal(content, &c); err != nil {
 		return nil, err
 	}

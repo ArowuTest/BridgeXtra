@@ -17,7 +17,7 @@ info:
     - Timestamps are UTC RFC 3339.
     - Errors use the standard envelope with stable `error_code` families
       (AUTH_*, TENANT_*, OFFER_*, ADVANCE_*, FULFILMENT_*, FUNDING_*, RATE_*, SYSTEM_*).
-  version: 0.4.2  # M4c — portal risk workspace (guardrail trips + two-person re-arm)
+  version: 0.4.3  # EXT-1 — removed role-unaware legacy admin config API (portal is the sole config surface)
 servers:
   - url: http://localhost:8090
     description: Local development (A-14)
@@ -519,121 +519,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /v1/admin/config/drafts:
-    post:
-      operationId: createConfigDraft
-      summary: Create a configuration draft (governed lifecycle, V2-CFG-001)
-      description: >
-        Owner rule: admin manages configuration — no code change for config
-        changes. The maker identity comes from the admin credential, never
-        the payload. Content is validated by the domain validator before any
-        approval can succeed; a value the platform cannot honor is rejected,
-        never stored-and-ignored (SF-2).
-      security: [{ AdminKeyAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [domain, scope, reason, content]
-              properties:
-                domain: { type: string, example: product.airtime }
-                scope: { type: string, example: "programme:prg_sim_airtime01" }
-                reason: { type: string }
-                content: { type: object }
-      responses:
-        "201":
-          description: Draft created
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ConfigVersion" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "422":
-          description: Malformed draft (CONFIG_BAD_REQUEST)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /v1/admin/config/{id}/submit:
-    post:
-      operationId: submitConfigDraft
-      summary: Submit a draft for approval
-      security: [{ AdminKeyAuth: [] }]
-      parameters: [{ $ref: "#/components/parameters/ConfigVersionId" }]
-      responses:
-        "204": { description: Submitted }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/ConfigNotFound" }
-
-  /v1/admin/config/{id}/approve:
-    post:
-      operationId: approveConfigVersion
-      summary: Approve a submitted version (maker≠checker enforced)
-      description: >
-        The approver must differ from the maker (409 CONFIG_MAKER_CHECKER,
-        V2-CFG-002). The domain validator runs inside the same transaction;
-        invalid content is 422 CONFIG_VALIDATION_FAILED.
-      security: [{ AdminKeyAuth: [] }]
-      parameters: [{ $ref: "#/components/parameters/ConfigVersionId" }]
-      responses:
-        "204": { description: Approved }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/ConfigNotFound" }
-        "409":
-          description: Maker cannot approve own change (CONFIG_MAKER_CHECKER)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "422":
-          description: Domain validation failed (CONFIG_VALIDATION_FAILED)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /v1/admin/config/{id}/activate:
-    post:
-      operationId: activateConfigVersion
-      summary: Activate an approved version (supersedes the current one atomically)
-      security: [{ AdminKeyAuth: [] }]
-      parameters: [{ $ref: "#/components/parameters/ConfigVersionId" }]
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                effective_from: { type: string, format: date-time }
-      responses:
-        "204": { description: Activated }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/ConfigNotFound" }
-        "422":
-          description: Activation validation failed (CONFIG_VALIDATION_FAILED)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /v1/admin/config/active:
-    get:
-      operationId: getActiveConfig
-      summary: Resolve the currently effective version for a domain/scope
-      description: Falls back scope → global, so tenants inherit platform defaults.
-      security: [{ AdminKeyAuth: [] }]
-      parameters:
-        - { name: domain, in: query, required: true, schema: { type: string } }
-        - { name: scope, in: query, required: true, schema: { type: string } }
-      responses:
-        "200":
-          description: Effective configuration version
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ConfigVersion" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404": { $ref: "#/components/responses/ConfigNotFound" }
-
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -644,21 +529,11 @@ components:
         Telco/channel credential. Only the SHA-256 of the key is stored
         (V2-SEC-005). The credential — not any payload field — determines the
         tenant context.
-    AdminKeyAuth:
-      type: apiKey
-      in: header
-      name: X-Admin-Key
-      description: >
-        Platform-administrator credential; resolves to the stable actor
-        identity used for maker-checker attribution.
+    # AdminKeyAuth (X-Admin-Key) removed in EXT-1 — the header-authenticated
+    # admin config API it secured was a role-unaware bypass of the portal's
+    # RBAC + scope model. Operator auth is the session cookie only.
 
   parameters:
-    ConfigVersionId:
-      name: id
-      in: path
-      required: true
-      schema: { type: string }
-      description: config_version_id from draft creation.
     TelcoIdClaim:
       name: X-Telco-Id
       in: header
@@ -851,12 +726,6 @@ components:
           type: string
 
   responses:
-    ConfigNotFound:
-      description: Config version not found or not in the required lifecycle state (CONFIG_NOT_FOUND).
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
     Unauthorized:
       description: Missing, unknown or revoked credential (AUTH_INVALID_CLIENT).
       content:

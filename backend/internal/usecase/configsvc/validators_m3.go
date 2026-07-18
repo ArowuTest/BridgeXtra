@@ -30,7 +30,7 @@ func bucketCodes(content json.RawMessage) (map[string]bool, error) {
 		} `json:"buckets"`
 		GraceDays *int `json:"grace_days"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return nil, fmt.Errorf("parse: %w", err)
 	}
 	if len(v.Buckets) < 2 {
@@ -76,7 +76,7 @@ func validateWriteoffPolicy(ctx context.Context, tx pgx.Tx, content json.RawMess
 		RequireDistinctApprover *bool   `json:"require_distinct_approver"`
 		PostWriteoffRecovery    *string `json:"post_writeoff_recovery"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.MinBucket == nil || *v.MinBucket == "" {
@@ -101,7 +101,7 @@ func validateTreasuryGuardrails(ctx context.Context, tx pgx.Tx, content json.Raw
 		TripAction                  *string `json:"trip_action"`
 		Rearm                       *string `json:"rearm"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.MaxDailyDisbursedMinor == nil || *v.MaxDailyDisbursedMinor <= 0 {
@@ -132,7 +132,7 @@ func validateSettlementTerms(ctx context.Context, tx pgx.Tx, content json.RawMes
 		} `json:"taxes"`
 		ToleranceMinor *int64 `json:"tolerance_minor"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.Cycle == nil || (*v.Cycle != "MONTHLY" && *v.Cycle != "WEEKLY") {

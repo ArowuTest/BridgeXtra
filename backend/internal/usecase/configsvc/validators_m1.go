@@ -35,7 +35,7 @@ func validateLedgerAccounts(ctx context.Context, tx pgx.Tx, content json.RawMess
 			Kind *string `json:"kind"`
 		} `json:"accounts"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if len(v.Accounts) == 0 {
@@ -66,7 +66,7 @@ func validateProductAirtime(ctx context.Context, tx pgx.Tx, content json.RawMess
 		FeeModel           *string          `json:"fee_model"`
 		OfferExpiryMinutes *int             `json:"offer_expiry_minutes"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.Currency == nil || !v.Currency.Valid() {
@@ -105,7 +105,7 @@ func validateReservation(ctx context.Context, tx pgx.Tx, content json.RawMessage
 		TTLMinutes    *int    `json:"reservation_ttl_minutes"`
 		ExpiredRepair *string `json:"expired_repair"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.TTLMinutes == nil || *v.TTLMinutes < 1 || *v.TTLMinutes > 24*60 {
@@ -122,7 +122,7 @@ func validateFulfilment(ctx context.Context, tx pgx.Tx, content json.RawMessage)
 		Delays            []int `json:"status_enquiry_delays_seconds"`
 		EscalationMinutes *int  `json:"unknown_escalation_minutes"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if len(v.Delays) == 0 {
@@ -146,7 +146,7 @@ func validateAllocation(ctx context.Context, tx pgx.Tx, content json.RawMessage)
 		Waterfall    []string `json:"waterfall"`
 		OverRecovery *string  `json:"over_recovery"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	seen := map[string]bool{}
@@ -177,7 +177,7 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 		CircuitMinRequests     *int    `json:"circuit_min_requests"`
 		MaxWeeklyRechargeMinor *int64  `json:"max_weekly_recharge_minor"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.FulfilmentURL == nil {
@@ -217,7 +217,7 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 		AutoResolve          *bool  `json:"auto_resolve"`
 		BreakAgingAlertHours *int   `json:"break_aging_alert_hours"`
 	}
-	if err := json.Unmarshal(content, &v); err != nil {
+	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.AmountToleranceMinor == nil || *v.AmountToleranceMinor < 0 {

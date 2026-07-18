@@ -30,17 +30,12 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 	// Route pinning: every path the API serves must be documented, and every
 	// documented path must exist in code. Update BOTH in the same commit.
 	served := map[string]bool{
-		"/healthz":                       true,
-		"/v1/programmes":                 true,
-		"/v1/offers":                     true,
-		"/v1/advances":                   true,
-		"/v1/advances/{id}":              true,
-		"/v1/recovery/events":            true,
-		"/v1/admin/config/drafts":        true,
-		"/v1/admin/config/{id}/submit":   true,
-		"/v1/admin/config/{id}/approve":  true,
-		"/v1/admin/config/{id}/activate": true,
-		"/v1/admin/config/active":        true,
+		"/healthz":            true,
+		"/v1/programmes":      true,
+		"/v1/offers":          true,
+		"/v1/advances":        true,
+		"/v1/advances/{id}":   true,
+		"/v1/recovery/events": true,
 		// M4a portal (session-authenticated, deny-by-default RBAC)
 		"/v1/portal/login":                true,
 		"/v1/portal/logout":               true,
