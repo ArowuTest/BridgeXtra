@@ -12,6 +12,7 @@ package scoring
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 )
@@ -24,7 +25,15 @@ import (
 // 1.1.0: canonical doc echoes ALL engine inputs (subscriber_status,
 // prior_tier_code) so replay is self-contained — mutable external state
 // (a status change after scoring) can never make a replay diverge.
-const EngineVersion = "bx-score-1.1.0"
+//
+// 1.2.0 (G2 folds): missing_policy is IMPLEMENTED (G2-F1 — MISSING_FIELDS
+// quality flag routes through REJECT or STARTER per config; previously the
+// validated knob was read by nothing); spike reason renamed to the factual
+// SPIKE_PATTERN_DETECTED and the spike consequence is an explicit policy
+// decision, anti_gaming.spike_action = FLAG_ONLY | CAP_TO_STARTER (G2-F2);
+// weekly values are overflow-guarded at the engine boundary (G2-F3 defense
+// in depth behind the ingest plausibility ceiling).
+const EngineVersion = "bx-score-1.2.0"
 
 // Features is the parsed canonical feature row (integer quantities only).
 type Features struct {
@@ -56,10 +65,11 @@ type Policy struct {
 	} `json:"staleness"`
 	MissingPolicy string `json:"missing_policy"`
 	AntiGaming    struct {
-		WindowDays       int   `json:"window_days"`
-		WinsorUpperBps   int64 `json:"winsor_upper_bps"`
-		SpikeRatioMaxBps int64 `json:"spike_ratio_max_bps"`
-		MinActiveDays    int   `json:"min_active_days"`
+		WindowDays       int    `json:"window_days"`
+		WinsorUpperBps   int64  `json:"winsor_upper_bps"`
+		SpikeRatioMaxBps int64  `json:"spike_ratio_max_bps"`
+		MinActiveDays    int    `json:"min_active_days"`
+		SpikeAction      string `json:"spike_action"` // FLAG_ONLY | CAP_TO_STARTER
 	} `json:"anti_gaming"`
 	Tiers              []Tier `json:"tiers"`
 	StarterTier        string `json:"starter_tier"`
@@ -122,6 +132,14 @@ func (in Input) Score() (Decision, error) {
 	if in.ScoredAt.IsZero() || in.FeatureAsOf.IsZero() {
 		return Decision{}, fmt.Errorf("scored_at and feature_as_of are required")
 	}
+	// G2-F3 defense in depth: the ingest plausibility ceiling is the primary
+	// guard; the engine still refuses values that would overflow its own
+	// bps arithmetic rather than silently mis-scoring them.
+	for i, w := range f.WeeklyRechargeMinor {
+		if w < 0 || w > maxSafeWeeklyMinor {
+			return Decision{}, fmt.Errorf("weekly_recharge_minor[%d]=%d outside engine-safe range [0,%d]", i, w, int64(maxSafeWeeklyMinor))
+		}
+	}
 
 	d := Decision{
 		Currency:         f.Currency,
@@ -159,6 +177,23 @@ func (in Input) Score() (Decision, error) {
 			return d, nil
 		}
 	}
+	// --- missing data (G2-F1, V2-SCR-017): the telco's MISSING_FIELDS
+	// quality flag routes through EXPLICIT policy — REJECT (ineligible) or
+	// STARTER (progressive-trust floor). Never silent, never imputed.
+	if hasFlag(in.Quality.Flags, "MISSING_FIELDS") {
+		switch p.MissingPolicy {
+		case "REJECT":
+			reason("MISSING_DATA_REJECTED")
+			return d, nil
+		case "STARTER":
+			return in.starter(d, "MISSING_DATA_STARTER"), nil
+		default:
+			// Validator forbids anything else; an unvalidated policy reaching
+			// the engine is a contract violation, not a default.
+			return Decision{}, fmt.Errorf("missing_policy %q is not implementable (must be REJECT or STARTER)", p.MissingPolicy)
+		}
+	}
+
 	if f.TenureDays < p.Gates.MinTenureDays {
 		// Not a rejection: the cold-start path (V2-SCR-009).
 		return in.starter(d, "COLD_START_TENURE"), nil
@@ -198,8 +233,20 @@ func (in Input) Score() (Decision, error) {
 		}
 		total90 += w
 	}
+	// G2-F2: the reason code states the FACT (a spike pattern was detected);
+	// the CONSEQUENCE is an explicit, recorded policy decision. FLAG_ONLY
+	// relies on winsorisation alone; CAP_TO_STARTER additionally floors the
+	// spiky subscriber at the starter tier for this cycle.
 	if spiky {
-		reason("SPIKE_DISCOUNT_APPLIED")
+		reason("SPIKE_PATTERN_DETECTED")
+		switch p.AntiGaming.SpikeAction {
+		case "FLAG_ONLY":
+			// winsorisation is the only discount — recorded by the flag alone
+		case "CAP_TO_STARTER":
+			return in.starter(d, "SPIKE_CAPPED_TO_STARTER"), nil
+		default:
+			return Decision{}, fmt.Errorf("anti_gaming.spike_action %q is not implementable (must be FLAG_ONLY or CAP_TO_STARTER)", p.AntiGaming.SpikeAction)
+		}
 	}
 
 	// --- tier assignment: highest tier whose threshold the winsorised
@@ -259,6 +306,11 @@ func (d Decision) CanonicalJSON() ([]byte, error) {
 	}
 	return json.Marshal(d)
 }
+
+// maxSafeWeeklyMinor bounds a single weekly value so the bps spike ratio
+// (value * 10_000) can never overflow int64: MaxInt64/10_000 ≈ 922 trillion
+// kobo — far above any plausible recharge, exactly at the arithmetic cliff.
+const maxSafeWeeklyMinor = math.MaxInt64 / 10_000
 
 // --- integer helpers (deterministic, allocation-light) ---
 

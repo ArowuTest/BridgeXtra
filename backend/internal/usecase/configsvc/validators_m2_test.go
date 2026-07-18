@@ -19,7 +19,7 @@ const validScoringPolicy = `{
   "gates":{"min_tenure_days":90,"blocked_statuses":["BARRED"],"require_activity_days":30},
   "staleness":{"accept_hours":48,"degrade_hours":168,"degrade_tier_cap":"TIER_01"},
   "missing_policy":"REJECT",
-  "anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},
+  "anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},
   "tiers":[{"code":"TIER_01","max_face_minor":5000,"min_recharge_90d_minor":30000},
            {"code":"TIER_02","max_face_minor":10000,"min_recharge_90d_minor":90000}],
   "starter_tier":"TIER_01","one_tier_up_max":1,"decision_valid_hours":168}`
@@ -43,16 +43,17 @@ func TestM2_ScoringPolicyValidator_RejectsArmedButDead(t *testing.T) {
 	svc, _ := newSvc(t, "cfg_m2scoring")
 
 	cases := map[string]string{
-		"inverted tier ladder":                      `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":10000,"min_recharge_90d_minor":90000},{"code":"T2","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
-		"starter tier missing from ladder":          `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T9","one_tier_up_max":1,"decision_valid_hours":168}`,
-		"degrade window before accept window":       `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":168,"degrade_hours":48},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
-		"silent imputation policy":                  `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"IMPUTE_ZERO","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"inverted tier ladder":                      `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":10000,"min_recharge_90d_minor":90000},{"code":"T2","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"starter tier missing from ladder":          `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T9","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"degrade window before accept window":       `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":168,"degrade_hours":48},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"silent imputation policy":                  `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"IMPUTE_ZERO","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
 		"missing anti-gaming block entirely":        `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
-		"spike cap below 1x rejects everything":     `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":5000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
-		"winsor above 12/13 never binds (disarmed)": `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9500,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
-		"non-expiring decisions":                    `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":0}`,
-		"negative limit":                            `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":-5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"spike cap below 1x rejects everything":     `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":5000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"winsor above 12/13 never binds (disarmed)": `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9500,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
+		"non-expiring decisions":                    `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":0}`,
+		"negative limit":                            `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10,"spike_action":"FLAG_ONLY"},"tiers":[{"code":"T1","max_face_minor":-5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`,
 	}
+	cases["spike consequence unspecified (G2-F2)"] = `{"gates":{"min_tenure_days":90},"staleness":{"accept_hours":48,"degrade_hours":168},"missing_policy":"REJECT","anti_gaming":{"window_days":90,"winsor_upper_bps":9200,"spike_ratio_max_bps":30000,"min_active_days":10},"tiers":[{"code":"T1","max_face_minor":5000,"min_recharge_90d_minor":30000}],"starter_tier":"T1","one_tier_up_max":1,"decision_valid_hours":168}`
 	for label, content := range cases {
 		mustReject(t, svc, "scoring.policy", scoringScope, label, content)
 	}
@@ -99,6 +100,23 @@ func TestM2_NotifyTemplatesValidator(t *testing.T) {
 	}
 	for label, content := range cases {
 		mustReject(t, svc, "notify.templates", scope, label, content)
+	}
+}
+
+// G2-F3: an adapter config without the feed plausibility ceiling (or with a
+// disarmed one) is rejected — "no ceiling" must never mean "unlimited".
+func TestG2F3_AdapterCeilingRequired(t *testing.T) {
+	svc, _ := newSvc(t, "cfg_g2ceiling")
+	scope := "telco:SIM_NG"
+
+	cases := map[string]string{
+		"ceiling absent":   `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20}`,
+		"ceiling zero":     `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":0}`,
+		"ceiling absurd":   `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":9223372036854775807}`,
+		"ceiling negative": `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":-1}`,
+	}
+	for label, content := range cases {
+		mustReject(t, svc, "telco.adapter", scope, label, content)
 	}
 }
 

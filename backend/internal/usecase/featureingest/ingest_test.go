@@ -31,7 +31,7 @@ func setup(t *testing.T, suffix string) (*Service, *testutil.DB, *httptest.Serve
 	// exactly how the deployed environment was re-pointed.
 	svcCfg := configsvc.New(db.Worker)
 	ctx := context.Background()
-	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20}`, simulator.URL)
+	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":100000000}`, simulator.URL)
 	c, err := svcCfg.CreateDraft(ctx, "telco.adapter", "telco:SIM_NG", "alice", "test sim", []byte(content))
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +158,38 @@ func TestIngest_MalformedRow_QuarantinedNeverSilent(t *testing.T) {
 	}
 	if quarantined != 1 || status != "INGESTED" {
 		t.Fatalf("file record must carry quarantine totals: q=%d status=%s", quarantined, status)
+	}
+}
+
+// G2-F3: a structurally VALID row carrying an absurd near-int64-max value
+// (feed corruption / unit error) is quarantined by the plausibility ceiling —
+// it must never reach the feature store, let alone the engine.
+func TestG2F3_CorruptValue_QuarantinedByCeiling(t *testing.T) {
+	svc, db, simSrv := setup(t, "ftr_corrupt")
+	ctx := context.Background()
+
+	raw := testutil.HTTPGet(t, simSrv.URL+"/v1/telcos/SIM_NG/feature-file?count=10&corrupt=1")
+	sum, err := svc.IngestRaw(ctx, "SIM_NG", "test:corrupt", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Rows != 11 || sum.Written != 10 || sum.Quarantined != 1 {
+		t.Fatalf("10 good + 1 ceiling-quarantined expected, got %+v", sum)
+	}
+
+	// The corrupt subscriber has NO snapshot — nothing for scoring to read.
+	tctx := platform.WithTenant(ctx, "SIM_NG")
+	var snaps int
+	if err := repo.WithTenantTx(tctx, db.App, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT count(*) FROM feature_snapshots fs
+			JOIN subscriber_accounts sa ON sa.subscriber_account_id = fs.subscriber_account_id
+			WHERE sa.msisdn_token = 'tok_sim_corrupt'`).Scan(&snaps)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if snaps != 0 {
+		t.Fatalf("corrupt row must never reach the feature store, found %d snapshots", snaps)
 	}
 }
 

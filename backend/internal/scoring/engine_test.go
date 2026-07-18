@@ -23,6 +23,7 @@ func testPolicy() Policy {
 	p.AntiGaming.WinsorUpperBps = 9_200
 	p.AntiGaming.SpikeRatioMaxBps = 30_000
 	p.AntiGaming.MinActiveDays = 10
+	p.AntiGaming.SpikeAction = "FLAG_ONLY"
 	p.Tiers = []Tier{
 		{Code: "TIER_01", MaxFaceMinor: 5_000, MinRecharge90dMinor: 30_000},
 		{Code: "TIER_02", MaxFaceMinor: 10_000, MinRecharge90dMinor: 90_000},
@@ -90,8 +91,8 @@ func TestEDG013_SpikeWeek_CannotBuyATier(t *testing.T) {
 	if dSpiked.TierCode != dSteady.TierCode {
 		t.Fatalf("EDG-013: spike week moved tier %s -> %s — gaming works", dSteady.TierCode, dSpiked.TierCode)
 	}
-	if !hasReason(dSpiked, "SPIKE_DISCOUNT_APPLIED") {
-		t.Fatalf("spike must be flagged, got %v", dSpiked.ReasonCodes)
+	if !hasReason(dSpiked, "SPIKE_PATTERN_DETECTED") {
+		t.Fatalf("spike pattern must be recorded, got %v", dSpiked.ReasonCodes)
 	}
 }
 
@@ -105,7 +106,7 @@ func TestEDG013_SingleWeekWash_StaysLow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasReason(d, "SPIKE_DISCOUNT_APPLIED") {
+	if !hasReason(d, "SPIKE_PATTERN_DETECTED") {
 		t.Fatalf("wash pattern must be spike-flagged: %v", d.ReasonCodes)
 	}
 	if d.TierCode == "TIER_03" || d.TierCode == "TIER_04" {

@@ -170,11 +170,12 @@ func validateAllocation(ctx context.Context, tx pgx.Tx, content json.RawMessage)
 
 func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
 	var v struct {
-		FulfilmentURL       *string `json:"fulfilment_url"`
-		RequestTimeoutMs    *int    `json:"request_timeout_ms"`
-		RetryBudget         *int    `json:"retry_budget"`
-		CircuitErrThreshPct *int    `json:"circuit_error_threshold_pct"`
-		CircuitMinRequests  *int    `json:"circuit_min_requests"`
+		FulfilmentURL          *string `json:"fulfilment_url"`
+		RequestTimeoutMs       *int    `json:"request_timeout_ms"`
+		RetryBudget            *int    `json:"retry_budget"`
+		CircuitErrThreshPct    *int    `json:"circuit_error_threshold_pct"`
+		CircuitMinRequests     *int    `json:"circuit_min_requests"`
+		MaxWeeklyRechargeMinor *int64  `json:"max_weekly_recharge_minor"`
 	}
 	if err := json.Unmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -199,6 +200,13 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 	}
 	if v.CircuitMinRequests == nil || *v.CircuitMinRequests < 1 {
 		return fmt.Errorf("circuit_min_requests must be >= 1")
+	}
+	// G2-F3: the feed plausibility ceiling — a corrupt row near int64-max
+	// must be quarantined at ingest, never scored. Required, positive, and
+	// small enough that downstream bps arithmetic can never overflow.
+	if v.MaxWeeklyRechargeMinor == nil || *v.MaxWeeklyRechargeMinor <= 0 ||
+		*v.MaxWeeklyRechargeMinor > 922_000_000_000_000 {
+		return fmt.Errorf("max_weekly_recharge_minor is required and must be in (0, 922e12] — the feature-feed plausibility ceiling (G2-F3)")
 	}
 	return nil
 }

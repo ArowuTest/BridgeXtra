@@ -124,11 +124,19 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	if file.AsOf.IsZero() {
 		return Summary{}, fmt.Errorf("feature file has no as_of — refusing an undated data cut (V2-SCR-002)")
 	}
+
+	// G2-F3: the plausibility ceiling from governed config. FAIL CLOSED — a
+	// telco config without a ceiling refuses the whole feed rather than
+	// letting a corrupt value near int64-max score garbage.
+	ceiling, err := s.plausibilityCeiling(ctx, telcoID)
+	if err != nil {
+		return Summary{}, err
+	}
 	hash := sha256.Sum256(raw)
 	sum := Summary{FeatureFileID: platform.NewID("ffl"), AsOf: file.AsOf, Rows: len(file.Rows)}
 
 	tctx := platform.WithTenant(ctx, telcoID)
-	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+	err = repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
 		files := repo.FeatureFiles{}
 		existingID, err := files.Insert(ctx, tx, entity.FeatureFile{
 			FeatureFileID: sum.FeatureFileID, TelcoID: telcoID, Source: source,
@@ -162,7 +170,7 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 			}
 			preps := make([]prepared, 0, len(chunk))
 			for i, row := range chunk {
-				if reason := validateRow(row); reason != "" {
+				if reason := validateRow(row, ceiling); reason != "" {
 					sum.Quarantined++
 					s.Log.Warn("feature row quarantined", "file", sum.FeatureFileID,
 						"row", start+i, "token", row.MSISDNToken, "reason", reason)
@@ -225,9 +233,29 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	return sum, nil
 }
 
+// plausibilityCeiling reads the feed's maximum credible weekly recharge from
+// governed telco.adapter config (G2-F3). Absent or non-positive = refuse:
+// "no ceiling" must never mean "unlimited".
+func (s *Service) plausibilityCeiling(ctx context.Context, telcoID string) (int64, error) {
+	cv, err := s.Config.ActiveAt(ctx, "telco.adapter", "telco:"+telcoID, time.Now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("telco.adapter config: %w", err)
+	}
+	var ac struct {
+		MaxWeeklyRechargeMinor int64 `json:"max_weekly_recharge_minor"`
+	}
+	if err := json.Unmarshal(cv.Content, &ac); err != nil {
+		return 0, err
+	}
+	if ac.MaxWeeklyRechargeMinor <= 0 {
+		return 0, fmt.Errorf("telco.adapter for %s has no max_weekly_recharge_minor — refusing the feed (G2-F3: absent ceiling is not unlimited)", telcoID)
+	}
+	return ac.MaxWeeklyRechargeMinor, nil
+}
+
 // validateRow enforces the canonical contract; a violation quarantines the
 // row with a reason (never a silent drop, never a partial guess).
-func validateRow(r rowShape) string {
+func validateRow(r rowShape, ceilingMinor int64) string {
 	switch {
 	case r.MSISDNToken == "":
 		return "missing msisdn_token"
@@ -245,6 +273,11 @@ func validateRow(r rowShape) string {
 	for _, w := range r.WeeklyRechargeMinor {
 		if w < 0 {
 			return "negative weekly recharge amount"
+		}
+		if w > ceilingMinor {
+			// G2-F3: implausible value (feed corruption / unit error) — the
+			// row is quarantined, never scored.
+			return fmt.Sprintf("weekly recharge %d exceeds plausibility ceiling %d", w, ceilingMinor)
 		}
 	}
 	return ""

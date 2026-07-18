@@ -41,10 +41,11 @@ func validateScoringPolicy(ctx context.Context, tx pgx.Tx, content json.RawMessa
 		} `json:"staleness"`
 		MissingPolicy *string `json:"missing_policy"`
 		AntiGaming    *struct {
-			WindowDays       *int   `json:"window_days"`
-			WinsorUpperBps   *int64 `json:"winsor_upper_bps"`
-			SpikeRatioMaxBps *int64 `json:"spike_ratio_max_bps"`
-			MinActiveDays    *int   `json:"min_active_days"`
+			WindowDays       *int    `json:"window_days"`
+			WinsorUpperBps   *int64  `json:"winsor_upper_bps"`
+			SpikeRatioMaxBps *int64  `json:"spike_ratio_max_bps"`
+			MinActiveDays    *int    `json:"min_active_days"`
+			SpikeAction      *string `json:"spike_action"`
 		} `json:"anti_gaming"`
 		Tiers []struct {
 			Code                *string `json:"code"`
@@ -95,6 +96,12 @@ func validateScoringPolicy(ctx context.Context, tx pgx.Tx, content json.RawMessa
 	}
 	if ag.MinActiveDays == nil || *ag.MinActiveDays < 0 || *ag.MinActiveDays > *ag.WindowDays {
 		return fmt.Errorf("anti_gaming.min_active_days must be within [0, window_days]")
+	}
+	// G2-F2: the spike consequence is an explicit policy decision the engine
+	// implements — both values are real behaviors, so the knob can never be
+	// armed-but-dead.
+	if ag.SpikeAction == nil || (*ag.SpikeAction != "FLAG_ONLY" && *ag.SpikeAction != "CAP_TO_STARTER") {
+		return fmt.Errorf("anti_gaming.spike_action must be FLAG_ONLY or CAP_TO_STARTER (G2-F2: the spike consequence is an explicit recorded decision)")
 	}
 
 	if len(v.Tiers) == 0 {

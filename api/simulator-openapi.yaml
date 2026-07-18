@@ -12,7 +12,7 @@ info:
     stable hash of (seed, platform_request_id), so any failure is reproducible
     (V2-SIM-006). The fault catalogue (timeout-after-success, duplicate
     callbacks, out-of-order reversals) arrives with M1.
-  version: 0.3.0  # M2e — canonical SMS submission + sms evidence log
+  version: 0.4.0  # G2 folds — corrupt-row fault (F3) + MISSING_FIELDS row profile (F1)
 servers:
   - url: http://localhost:8091
     description: Local development
@@ -119,6 +119,7 @@ paths:
         - { name: count, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 2000000, default: 100 } }
         - { name: as_of, in: query, required: false, schema: { type: string, format: date }, description: "Data cut date (default: today UTC)" }
         - { name: malformed, in: query, required: false, schema: { type: string, enum: ["1"] }, description: "Append one contract-violating row (negative amount) to exercise quarantine paths" }
+        - { name: corrupt, in: query, required: false, schema: { type: string, enum: ["1"] }, description: "Append one structurally valid row with an absurd near-int64-max amount (G2-F3: must be quarantined by the plausibility ceiling)" }
       responses:
         "200":
           description: The feature file

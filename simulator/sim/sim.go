@@ -228,6 +228,19 @@ func (s *Simulator) featureFile(w http.ResponseWriter, r *http.Request) {
 			ActiveDays90d: 30, WeeklyRechargeMinor: []int64{-500}, Currency: "NGN",
 		})
 	}
+	if r.URL.Query().Get("corrupt") == "1" {
+		// G2-F3 fault: a structurally VALID row carrying an absurd value near
+		// int64-max (feed corruption / unit error). Must be quarantined by
+		// the platform's plausibility ceiling — it would otherwise overflow
+		// spike-ratio arithmetic and score a garbage tier.
+		weekly := make([]int64, 13)
+		weekly[0] = int64(1)<<62 + 12345
+		// #nosec G101 -- synthetic tokenised-MSISDN row id, not a credential.
+		file.Rows = append(file.Rows, FeatureRow{
+			MSISDNToken: "tok_sim_corrupt", TenureDays: 400, ActivityDays30d: 20,
+			ActiveDays90d: 60, WeeklyRechargeMinor: weekly, Currency: "NGN",
+		})
+	}
 	writeJSON(w, http.StatusOK, file)
 }
 
@@ -258,6 +271,9 @@ func (s *Simulator) featureRow(i int) FeatureRow {
 			weekly[w] = 0
 		}
 		row.QualityFlags = []string{"SHORT_HISTORY"}
+	}
+	if i%17 == 0 { // MISSING: telco reports source gaps behind this row (V2-SCR-017)
+		row.QualityFlags = append(row.QualityFlags, "MISSING_FIELDS")
 	}
 	row.WeeklyRechargeMinor = weekly
 	return row

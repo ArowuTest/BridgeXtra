@@ -48,7 +48,7 @@ func newFixture(t *testing.T, suffix string, simHold time.Duration, adapterTimeo
 
 	cfgW := configsvc.New(db.Worker)
 	ctx := context.Background()
-	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":%d,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20}`, srv.URL, adapterTimeoutMs)
+	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":%d,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":100000000}`, srv.URL, adapterTimeoutMs)
 	c, err := cfgW.CreateDraft(ctx, "telco.adapter", "telco:SIM_NG", "alice", "test sim", []byte(content))
 	if err != nil {
 		t.Fatal(err)
