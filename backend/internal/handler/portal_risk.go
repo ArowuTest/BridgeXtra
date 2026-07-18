@@ -84,16 +84,13 @@ func toTripResponse(t repo.GuardrailTrip) tripResponse {
 	}
 }
 
-// riskTrips lists open guardrail trips bounded to the operator's scope.
+// riskTrips lists open guardrail trips bounded to the operator's scope. The
+// scope is structural — repo.ListOpenTrips requires an OperatorScope derived
+// only from the session (M4C-F1), so this handler cannot issue an unscoped
+// read even by mistake.
 func (p *Portal) riskTrips(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	telco, programme, authority := sess.TenantFilter()
-	if !authority {
-		// A 'global'-only operator has no tenant authority — empty, not an error.
-		writeJSON(w, http.StatusOK, map[string]any{"trips": []tripResponse{}})
-		return
-	}
-	trips, err := repo.ListOpenTrips(r.Context(), p.ReadPool, telco, programme)
+	trips, err := repo.ListOpenTrips(r.Context(), p.ReadPool, sess.OperatorScope())
 	if err != nil {
 		p.Log.Error("portal risk trips list", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -106,19 +103,14 @@ func (p *Portal) riskTrips(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"trips": out})
 }
 
-// loadTripScoped loads a trip and authorizes it against the session scope,
-// writing a no-oracle 404 and returning ok=false when out of scope or absent.
+// loadTripScoped loads a trip WITHIN the operator's scope: GetTripByID applies
+// the scope in the query, so an out-of-scope or absent id both surface as the
+// same no-oracle 404 — no handler-side convention check to forget (M4C-F1).
 func (p *Portal) loadTripScoped(w http.ResponseWriter, r *http.Request) (repo.GuardrailTrip, bool) {
 	sess := sessionFrom(r.Context())
-	trip, err := repo.GetTripByID(r.Context(), p.ReadPool, r.PathValue("id"))
+	trip, err := repo.GetTripByID(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
 	if err != nil {
 		p.writeRiskErr(w, err)
-		return repo.GuardrailTrip{}, false
-	}
-	if !sess.PermitsTenant(trip.TelcoID, trip.ProgrammeID) {
-		p.Log.Warn("portal scope refusal (trip)", "actor", sess.Actor, "session_scope", sess.Scope,
-			"trip", trip.TripID, "telco", trip.TelcoID, "programme", trip.ProgrammeID)
-		writeErr(w, http.StatusNotFound, "TRIP_NOT_FOUND", "guardrail trip not found")
 		return repo.GuardrailTrip{}, false
 	}
 	return trip, true

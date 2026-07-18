@@ -37,16 +37,20 @@ func scanTrip(row pgx.Row) (GuardrailTrip, error) {
 }
 
 // ListOpenTrips returns trips still holding a programme (state <> 'REARMED'),
-// newest-first, bounded to the operator's telco/programme scope. Empty bounds
-// (a '*' operator) return every open trip.
-func ListOpenTrips(ctx context.Context, pool *pgxpool.Pool, restrictTelco, restrictProgramme string) ([]GuardrailTrip, error) {
+// newest-first, bounded to the operator's scope. An operator with no tenant
+// authority ('global') gets an empty set WITHOUT a query — the see-all SQL is
+// structurally unreachable except for a '*' admin (M4C-F1).
+func ListOpenTrips(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope) ([]GuardrailTrip, error) {
+	if !scope.authority {
+		return nil, nil
+	}
 	rows, err := pool.Query(ctx, `
 		SELECT `+tripCols+`
 		FROM guardrail_trips
 		WHERE state <> 'REARMED'
 		  AND ($1 = '' OR telco_id = $1)
 		  AND ($2 = '' OR programme_id = $2)
-		ORDER BY tripped_at DESC`, restrictTelco, restrictProgramme)
+		ORDER BY tripped_at DESC`, scope.telco, scope.programme)
 	if err != nil {
 		return nil, err
 	}
@@ -62,11 +66,19 @@ func ListOpenTrips(ctx context.Context, pool *pgxpool.Pool, restrictTelco, restr
 	return out, rows.Err()
 }
 
-// GetTripByID loads one trip on the operator-read pool. The caller authorizes
-// against the returned telco/programme scope before acting (a cross-scope
-// lookup must surface as a no-oracle 404, not a 403 that leaks existence).
-func GetTripByID(ctx context.Context, pool *pgxpool.Pool, tripID string) (GuardrailTrip, error) {
-	t, err := scanTrip(pool.QueryRow(ctx, `SELECT `+tripCols+` FROM guardrail_trips WHERE trip_id = $1`, tripID))
+// GetTripByID loads one trip on the operator-read pool, WITH the operator's
+// scope applied in the query itself — a cross-scope (or nonexistent) id both
+// return ErrNotFound, so the no-oracle 404 is structural, not a handler
+// convention the next caller might forget (M4C-F1).
+func GetTripByID(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, tripID string) (GuardrailTrip, error) {
+	if !scope.authority {
+		return GuardrailTrip{}, fmt.Errorf("guardrail trip %q: %w", tripID, ErrNotFound)
+	}
+	t, err := scanTrip(pool.QueryRow(ctx, `
+		SELECT `+tripCols+` FROM guardrail_trips
+		WHERE trip_id = $1
+		  AND ($2 = '' OR telco_id = $2)
+		  AND ($3 = '' OR programme_id = $3)`, tripID, scope.telco, scope.programme))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return GuardrailTrip{}, fmt.Errorf("guardrail trip %q: %w", tripID, ErrNotFound)
 	}

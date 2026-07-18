@@ -42,30 +42,35 @@ func (s PortalSession) PermitsWrite(recordScope string) bool {
 	return s.Scope == "*" || s.Scope == recordScope
 }
 
-// PermitsTenant reports whether this session covers a tenant record that is
-// scoped by BOTH a telco and a programme (guardrail trips, advances,
-// settlements — the operator-read surfaces from M4c on). A '*' operator sees
-// all; a telco- or programme-scoped operator sees only matching rows; a
-// 'global'-only operator has no tenant authority and sees none.
-func (s PortalSession) PermitsTenant(telcoID, programmeID string) bool {
-	return s.Scope == "*" || s.Scope == "telco:"+telcoID || s.Scope == "programme:"+programmeID
+// OperatorScope is the tenant-data read boundary for a portal operator. It is
+// the STRUCTURAL enforcement of scope on the BYPASSRLS operator-read pool
+// (M4C-F1): the operator-read functions REQUIRE one and derive their SQL
+// bounds from it, and it is constructible ONLY from a session, so a
+// cross-tenant read that "forgets" to scope — or passes empty bounds meaning
+// "see all" — is impossible to write. The see-all bounds (empty telco AND
+// programme WITH authority) are reachable exclusively for a '*' platform
+// admin; every other operator gets hard bounds or no authority at all. This
+// is the mountRBAC discipline applied to tenant reads: the unsafe call does
+// not compile, rather than being merely absent today.
+type OperatorScope struct {
+	telco     string
+	programme string
+	authority bool // false ('global'/unrecognised) => no tenant reads at all
 }
 
-// TenantFilter translates the session scope into (telco, programme) SQL bounds
-// for operator reads, plus authority: authority=false means the operator has
-// no tenant scope at all (e.g. 'global') and the caller must return an empty
-// set rather than query. Bounds are mutually exclusive; '*' yields empty
-// bounds with authority=true (sees all).
-func (s PortalSession) TenantFilter() (telco, programme string, authority bool) {
+// OperatorScope derives the read boundary from the session — the ONLY
+// constructor. Its fields are unexported, so no other package can forge a
+// see-all scope with empty bounds.
+func (s PortalSession) OperatorScope() OperatorScope {
 	switch {
 	case s.Scope == "*":
-		return "", "", true
+		return OperatorScope{authority: true} // empty bounds => sees all (admin only)
 	case len(s.Scope) > 6 && s.Scope[:6] == "telco:":
-		return s.Scope[6:], "", true
+		return OperatorScope{telco: s.Scope[6:], authority: true}
 	case len(s.Scope) > 10 && s.Scope[:10] == "programme:":
-		return "", s.Scope[10:], true
+		return OperatorScope{programme: s.Scope[10:], authority: true}
 	default:
-		return "", "", false // 'global' or unrecognised: no tenant authority
+		return OperatorScope{} // 'global' or unrecognised: authority=false, no reads
 	}
 }
 
