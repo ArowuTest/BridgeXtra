@@ -19,6 +19,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
 const headerCorrelationID = "X-Correlation-Id"
@@ -268,6 +269,15 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 	case errors.Is(err, repo.ErrNoFundingCapacity):
 		// V2 §6.2 FUNDING_*: retry only after treasury state changes.
 		writeErr(w, http.StatusConflict, "FUNDING_POOL_EXHAUSTED", "no funding capacity available")
+	case errors.Is(err, origination.ErrDecisionUnavailable):
+		// EDG-014 boundary: stale/absent decision is a customer-safe no-offer.
+		writeErr(w, http.StatusConflict, "NO_OFFER_AVAILABLE", "no offer available at this time")
+	case errors.Is(err, origination.ErrOverlayBlocked):
+		// V2-SCR-015: which flag fired is logged upstream, never disclosed.
+		writeErr(w, http.StatusForbidden, "SERVICE_RESTRICTED", "service not available for this subscriber right now")
+	case errors.Is(err, treasury.ErrProgrammeSuspended):
+		// M3d fail-closed: lending stopped (guardrail trip or operator).
+		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
 	case errors.Is(err, context.DeadlineExceeded):
 		writeErr(w, http.StatusGatewayTimeout, "SYSTEM_TEMPORARILY_UNAVAILABLE", "timeout")
 	default:

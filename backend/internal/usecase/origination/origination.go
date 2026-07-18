@@ -36,6 +36,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
 // Typed errors (BC-7) mapped once at the HTTP boundary.
@@ -58,6 +59,9 @@ type Service struct {
 	Ledger  *ledger.Service
 	Adapter mno.Client
 	Log     *slog.Logger
+	// Treasury guards the confirm path (M3d). Nil only in tests that predate
+	// guardrails — production wiring always sets it.
+	Treasury *treasury.Service
 
 	subscribers repo.Subscribers
 	decisions   repo.Decisions
@@ -68,10 +72,12 @@ type Service struct {
 	outbox      repo.Outbox
 	flags       repo.SubscriberFlags
 	consents    repo.Consents
+	programmes  repo.Programmes
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, adapter mno.Client, log *slog.Logger) *Service {
-	return &Service{Pool: pool, Config: cfg, Ledger: led, Adapter: adapter, Log: log}
+	return &Service{Pool: pool, Config: cfg, Ledger: led, Adapter: adapter, Log: log,
+		Treasury: treasury.New(pool, cfg, log)}
 }
 
 type productCfg struct {
@@ -168,6 +174,13 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 
 	var out []entity.Offer
 	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		// M3d: a suspended programme serves NOTHING (guardrail tripped or
+		// operator action) — fail closed at the first touch.
+		if status, err := s.programmes.GetStatus(ctx, tx, programmeID); err != nil {
+			return err
+		} else if status != entity.ProgrammeActive {
+			return fmt.Errorf("%w (programme %s)", treasury.ErrProgrammeSuspended, status)
+		}
 		sub, err := s.subscribers.GetLiveByToken(ctx, tx, msisdnToken)
 		if err != nil {
 			return err
@@ -306,6 +319,12 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 	var offer entity.Offer
 	replayed := false
 	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		// M3d: suspended programme = lending stopped, fail closed.
+		if status, err := s.programmes.GetStatus(ctx, tx, cmd.ProgrammeID); err != nil {
+			return err
+		} else if status != entity.ProgrammeActive {
+			return fmt.Errorf("%w (programme %s)", treasury.ErrProgrammeSuspended, status)
+		}
 		sub, err := s.subscribers.GetLiveByToken(ctx, tx, cmd.MSISDNToken)
 		if err != nil {
 			return err
@@ -396,6 +415,15 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		if err != nil {
 			return err
 		}
+
+		// M3d: guardrails measure HERE, with the pool row locked — the
+		// serialization point concurrent confirms queue behind (EDG-024). A
+		// breach aborts this confirm; the trip records out-of-band below.
+		if s.Treasury != nil {
+			if err := s.Treasury.EvaluateInTx(ctx, tx, offer.ProgrammeID, poolID, offer.Disbursed); err != nil {
+				return err
+			}
+		}
 		adv.FundingPoolID = poolID
 		if err := s.advances.ReserveTransition(ctx, tx, adv.AdvanceID, 2, poolID); err != nil {
 			return err
@@ -461,7 +489,21 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		adv.Version = 4
 		return nil
 	})
+	var breach *treasury.BreachError
 	switch {
+	case errors.As(err, &breach):
+		// M3d: the confirm aborted on a guardrail breach. Record the trip +
+		// suspend the programme in a SEPARATE transaction (it must survive
+		// the abort), then decline customer-safe. Crash between the two:
+		// the next confirm re-detects and converges.
+		if s.Treasury != nil {
+			if telcoID, terr := platform.TenantFrom(ctx); terr == nil {
+				if terr := s.Treasury.RecordTrip(ctx, telcoID, cmd.ProgrammeID, breach); terr != nil {
+					s.Log.Error("guardrail trip recording failed — next confirm will re-detect", "err", terr)
+				}
+			}
+		}
+		return ConfirmResult{}, fmt.Errorf("%w: %s", treasury.ErrProgrammeSuspended, breach.Guardrail)
 	case errors.Is(err, errReplayRace):
 		// Our idempotency key already has an advance (EDG-001): replay it.
 		return s.replayByIdemKey(ctx, cmd.IdemKey)
