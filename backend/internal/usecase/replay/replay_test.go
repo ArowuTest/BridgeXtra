@@ -69,14 +69,13 @@ func TestBC4_FullRunReplaysBitExactly(t *testing.T) {
 
 	// Mutable state changes AFTER scoring: bar a subscriber. Replay must
 	// still reproduce the original decision (status is echoed in the doc,
-	// never re-read from live state).
-	tctx := platform.WithTenant(ctx, telcoID)
-	if err := repo.WithTenantTx(tctx, db.App, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
-			UPDATE subscriber_accounts SET status = 'BARRED'
-			WHERE msisdn_token = 'tok_sim_0001'`)
-		return err
-	}); err != nil {
+	// never re-read from live state). The mutation is via the admin pool:
+	// subscriber_accounts is append-only for tcp_app (0025 revoked UPDATE),
+	// and no production path bars an account today — barring is an
+	// out-of-band privileged operation, which Admin honestly represents.
+	if _, err := db.Admin.Exec(ctx, `
+		UPDATE subscriber_accounts SET status = 'BARRED'
+		WHERE msisdn_token = 'tok_sim_0001'`); err != nil {
 		t.Fatal(err)
 	}
 
