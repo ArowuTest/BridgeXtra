@@ -70,10 +70,10 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/ops/status-actions/{id}/approve": true,
 		"/v1/portal/ops/status-actions/{id}/reject":  true,
 		// M4e-3 fault demo (sim-only allowlist)
-		"/v1/portal/ops/demo/scenarios":  true,
-		"/v1/portal/ops/demo/run":        true,
-		"/v1/portal/ops/demo/runs":       true,
-		"/v1/portal/ops/demo/runs/{id}":  true,
+		"/v1/portal/ops/demo/scenarios": true,
+		"/v1/portal/ops/demo/run":       true,
+		"/v1/portal/ops/demo/runs":      true,
+		"/v1/portal/ops/demo/runs/{id}": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {
