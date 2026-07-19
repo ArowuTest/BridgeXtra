@@ -147,6 +147,12 @@ func TestSelfAudit_GrantScopes(t *testing.T) {
 		{"programmes", "status", true},
 		{"programmes", "code", false},
 		{"programmes", "name", false},
+		// subscriber_accounts + bureau_export_batches (0025): append-only in
+		// production -> UPDATE fully revoked (no column is writable by tcp_app).
+		{"subscriber_accounts", "status", false},
+		{"subscriber_accounts", "msisdn_token", false},
+		{"bureau_export_batches", "state", false},
+		{"bureau_export_batches", "file_hash", false},
 	} {
 		var can bool
 		if err := db.Admin.QueryRow(ctx,
