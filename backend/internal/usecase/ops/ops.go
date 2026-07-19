@@ -34,10 +34,54 @@ type Service struct {
 	complaints repo.Complaints
 	bureau     repo.BureauBatches
 	audit      repo.Audit
+	attempts   repo.Attempts
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service {
 	return &Service{Pool: pool, Config: cfg, Log: log}
+}
+
+// --- M4e ambiguity queues ---------------------------------------------------
+
+// QueuesConfig is the governed ops.queues threshold set. Zero-config floor
+// (C3): an absent or non-positive threshold REFUSES the queue read — absent
+// config is never "nothing is stale".
+type QueuesConfig struct {
+	StaleSentAfterSeconds int `json:"stale_sent_after_seconds"`
+	MaxPageSize           int `json:"max_page_size"`
+}
+
+// QueuesConfig loads the active ops.queues thresholds (global scope).
+func (s *Service) QueuesConfig(ctx context.Context) (QueuesConfig, error) {
+	var qc QueuesConfig
+	cv, err := s.Config.ActiveAt(ctx, "ops.queues", entity.ScopeGlobal, time.Now().UTC())
+	if err != nil {
+		return qc, fmt.Errorf("ops.queues config: %w", err)
+	}
+	if err := json.Unmarshal(cv.Content, &qc); err != nil {
+		return qc, fmt.Errorf("ops.queues config: %w", err)
+	}
+	if qc.StaleSentAfterSeconds <= 0 || qc.MaxPageSize <= 0 {
+		return qc, fmt.Errorf("ops.queues config invalid — refusing (absent threshold is not 'never stale')")
+	}
+	return qc, nil
+}
+
+// EnquireNow reschedules one ambiguous fulfilment attempt for immediate
+// resolver enquiry, with an audit row. The repo predicate (state IN
+// UNKNOWN|SENT) is the C2 guard; the portal never resolves attempt state.
+func (s *Service) EnquireNow(ctx context.Context, telcoID, attemptID, actor string) error {
+	tctx := platform.WithTenant(ctx, telcoID)
+	return repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		if err := s.attempts.EnquireNow(ctx, tx, attemptID); err != nil {
+			return err
+		}
+		return s.audit.Insert(ctx, tx, entity.AuditEvent{
+			ID: platform.NewID("aud"), TelcoID: telcoID, Actor: actor,
+			Action: "fulfilment.enquire_now", TargetType: "fulfilment_attempt", TargetID: attemptID,
+			Reason: "operator requested immediate enquiry",
+		})
+	})
 }
 
 // --- breaks workflow -------------------------------------------------------

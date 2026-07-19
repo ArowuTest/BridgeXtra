@@ -83,6 +83,33 @@ func (PendingReversals) FindParkedForOriginal(ctx context.Context, tx pgx.Tx, or
 	return p, err
 }
 
+// ClaimParkedByID loads one PARKED reversal by id FOR UPDATE — the M4e retry
+// claim. The row lock serialises an operator retry against the ingest path's
+// own auto-apply (C2): whichever transaction wins, the loser either blocks
+// until commit and then sees state <> 'PARKED' (ErrNotFound), or applies
+// first. No path can double-apply.
+func (PendingReversals) ClaimParkedByID(ctx context.Context, tx pgx.Tx, pendingReversalID string) (PendingReversal, error) {
+	var p PendingReversal
+	var minor int64
+	var cur string
+	err := tx.QueryRow(ctx, `
+		SELECT pending_reversal_id, telco_id, original_source_event_id, reversal_source_event_id,
+		       amount_minor, currency, state, park_reason, received_at, applied_at
+		FROM pending_reversals
+		WHERE pending_reversal_id = $1 AND state = 'PARKED'
+		FOR UPDATE`, pendingReversalID).
+		Scan(&p.PendingReversalID, &p.TelcoID, &p.OriginalSourceEventID, &p.ReversalSourceEventID,
+			&minor, &cur, &p.State, &p.ParkReason, &p.ReceivedAt, &p.AppliedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, fmt.Errorf("parked reversal %q: %w", pendingReversalID, ErrNotFound)
+	}
+	if err != nil {
+		return p, err
+	}
+	p.Amount, err = scanMoney(minor, cur)
+	return p, err
+}
+
 // MarkApplied closes a parked reversal after its application transaction.
 func (PendingReversals) MarkApplied(ctx context.Context, tx pgx.Tx, pendingReversalID string) error {
 	ct, err := tx.Exec(ctx, `

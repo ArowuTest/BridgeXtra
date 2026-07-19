@@ -38,6 +38,7 @@ type Service struct {
 	pools       repo.FundingPools
 	outbox      repo.Outbox
 	reversals   repo.PendingReversals
+	audit       repo.Audit
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, log *slog.Logger) *Service {
@@ -376,6 +377,73 @@ func (s *Service) Reverse(ctx context.Context, cmd ReverseCmd) (ReverseResult, e
 		return nil
 	})
 	return out, err
+}
+
+// RetryResult reports an operator-initiated retry of a PARKED reversal.
+type RetryResult struct {
+	Applied    bool
+	ParkReason string // refreshed blocker when not applied
+}
+
+// RetryParked re-attempts one PARKED reversal from the operator queue (M4e).
+// It REUSES the exact decision tree the ingest path runs — original unseen ->
+// ORIGINAL_UNSEEN; original not allocated -> ORIGINAL_NOT_ALLOCATED; guarded
+// apply -> collision refreshes park_reason or the reversal applies and the row
+// closes. No second reversal path exists: an operator retry can only do what
+// the money core itself would do. The FOR UPDATE claim serialises against the
+// ingest auto-apply (C2) — a concurrently-applied reversal surfaces as
+// ErrNotFound, never a double-apply.
+func (s *Service) RetryParked(ctx context.Context, telcoID, pendingReversalID, actor string) (RetryResult, error) {
+	var out RetryResult
+	tctx := platform.WithTenant(ctx, telcoID)
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		parked, err := s.reversals.ClaimParkedByID(ctx, tx, pendingReversalID)
+		if err != nil {
+			return err
+		}
+		blocked := func(reason string) error {
+			out.ParkReason = reason
+			if err := s.reversals.SetParkReason(ctx, tx, parked.PendingReversalID, reason); err != nil {
+				return err
+			}
+			return s.auditRetry(ctx, tx, telcoID, actor, parked.PendingReversalID, "blocked: "+reason)
+		}
+		original, err := s.events.GetBySource(ctx, tx, parked.OriginalSourceEventID)
+		if errors.Is(err, repo.ErrNotFound) {
+			return blocked("ORIGINAL_UNSEEN")
+		}
+		if err != nil {
+			return err
+		}
+		if original.State != entity.RecoveryAllocated {
+			return blocked("ORIGINAL_NOT_ALLOCATED")
+		}
+		var rev ReverseResult
+		correlationID := platform.NewID("cor")
+		collision, err := s.applyReversalGuarded(ctx, tx, &rev, original, parked.Amount, correlationID, parked.ReversalSourceEventID)
+		if err != nil {
+			return err
+		}
+		if collision != "" {
+			return blocked(collision)
+		}
+		if err := s.reversals.MarkApplied(ctx, tx, parked.PendingReversalID); err != nil {
+			return err
+		}
+		out.Applied = true
+		s.Log.Info("parked reversal applied on operator retry (M4e)",
+			"pending_reversal", parked.PendingReversalID, "amount", parked.Amount.String(), "actor", actor)
+		return s.auditRetry(ctx, tx, telcoID, actor, parked.PendingReversalID, "applied")
+	})
+	return out, err
+}
+
+func (s *Service) auditRetry(ctx context.Context, tx pgx.Tx, telcoID, actor, pendingReversalID, outcome string) error {
+	return s.audit.Insert(ctx, tx, entity.AuditEvent{
+		ID: platform.NewID("aud"), TelcoID: telcoID, Actor: actor,
+		Action: "reversal.retry", TargetType: "pending_reversal", TargetID: pendingReversalID,
+		Reason: outcome,
+	})
 }
 
 // applyReversalGuarded runs applyReversal inside a savepoint. A collision

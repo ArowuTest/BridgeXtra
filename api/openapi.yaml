@@ -515,6 +515,147 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/fulfilments:
+    get:
+      operationId: portalOpsFulfilments
+      summary: Ambiguous fulfilment attempts — UNKNOWN plus stale-SENT (roles ADMIN, OPS, FINANCE)
+      description: >
+        Attempts whose telco outcome is unresolved, oldest first, joined to
+        their advance for exposure context. The SENT-staleness threshold is
+        governed config (ops.queues); absent or invalid config refuses the
+        read rather than listing an unbounded or empty queue. Reads are
+        bounded by the operator's scope in SQL.
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Ambiguity queue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attempts, stale_sent_after_seconds]
+                properties:
+                  stale_sent_after_seconds: { type: integer }
+                  attempts:
+                    type: array
+                    items:
+                      type: object
+                      required: [attempt_id, advance_id, telco_id, programme_id, state]
+                      properties:
+                        attempt_id: { type: string }
+                        advance_id: { type: string }
+                        telco_id: { type: string }
+                        programme_id: { type: string }
+                        advance_state: { type: string }
+                        face_value: { $ref: "#/components/schemas/MoneyView" }
+                        state: { type: string, enum: [UNKNOWN, SENT] }
+                        attempt_no: { type: integer }
+                        enquiry_count: { type: integer }
+                        submitted_at: { type: string }
+                        next_enquiry_at: { type: string }
+        "500":
+          description: ops.queues config missing or invalid (zero-config floor)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/fulfilments/{id}/enquire-now:
+    post:
+      operationId: portalOpsEnquireNow
+      summary: Reschedule one ambiguous attempt for immediate resolver enquiry (roles ADMIN, OPS)
+      description: >
+        Pulls the attempt to the front of the resolver's enquiry queue. The
+        portal never talks to the telco and never resolves attempt state —
+        an attempt the resolver settled in the meantime returns 409.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Rescheduled
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attempt_id, rescheduled]
+                properties:
+                  attempt_id: { type: string }
+                  rescheduled: { type: boolean }
+        "404":
+          description: Attempt not found, out of scope, or not ambiguous (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Attempt resolved between read and action
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/reversals:
+    get:
+      operationId: portalOpsReversals
+      summary: PARKED reversals with their current blocker (roles ADMIN, OPS, FINANCE)
+      description: >
+        The M3B-F1 operator queue - reversals waiting on their original event
+        or blocked by an invariant collision, oldest first, each carrying its
+        park_reason. Telco-grained resource - reads take the telco-level
+        scope bound (a programme-scoped operator sees an empty queue).
+      parameters:
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1 } }
+      responses:
+        "200":
+          description: Parked reversal queue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [reversals]
+                properties:
+                  reversals:
+                    type: array
+                    items:
+                      type: object
+                      required: [pending_reversal_id, telco_id, park_reason]
+                      properties:
+                        pending_reversal_id: { type: string }
+                        telco_id: { type: string }
+                        original_source_event_id: { type: string }
+                        reversal_source_event_id: { type: string }
+                        amount: { $ref: "#/components/schemas/MoneyView" }
+                        park_reason: { type: string }
+                        received_at: { type: string }
+  /v1/portal/ops/reversals/{id}/retry:
+    post:
+      operationId: portalOpsReversalRetry
+      summary: Re-attempt one parked reversal through the guarded apply (roles ADMIN, OPS)
+      description: >
+        Re-runs the money core's own guarded reversal apply - never a second
+        reversal path. Applied drains the queue; still blocked refreshes and
+        returns the park_reason; a reversal the ingest path applied
+        concurrently returns 409 (row-lock claim, no double-apply).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Retry outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pending_reversal_id, applied]
+                properties:
+                  pending_reversal_id: { type: string }
+                  applied: { type: boolean }
+                  park_reason: { type: string }
+        "404":
+          description: Parked reversal not found or out of scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Reversal no longer parked (applied concurrently)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth

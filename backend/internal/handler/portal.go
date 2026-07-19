@@ -22,6 +22,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
@@ -45,6 +46,7 @@ type Portal struct {
 	Treasury   *treasury.Service   // M4c guardrail re-arm actions (tenant tx)
 	Ops        *ops.Service        // M4d breaks-queue actions (tenant tx)
 	Settlement *settlement.Service // M4d settlement verification (tenant tx)
+	Recovery   *recovery.Service   // M4e parked-reversal retry (tenant tx, reuses guarded apply)
 	ReadPool   *pgxpool.Pool       // M4c operator cross-tenant reads (worker/BYPASSRLS)
 	Log        *slog.Logger
 }
@@ -76,6 +78,17 @@ var routeRoles = map[string][]string{
 	"GET /v1/portal/finance/settlements":              {roleAdmin, roleFinance},
 	"GET /v1/portal/finance/settlements/{id}":         {roleAdmin, roleFinance},
 	"POST /v1/portal/finance/settlements/{id}/verify": {roleAdmin, roleFinance},
+
+	// M4e ops workspace (C7 — roles pinned deliberately): queue READS go to
+	// OPS plus FINANCE (both queues are money-adjacent: ambiguous fulfilments
+	// are unresolved exposure; parked reversals are pending money movements).
+	// ACTIONS are OPS-only (+ ADMIN): enquire-now reschedules the resolver,
+	// retry re-runs the guarded apply. RISK/SUPPORT get neither — their
+	// surfaces are the risk workspace and (M4f) complaints.
+	"GET /v1/portal/ops/fulfilments":                   {roleAdmin, roleOps, roleFinance},
+	"POST /v1/portal/ops/fulfilments/{id}/enquire-now": {roleAdmin, roleOps},
+	"GET /v1/portal/ops/reversals":                     {roleAdmin, roleOps, roleFinance},
+	"POST /v1/portal/ops/reversals/{id}/retry":         {roleAdmin, roleOps},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -119,6 +132,11 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/finance/settlements", http.HandlerFunc(p.financeSettlements))
 	p.mountRBAC(mux, "GET /v1/portal/finance/settlements/{id}", http.HandlerFunc(p.financeSettlement))
 	p.mountRBAC(mux, "POST /v1/portal/finance/settlements/{id}/verify", http.HandlerFunc(p.financeSettlementVerify))
+
+	p.mountRBAC(mux, "GET /v1/portal/ops/fulfilments", http.HandlerFunc(p.opsFulfilments))
+	p.mountRBAC(mux, "POST /v1/portal/ops/fulfilments/{id}/enquire-now", http.HandlerFunc(p.opsEnquireNow))
+	p.mountRBAC(mux, "GET /v1/portal/ops/reversals", http.HandlerFunc(p.opsReversals))
+	p.mountRBAC(mux, "POST /v1/portal/ops/reversals/{id}/retry", http.HandlerFunc(p.opsReversalRetry))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a

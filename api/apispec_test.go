@@ -60,6 +60,11 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/finance/settlements":             true,
 		"/v1/portal/finance/settlements/{id}":        true,
 		"/v1/portal/finance/settlements/{id}/verify": true,
+		// M4e ops workspace (ambiguity queues)
+		"/v1/portal/ops/fulfilments":                  true,
+		"/v1/portal/ops/fulfilments/{id}/enquire-now": true,
+		"/v1/portal/ops/reversals":                    true,
+		"/v1/portal/ops/reversals/{id}/retry":         true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

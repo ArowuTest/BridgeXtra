@@ -418,6 +418,24 @@ func (Attempts) Resolve(ctx context.Context, tx pgx.Tx, attemptID string, from, 
 	return nil
 }
 
+// EnquireNow pulls an ambiguous attempt's next enquiry to the front of the
+// resolver's queue (M4e). The state predicate is the C2 guard: an attempt the
+// resolver settled between the operator's read and this write is refused
+// loudly (0 rows -> ErrNotFound), never re-opened. The portal only ever
+// reschedules — the resolver alone talks to the telco and resolves state.
+func (Attempts) EnquireNow(ctx context.Context, tx pgx.Tx, attemptID string) error {
+	ct, err := tx.Exec(ctx, `
+		UPDATE fulfilment_attempts SET next_enquiry_at = now()
+		WHERE attempt_id = $1 AND state IN ('UNKNOWN','SENT')`, attemptID)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("attempt %s no longer ambiguous: %w", attemptID, ErrNotFound)
+	}
+	return nil
+}
+
 // GetByAdvance returns the latest attempt for an advance.
 func (Attempts) GetByAdvance(ctx context.Context, tx pgx.Tx, advanceID string) (entity.FulfilmentAttempt, error) {
 	var at entity.FulfilmentAttempt

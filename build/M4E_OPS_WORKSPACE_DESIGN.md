@@ -122,7 +122,7 @@ RBAC: run = OPS, ADMIN; read = oversight roles.
 
 ## 5. UI (portal, existing Next.js patterns)
 
-`/ops` workspace, three tabs mirroring M4c/M4d idioms:
+`/ops` workspace, four tabs mirroring M4c/M4d idioms:
 1. **Fulfilments** — ambiguity queue table (age-highlighted), enquire-now
    button, honest empty state ("no ambiguous fulfilments").
 2. **Reversals** — parked queue with park_reason chips, retry button.

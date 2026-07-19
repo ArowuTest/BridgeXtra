@@ -98,6 +98,13 @@ func main() {
 	// configsvc. Any future config automation gets a distinctly-classified
 	// service principal on this same RBAC chain, never a header bypass.
 
+	// Channel + recovery services (M1 walking skeleton; recovery is shared
+	// with the portal's M4e parked-reversal retry — ONE money core, not two).
+	appCfg := configsvc.New(appPool)
+	led := ledger.New(appCfg)
+	orig := origination.New(appPool, appCfg, led, mno.NewHTTPAdapter(appCfg), log)
+	rec := recovery.New(appPool, appCfg, led, log)
+
 	// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC.
 	portal := &handler.Portal{
 		Admins:   &repo.Admins{Pool: appPool},
@@ -108,16 +115,11 @@ func main() {
 		Treasury:   treasury.New(appPool, configsvc.New(appPool), log),
 		Ops:        ops.New(appPool, configsvc.New(appPool), log),
 		Settlement: settlement.New(appPool, configsvc.New(appPool), log),
+		Recovery:   rec,
 		ReadPool:   workerPool,
 		Log:        log,
 	}
 	portal.Mount(mux)
-
-	// Channel + recovery surface (M1 walking skeleton).
-	appCfg := configsvc.New(appPool)
-	led := ledger.New(appCfg)
-	orig := origination.New(appPool, appCfg, led, mno.NewHTTPAdapter(appCfg), log)
-	rec := recovery.New(appPool, appCfg, led, log)
 	channel := &handler.Channel{Origination: orig, Recovery: rec, Log: log}
 	channel.Mount(mux, auth)
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

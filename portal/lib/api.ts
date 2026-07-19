@@ -221,3 +221,50 @@ export function financeSettlement(id: string): Promise<{ statement: SettlementSt
 export function financeSettlementVerify(id: string): Promise<{ statement_id: string; verified: boolean }> {
   return request("POST", `/v1/portal/finance/settlements/${id}/verify`);
 }
+
+// --- M4e ops workspace ---
+
+export type AmbiguousAttempt = {
+  attempt_id: string;
+  advance_id: string;
+  telco_id: string;
+  programme_id: string;
+  advance_state: string;
+  face_value: MoneyView;
+  state: "UNKNOWN" | "SENT";
+  attempt_no: number;
+  enquiry_count: number;
+  submitted_at: string;
+  next_enquiry_at?: string;
+};
+
+export function opsFulfilments(): Promise<{
+  attempts: AmbiguousAttempt[];
+  stale_sent_after_seconds: number;
+}> {
+  return request("GET", "/v1/portal/ops/fulfilments");
+}
+
+export function opsEnquireNow(id: string): Promise<{ attempt_id: string; rescheduled: boolean }> {
+  return request("POST", `/v1/portal/ops/fulfilments/${id}/enquire-now`);
+}
+
+export type ParkedReversal = {
+  pending_reversal_id: string;
+  telco_id: string;
+  original_source_event_id: string;
+  reversal_source_event_id: string;
+  amount: MoneyView;
+  park_reason: string;
+  received_at: string;
+};
+
+export function opsReversals(): Promise<{ reversals: ParkedReversal[] }> {
+  return request("GET", "/v1/portal/ops/reversals");
+}
+
+export function opsReversalRetry(
+  id: string,
+): Promise<{ pending_reversal_id: string; applied: boolean; park_reason?: string }> {
+  return request("POST", `/v1/portal/ops/reversals/${id}/retry`);
+}
