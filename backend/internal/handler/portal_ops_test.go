@@ -9,6 +9,7 @@ package handler_test
 // advances join and see NO reversal queue at all (telco-grained resource).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -241,5 +242,177 @@ func TestM4E_ReversalQueue_RetryBlockedRefreshAndConflict(t *testing.T) {
 	}
 	if len(list.Reversals) != 0 {
 		t.Fatalf("programme-scoped operator must see an empty reversal queue (TelcoLevelBound), got %s", body)
+	}
+}
+
+// seedSubscriber inserts one ACTIVE live-identity subscriber.
+func seedSubscriber(t *testing.T, f *portalFixture, id, token string) {
+	t.Helper()
+	if _, err := f.db.Admin.Exec(context.Background(), `
+		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
+		VALUES ($1,'SIM_NG',$2,'ACTIVE')`, id, token); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestM4E2_StatusAction_MakerCheckerJourney proves the VR-35-F1 closure end
+// to end: request records the live status; the requester cannot decide
+// (two-person, C2 relative); C5 converges concurrent requests; approval
+// applies via CAS and the gates' input actually changes; drift refuses (C2);
+// terminal actions freeze (trigger); the conduct floor holds (SELF_EXCLUDED
+// refused even as a request).
+func TestM4E2_StatusAction_MakerCheckerJourney(t *testing.T) {
+	f := newPortalFixture(t, "m4e2_journey")
+	opsSess := f.login(t, roleKeys["OPS"])
+	riskSess := f.login(t, roleKeys["RISK"])
+	ctx := context.Background()
+	seedSubscriber(t, f, "sub_ssa_1", "tok_ssa_1")
+
+	// Request: ACTIVE -> BARRED ('*' scope names the telco explicitly).
+	code, body := f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions",
+		`{"telco_id":"SIM_NG","msisdn_token":"tok_ssa_1","to_status":"BARRED","reason":"fraud pattern F-12"}`)
+	if code != http.StatusOK {
+		t.Fatalf("request: %d %s", code, body)
+	}
+	var opened struct {
+		ActionID   string `json:"action_id"`
+		FromStatus string `json:"from_status"`
+	}
+	if err := json.Unmarshal(body, &opened); err != nil {
+		t.Fatal(err)
+	}
+	if opened.FromStatus != "ACTIVE" {
+		t.Fatalf("request must record the live status, got %q", opened.FromStatus)
+	}
+
+	// SELF_EXCLUDED is refused as a target — the conduct floor (C1).
+	if code, body := f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions",
+		`{"telco_id":"SIM_NG","msisdn_token":"tok_ssa_1","to_status":"SELF_EXCLUDED","reason":"x"}`); code != http.StatusBadRequest {
+		t.Fatalf("SELF_EXCLUDED request must refuse 400, got %d %s", code, body)
+	}
+
+	// C5: a second open action for the same subscriber converges to 409.
+	if code, _ := f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions",
+		`{"telco_id":"SIM_NG","msisdn_token":"tok_ssa_1","to_status":"CLOSED","reason":"dup"}`); code != http.StatusConflict {
+		t.Fatalf("second open action must 409 (C5), got %d", code)
+	}
+
+	// The requester cannot approve their own action.
+	if code, _ := f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions/"+opened.ActionID+"/approve", ""); code != http.StatusConflict {
+		t.Fatalf("same-actor approval must 409, got %d", code)
+	}
+
+	// A DISTINCT actor approves: the status actually flips — the blocked_
+	// statuses gates finally have a producer.
+	if code, body := f.callBody(t, &riskSess, "POST", "/v1/portal/ops/status-actions/"+opened.ActionID+"/approve", ""); code != http.StatusOK {
+		t.Fatalf("approve: %d %s", code, body)
+	}
+	var status string
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT status FROM subscriber_accounts WHERE subscriber_account_id='sub_ssa_1'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "BARRED" {
+		t.Fatalf("approval must apply the transition, status=%s", status)
+	}
+	var audits int
+	if err := f.db.Admin.QueryRow(ctx, `
+		SELECT count(*) FROM audit_events
+		WHERE target_id=$1 AND action IN ('subscriber_status.request','subscriber_status.apply')`,
+		opened.ActionID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 2 {
+		t.Fatalf("request+apply must both audit, got %d", audits)
+	}
+
+	// An APPLIED action is frozen — even the owner cannot rewrite it.
+	if _, err := f.db.Admin.Exec(ctx,
+		`UPDATE subscriber_status_actions SET reason='rewritten' WHERE action_id=$1`, opened.ActionID); err == nil {
+		t.Fatal("an APPLIED action must be immutable (trigger)")
+	}
+
+	// C2 drift: request unbar (BARRED -> ACTIVE), then the status drifts
+	// (out-of-band CLOSED) before approval — the CAS must refuse loudly and
+	// the action must stay open, nothing overwritten.
+	code, body = f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions",
+		`{"telco_id":"SIM_NG","msisdn_token":"tok_ssa_1","to_status":"ACTIVE","reason":"cleared after review"}`)
+	if code != http.StatusOK {
+		t.Fatalf("unbar request: %d %s", code, body)
+	}
+	if err := json.Unmarshal(body, &opened); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Admin.Exec(ctx,
+		`UPDATE subscriber_accounts SET status='CLOSED' WHERE subscriber_account_id='sub_ssa_1'`); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := f.callBody(t, &riskSess, "POST", "/v1/portal/ops/status-actions/"+opened.ActionID+"/approve", ""); code != http.StatusConflict {
+		t.Fatalf("drifted approval must 409 (C2 CAS), got %d %s", code, body)
+	}
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT status FROM subscriber_accounts WHERE subscriber_account_id='sub_ssa_1'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "CLOSED" {
+		t.Fatalf("a refused CAS must not write, status=%s", status)
+	}
+
+	// Reject path closes the (still open) action; CLOSED is terminal so a
+	// re-open request refuses on the governed set.
+	if code, _ := f.callBody(t, &riskSess, "POST", "/v1/portal/ops/status-actions/"+opened.ActionID+"/reject", ""); code != http.StatusOK {
+		t.Fatalf("reject after drift must work, got %d", code)
+	}
+	if code, _ := f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions",
+		`{"telco_id":"SIM_NG","msisdn_token":"tok_ssa_1","to_status":"ACTIVE","reason":"reopen"}`); code != http.StatusBadRequest {
+		t.Fatalf("CLOSED is terminal — reopen must refuse 400, got %d", code)
+	}
+
+	// FINANCE reads the trail; the list carries the live status for context.
+	finSess := f.login(t, roleKeys["FINANCE"])
+	code, body = f.callBody(t, &finSess, "GET", "/v1/portal/ops/status-actions", "")
+	if code != http.StatusOK {
+		t.Fatalf("finance read: %d", code)
+	}
+	var list struct {
+		Actions []struct {
+			State         string `json:"state"`
+			CurrentStatus string `json:"current_status"`
+		} `json:"actions"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Actions) != 2 {
+		t.Fatalf("both actions must list, got %d", len(list.Actions))
+	}
+}
+
+// TestM4E_ZeroConfigFloors proves the C3 floors FIRE, not just exist
+// (VR-37-F1): with the governed config gone, the fulfilment queue refuses to
+// list and the status action refuses to open — absent config is never
+// default-allow.
+func TestM4E_ZeroConfigFloors(t *testing.T) {
+	f := newPortalFixture(t, "m4e_floors")
+	opsSess := f.login(t, roleKeys["OPS"])
+	ctx := context.Background()
+	seedSubscriber(t, f, "sub_floor_1", "tok_floor_1")
+
+	if _, err := f.db.Admin.Exec(ctx,
+		`DELETE FROM config_versions WHERE domain IN ('ops.queues','ops.status_actions')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// VR-37-F1: the queue read refuses with the typed code.
+	code, body := f.callBody(t, &opsSess, "GET", "/v1/portal/ops/fulfilments", "")
+	if code != http.StatusInternalServerError || !bytes.Contains(body, []byte("OPS_QUEUES_UNCONFIGURED")) {
+		t.Fatalf("unconfigured queue must refuse with OPS_QUEUES_UNCONFIGURED, got %d %s", code, body)
+	}
+
+	// The status action refuses every transition without its governed set.
+	code, body = f.callBody(t, &opsSess, "POST", "/v1/portal/ops/status-actions",
+		`{"telco_id":"SIM_NG","msisdn_token":"tok_floor_1","to_status":"BARRED","reason":"x"}`)
+	if code != http.StatusBadRequest || !bytes.Contains(body, []byte("STATUS_TRANSITION_NOT_ALLOWED")) {
+		t.Fatalf("unconfigured status action must refuse, got %d %s", code, body)
 	}
 }

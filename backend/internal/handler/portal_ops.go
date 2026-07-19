@@ -10,12 +10,14 @@ package handler
 // SQL; actions load-scoped-then-act via the app-pool tenant tx.
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 )
 
 type ambiguousAttemptResponse struct {
@@ -185,4 +187,134 @@ func (p *Portal) opsReversalRetry(w http.ResponseWriter, r *http.Request) {
 		"applied":             res.Applied,
 		"park_reason":         res.ParkReason,
 	})
+}
+
+// --- subscriber status actions (M4e-2, VR-35-F1) ---------------------------
+
+type statusActionResponse struct {
+	ActionID            string `json:"action_id"`
+	TelcoID             string `json:"telco_id"`
+	SubscriberAccountID string `json:"subscriber_account_id"`
+	MSISDNToken         string `json:"msisdn_token"`
+	CurrentStatus       string `json:"current_status"`
+	FromStatus          string `json:"from_status"`
+	ToStatus            string `json:"to_status"`
+	Reason              string `json:"reason"`
+	RequestedBy         string `json:"requested_by"`
+	ApprovedBy          string `json:"approved_by,omitempty"`
+	State               string `json:"state"`
+	RequestedAt         string `json:"requested_at"`
+	DecidedAt           string `json:"decided_at,omitempty"`
+}
+
+func toStatusActionResponse(a repo.StatusActionRow) statusActionResponse {
+	return statusActionResponse{
+		ActionID: a.ActionID, TelcoID: a.TelcoID, SubscriberAccountID: a.SubscriberAccountID,
+		MSISDNToken: a.MSISDNToken, CurrentStatus: a.CurrentStatus,
+		FromStatus: a.FromStatus, ToStatus: a.ToStatus, Reason: a.Reason,
+		RequestedBy: a.RequestedBy, ApprovedBy: a.ApprovedBy, State: a.State,
+		RequestedAt: a.RequestedAt, DecidedAt: a.DecidedAt,
+	}
+}
+
+// opsStatusActions lists status actions (telco-grained: TelcoLevelBound).
+func (p *Portal) opsStatusActions(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	items, err := repo.ListStatusActions(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	if err != nil {
+		p.Log.Error("portal status actions list", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	out := make([]statusActionResponse, 0, len(items))
+	for _, a := range items {
+		out = append(out, toStatusActionResponse(a))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"actions": out})
+}
+
+// opsStatusActionRequest opens a maker-checker status action. The telco is
+// the operator's own scope bound — a '*' admin must name it explicitly.
+func (p *Portal) opsStatusActionRequest(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	var req struct {
+		TelcoID     string `json:"telco_id"`
+		MSISDNToken string `json:"msisdn_token"`
+		ToStatus    string `json:"to_status"`
+		Reason      string `json:"reason"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "malformed JSON body")
+		return
+	}
+	if req.MSISDNToken == "" || req.ToStatus == "" || req.Reason == "" {
+		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "msisdn_token, to_status and reason are required")
+		return
+	}
+	// Resolve the tenant STRUCTURALLY: a telco-bounded operator acts in their
+	// own telco regardless of the body; only a '*' admin names one.
+	telco, ok := sess.OperatorScope().TelcoLevelBound()
+	if !ok {
+		writeErr(w, http.StatusForbidden, "PORTAL_SCOPE", "status actions need telco-level scope")
+		return
+	}
+	if telco == "" { // '*' admin
+		if req.TelcoID == "" {
+			writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "telco_id is required for all-scope sessions")
+			return
+		}
+		telco = req.TelcoID
+	}
+	a, err := p.Ops.RequestStatusAction(r.Context(), telco, req.MSISDNToken, req.ToStatus, req.Reason, sess.Actor)
+	if err != nil {
+		p.writeStatusActionErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"action_id": a.ActionID, "state": a.State,
+		"from_status": a.FromStatus, "to_status": a.ToStatus})
+}
+
+// opsStatusActionDecide is the checker step: approve applies via CAS, reject
+// closes. Load-scoped-then-act; the two-actor rule refuses the requester.
+func (p *Portal) opsStatusActionDecide(approve bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sess := sessionFrom(r.Context())
+		a, err := repo.GetStatusAction(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+		if err != nil {
+			if errors.Is(err, repo.ErrNotFound) {
+				writeErr(w, http.StatusNotFound, "STATUS_ACTION_NOT_FOUND", "status action not found")
+				return
+			}
+			p.Log.Error("portal status action load", "err", err)
+			writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+			return
+		}
+		if err := p.Ops.DecideStatusAction(r.Context(), a.TelcoID, a.ActionID, sess.Actor, approve); err != nil {
+			p.writeStatusActionErr(w, err)
+			return
+		}
+		state := "REJECTED"
+		if approve {
+			state = "APPLIED"
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"action_id": a.ActionID, "state": state})
+	}
+}
+
+func (p *Portal) writeStatusActionErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ops.ErrSameActor):
+		writeErr(w, http.StatusConflict, "STATUS_ACTION_TWO_PERSON", "approver must differ from the requester")
+	case errors.Is(err, repo.ErrOpenActionExists):
+		writeErr(w, http.StatusConflict, "STATUS_ACTION_OPEN_EXISTS", "subscriber already has an open status action")
+	case errors.Is(err, repo.ErrStatusDrift):
+		writeErr(w, http.StatusConflict, "STATUS_DRIFTED", "subscriber status changed since the request — re-check and re-request")
+	case errors.Is(err, ops.ErrTransitionNotAllowed):
+		writeErr(w, http.StatusBadRequest, "STATUS_TRANSITION_NOT_ALLOWED", "transition not allowed by governed config")
+	case errors.Is(err, repo.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "STATUS_ACTION_NOT_FOUND", "status action or subscriber not found, or not open")
+	default:
+		p.Log.Error("portal status action", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+	}
 }

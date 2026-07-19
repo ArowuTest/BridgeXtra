@@ -173,6 +173,91 @@ func ListParkedReversals(ctx context.Context, pool *pgxpool.Pool, scope Operator
 	return out, rows.Err()
 }
 
+// StatusActionRow is one subscriber-status action for the operator console
+// (M4e-2), with the subscriber's token and live status for context.
+type StatusActionRow struct {
+	ActionID            string
+	TelcoID             string
+	SubscriberAccountID string
+	MSISDNToken         string
+	CurrentStatus       string
+	FromStatus          string
+	ToStatus            string
+	Reason              string
+	RequestedBy         string
+	ApprovedBy          string
+	State               string
+	RequestedAt         string // RFC3339
+	DecidedAt           string // RFC3339, '' when undecided
+}
+
+const statusActionCols = `sa.action_id, sa.telco_id, sa.subscriber_account_id, s.msisdn_token,
+	s.status, sa.from_status, sa.to_status, sa.reason, sa.requested_by,
+	COALESCE(sa.approved_by,''), sa.state,
+	to_char(sa.requested_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
+	COALESCE(to_char(sa.decided_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')`
+
+func scanStatusAction(row pgx.Row) (StatusActionRow, error) {
+	var a StatusActionRow
+	err := row.Scan(&a.ActionID, &a.TelcoID, &a.SubscriberAccountID, &a.MSISDNToken,
+		&a.CurrentStatus, &a.FromStatus, &a.ToStatus, &a.Reason, &a.RequestedBy,
+		&a.ApprovedBy, &a.State, &a.RequestedAt, &a.DecidedAt)
+	return a, err
+}
+
+// ListStatusActions returns status actions newest-first. subscriber_accounts
+// is telco-grained (no programme dimension), so the read takes the
+// TelcoLevelBound — a programme-scoped operator sees nothing.
+func ListStatusActions(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]StatusActionRow, error) {
+	telco, ok := scope.TelcoLevelBound()
+	if !ok {
+		return nil, nil
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := pool.Query(ctx, `
+		SELECT `+statusActionCols+`
+		FROM subscriber_status_actions sa
+		JOIN subscriber_accounts s ON s.subscriber_account_id = sa.subscriber_account_id
+		WHERE ($1 = '' OR sa.telco_id = $1)
+		ORDER BY sa.requested_at DESC, sa.action_id
+		LIMIT $2`, telco, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StatusActionRow
+	for rows.Next() {
+		a, err := scanStatusAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GetStatusAction loads one action within the operator's telco-level bound
+// (load-scoped-then-act; no-oracle 404).
+func GetStatusAction(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, actionID string) (StatusActionRow, error) {
+	var a StatusActionRow
+	telco, ok := scope.TelcoLevelBound()
+	if !ok {
+		return a, fmt.Errorf("status action %q: %w", actionID, ErrNotFound)
+	}
+	a, err := scanStatusAction(pool.QueryRow(ctx, `
+		SELECT `+statusActionCols+`
+		FROM subscriber_status_actions sa
+		JOIN subscriber_accounts s ON s.subscriber_account_id = sa.subscriber_account_id
+		WHERE sa.action_id = $1
+		  AND ($2 = '' OR sa.telco_id = $2)`, actionID, telco))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return a, fmt.Errorf("status action %q: %w", actionID, ErrNotFound)
+	}
+	return a, err
+}
+
 // GetParkedReversal loads one PARKED reversal within the operator's
 // telco-level bound (load-scoped-then-act; no-oracle 404).
 func GetParkedReversal(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, pendingReversalID string) (ParkedReversalRow, error) {

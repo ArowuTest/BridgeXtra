@@ -65,6 +65,10 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/ops/fulfilments/{id}/enquire-now": true,
 		"/v1/portal/ops/reversals":                    true,
 		"/v1/portal/ops/reversals/{id}/retry":         true,
+		// M4e-2 subscriber status actions (VR-35-F1)
+		"/v1/portal/ops/status-actions":              true,
+		"/v1/portal/ops/status-actions/{id}/approve": true,
+		"/v1/portal/ops/status-actions/{id}/reject":  true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

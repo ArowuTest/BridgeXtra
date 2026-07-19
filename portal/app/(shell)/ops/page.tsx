@@ -13,10 +13,14 @@ import {
   AmbiguousAttempt,
   ApiError,
   ParkedReversal,
+  StatusAction,
   opsEnquireNow,
   opsFulfilments,
   opsReversalRetry,
   opsReversals,
+  opsStatusActionDecide,
+  opsStatusActionRequest,
+  opsStatusActions,
 } from "@/lib/api";
 
 function fmtErr(err: unknown): string {
@@ -34,21 +38,28 @@ function age(iso: string): string {
 }
 
 export default function OpsPage() {
-  const [tab, setTab] = useState<"fulfilments" | "reversals">("fulfilments");
+  const [tab, setTab] = useState<"fulfilments" | "reversals" | "subscribers">("fulfilments");
   const [attempts, setAttempts] = useState<AmbiguousAttempt[] | null>(null);
   const [staleAfter, setStaleAfter] = useState<number | null>(null);
   const [reversals, setReversals] = useState<ParkedReversal[] | null>(null);
+  const [actions, setActions] = useState<StatusAction[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Request form state (Subscribers tab).
+  const [reqToken, setReqToken] = useState("");
+  const [reqTelco, setReqTelco] = useState("");
+  const [reqTo, setReqTo] = useState<"BARRED" | "ACTIVE" | "CLOSED">("BARRED");
+  const [reqReason, setReqReason] = useState("");
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [f, r] = await Promise.all([opsFulfilments(), opsReversals()]);
+      const [f, r, a] = await Promise.all([opsFulfilments(), opsReversals(), opsStatusActions()]);
       setAttempts(f.attempts);
       setStaleAfter(f.stale_sent_after_seconds);
       setReversals(r.reversals);
+      setActions(a.actions);
     } catch (err) {
       setError(fmtErr(err));
     }
@@ -92,6 +103,43 @@ export default function OpsPage() {
     }
   }
 
+  async function requestAction() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await opsStatusActionRequest({
+        telco_id: reqTelco || undefined,
+        msisdn_token: reqToken,
+        to_status: reqTo,
+        reason: reqReason,
+      });
+      setNotice(`${r.action_id}: ${r.from_status} → ${r.to_status} requested — awaiting a second actor.`);
+      setReqToken("");
+      setReqReason("");
+      await load();
+    } catch (err) {
+      setError(fmtErr(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decide(id: string, decision: "approve" | "reject") {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await opsStatusActionDecide(id, decision);
+      setNotice(`${id}: ${r.state.toLowerCase()}.`);
+      await load();
+    } catch (err) {
+      setError(fmtErr(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <>
       <h1>Ops — ambiguity queues</h1>
@@ -108,6 +156,12 @@ export default function OpsPage() {
           onClick={() => setTab("reversals")}
         >
           Parked reversals{reversals ? ` (${reversals.length})` : ""}
+        </button>{" "}
+        <button
+          className={tab === "subscribers" ? "" : "small"}
+          onClick={() => setTab("subscribers")}
+        >
+          Subscribers{actions ? ` (${actions.filter((a) => a.state === "REQUESTED").length} open)` : ""}
         </button>
       </div>
 
@@ -221,6 +275,113 @@ export default function OpsPage() {
             </table>
           )}
         </div>
+      )}
+
+      {tab === "subscribers" && (
+        <>
+          <div className="card" style={{ marginBottom: 16 }}>
+            <h2 style={{ marginTop: 0, fontSize: 16 }}>Request a status change</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Maker-checker: a DIFFERENT operator must approve before anything
+              applies. Self-exclusion cannot be set or lifted here — it belongs
+              to the customer&apos;s own channel.
+            </p>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <input
+                placeholder="msisdn token (tok_…)"
+                value={reqToken}
+                onChange={(e) => setReqToken(e.target.value)}
+                style={{ minWidth: 220 }}
+              />
+              <input
+                placeholder="telco id (all-scope sessions only)"
+                value={reqTelco}
+                onChange={(e) => setReqTelco(e.target.value)}
+                style={{ minWidth: 220 }}
+              />
+              <select value={reqTo} onChange={(e) => setReqTo(e.target.value as typeof reqTo)}>
+                <option value="BARRED">BAR (block new offers)</option>
+                <option value="ACTIVE">UNBAR (restore)</option>
+                <option value="CLOSED">CLOSE (terminal)</option>
+              </select>
+              <input
+                placeholder="reason (required, audited)"
+                value={reqReason}
+                onChange={(e) => setReqReason(e.target.value)}
+                style={{ flex: 1, minWidth: 260 }}
+              />
+              <button disabled={busy || !reqToken || !reqReason} onClick={requestAction}>
+                Request
+              </button>
+            </div>
+          </div>
+
+          <div className="card">
+            {actions === null ? (
+              <p className="muted">Loading…</p>
+            ) : actions.length === 0 ? (
+              <p className="muted" style={{ margin: 0 }}>
+                No status actions yet. Every operator change of a
+                subscriber&apos;s status is a maker-checker record here — who
+                asked, who approved, and why. (Telco-level view.)
+              </p>
+            ) : (
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Requested</th>
+                    <th>Subscriber</th>
+                    <th>Transition</th>
+                    <th>Reason</th>
+                    <th>By</th>
+                    <th>State</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {actions.map((a) => (
+                    <tr key={a.action_id}>
+                      <td className="muted">{age(a.requested_at)}</td>
+                      <td className="mono">
+                        {a.msisdn_token}
+                        <span className="muted"> · {a.current_status}</span>
+                      </td>
+                      <td className="mono">
+                        {a.from_status} → {a.to_status}
+                      </td>
+                      <td>{a.reason}</td>
+                      <td className="mono">
+                        {a.requested_by}
+                        {a.approved_by ? ` / ${a.approved_by}` : ""}
+                      </td>
+                      <td>
+                        <span
+                          className={`state state-${
+                            a.state === "APPLIED" ? "ACTIVE" : a.state === "REJECTED" ? "REJECTED" : "SUBMITTED"
+                          }`}
+                        >
+                          {a.state}
+                        </span>
+                      </td>
+                      <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                        {a.state === "REQUESTED" && (
+                          <>
+                            <button className="small" disabled={busy} onClick={() => decide(a.action_id, "approve")}>
+                              Approve
+                            </button>{" "}
+                            <button className="small" disabled={busy} onClick={() => decide(a.action_id, "reject")}>
+                              Reject
+                            </button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
       )}
     </>
   );

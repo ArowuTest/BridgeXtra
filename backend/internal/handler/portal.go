@@ -89,6 +89,14 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/ops/fulfilments/{id}/enquire-now": {roleAdmin, roleOps},
 	"GET /v1/portal/ops/reversals":                     {roleAdmin, roleOps, roleFinance},
 	"POST /v1/portal/ops/reversals/{id}/retry":         {roleAdmin, roleOps},
+
+	// M4e-2 subscriber status actions (VR-35-F1): reads for all oversight
+	// roles; request/decide for OPS and RISK (barring is a conduct/risk
+	// action) — the two-actor rule is schema-enforced regardless of role.
+	"GET /v1/portal/ops/status-actions":               {roleAdmin, roleOps, roleRisk, roleFinance},
+	"POST /v1/portal/ops/status-actions":              {roleAdmin, roleOps, roleRisk},
+	"POST /v1/portal/ops/status-actions/{id}/approve": {roleAdmin, roleOps, roleRisk},
+	"POST /v1/portal/ops/status-actions/{id}/reject":  {roleAdmin, roleOps, roleRisk},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -137,6 +145,11 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/ops/fulfilments/{id}/enquire-now", http.HandlerFunc(p.opsEnquireNow))
 	p.mountRBAC(mux, "GET /v1/portal/ops/reversals", http.HandlerFunc(p.opsReversals))
 	p.mountRBAC(mux, "POST /v1/portal/ops/reversals/{id}/retry", http.HandlerFunc(p.opsReversalRetry))
+
+	p.mountRBAC(mux, "GET /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActions))
+	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActionRequest))
+	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions/{id}/approve", p.opsStatusActionDecide(true))
+	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions/{id}/reject", p.opsStatusActionDecide(false))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a

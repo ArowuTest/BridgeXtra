@@ -147,12 +147,26 @@ func TestSelfAudit_GrantScopes(t *testing.T) {
 		{"programmes", "status", true},
 		{"programmes", "code", false},
 		{"programmes", "name", false},
-		// subscriber_accounts + bureau_export_batches (0025): append-only in
-		// production -> UPDATE fully revoked (no column is writable by tcp_app).
-		{"subscriber_accounts", "status", false},
+		// subscriber_accounts: 0025 revoked all UPDATE (append-only then);
+		// 0027 re-granted EXACTLY status when the maker-checker writer landed
+		// (the designed add-the-grant-when-the-writer-lands flow, VR-36).
+		// Identity stays locked.
+		{"subscriber_accounts", "status", true},
 		{"subscriber_accounts", "msisdn_token", false},
+		{"subscriber_accounts", "effective_from", false},
+		{"subscriber_accounts", "telco_id", false},
+		// bureau_export_batches (0025): still append-only, still fully revoked.
 		{"bureau_export_batches", "state", false},
 		{"bureau_export_batches", "file_hash", false},
+		// subscriber_status_actions (0027): born column-scoped — decision
+		// columns yes, identity/transition/requester no.
+		{"subscriber_status_actions", "state", true},
+		{"subscriber_status_actions", "approved_by", true},
+		{"subscriber_status_actions", "applied_at", true},
+		{"subscriber_status_actions", "from_status", false},
+		{"subscriber_status_actions", "to_status", false},
+		{"subscriber_status_actions", "reason", false},
+		{"subscriber_status_actions", "requested_by", false},
 	} {
 		var can bool
 		if err := db.Admin.QueryRow(ctx,

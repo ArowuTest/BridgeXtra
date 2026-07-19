@@ -30,11 +30,13 @@ type Service struct {
 	Config *configsvc.Service
 	Log    *slog.Logger
 
-	breaks     repo.Breaks
-	complaints repo.Complaints
-	bureau     repo.BureauBatches
-	audit      repo.Audit
-	attempts   repo.Attempts
+	breaks        repo.Breaks
+	complaints    repo.Complaints
+	bureau        repo.BureauBatches
+	audit         repo.Audit
+	attempts      repo.Attempts
+	subscribers   repo.Subscribers
+	statusActions repo.StatusActions
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service {

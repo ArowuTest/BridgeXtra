@@ -268,3 +268,39 @@ export function opsReversalRetry(
 ): Promise<{ pending_reversal_id: string; applied: boolean; park_reason?: string }> {
   return request("POST", `/v1/portal/ops/reversals/${id}/retry`);
 }
+
+export type StatusAction = {
+  action_id: string;
+  telco_id: string;
+  subscriber_account_id: string;
+  msisdn_token: string;
+  current_status: string;
+  from_status: "ACTIVE" | "BARRED" | "CLOSED";
+  to_status: "ACTIVE" | "BARRED" | "CLOSED";
+  reason: string;
+  requested_by: string;
+  approved_by?: string;
+  state: "REQUESTED" | "REJECTED" | "APPLIED";
+  requested_at: string;
+  decided_at?: string;
+};
+
+export function opsStatusActions(): Promise<{ actions: StatusAction[] }> {
+  return request("GET", "/v1/portal/ops/status-actions");
+}
+
+export function opsStatusActionRequest(req: {
+  telco_id?: string;
+  msisdn_token: string;
+  to_status: "ACTIVE" | "BARRED" | "CLOSED";
+  reason: string;
+}): Promise<{ action_id: string; state: string; from_status: string; to_status: string }> {
+  return request("POST", "/v1/portal/ops/status-actions", req);
+}
+
+export function opsStatusActionDecide(
+  id: string,
+  decision: "approve" | "reject",
+): Promise<{ action_id: string; state: string }> {
+  return request("POST", `/v1/portal/ops/status-actions/${id}/${decision}`);
+}

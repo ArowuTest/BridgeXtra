@@ -656,6 +656,135 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/status-actions:
+    get:
+      operationId: portalOpsStatusActions
+      summary: Subscriber status actions, newest first (roles ADMIN, OPS, RISK, FINANCE)
+      description: >
+        The maker-checker record behind every operator change of a
+        subscriber's status (VR-35-F1). Telco-grained - reads take the
+        telco-level scope bound. SELF_EXCLUDED never appears - it is
+        structurally excluded from operator actions (customer channel only).
+      responses:
+        "200":
+          description: Status action list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [actions]
+                properties:
+                  actions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/StatusAction"
+    post:
+      operationId: portalOpsStatusActionRequest
+      summary: Request a subscriber status change (maker step; roles ADMIN, OPS, RISK)
+      description: >
+        Records the intended transition against the subscriber's CURRENT
+        status. The transition must be in the governed ops.status_actions set
+        (absent config refuses everything); one open action per subscriber; a
+        DISTINCT second actor must approve before anything is applied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [msisdn_token, to_status, reason]
+              properties:
+                telco_id: { type: string, description: Required only for all-scope (*) sessions }
+                msisdn_token: { type: string }
+                to_status: { type: string, enum: [ACTIVE, BARRED, CLOSED] }
+                reason: { type: string }
+      responses:
+        "200":
+          description: Action opened
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action_id, state]
+                properties:
+                  action_id: { type: string }
+                  state: { type: string, enum: [REQUESTED] }
+                  from_status: { type: string }
+                  to_status: { type: string }
+        "400":
+          description: Transition not in the governed set, or bad request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "404":
+          description: Subscriber not found in scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Subscriber already has an open status action
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/status-actions/{id}/approve:
+    post:
+      operationId: portalOpsStatusActionApprove
+      summary: Approve and apply a status action (checker step; roles ADMIN, OPS, RISK)
+      description: >
+        A DISTINCT second actor applies the transition via compare-and-set on
+        the recorded from_status - a subscriber whose status drifted since the
+        request refuses with 409, never overwrites blind. The governed
+        transition set is re-checked at decision time.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action_id, state]
+                properties:
+                  action_id: { type: string }
+                  state: { type: string, enum: [APPLIED] }
+        "404":
+          description: Action not found, out of scope, or not open (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Same-actor approval, or subscriber status drifted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/status-actions/{id}/reject:
+    post:
+      operationId: portalOpsStatusActionReject
+      summary: Reject a status action (checker step; roles ADMIN, OPS, RISK)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action_id, state]
+                properties:
+                  action_id: { type: string }
+                  state: { type: string, enum: [REJECTED] }
+        "404":
+          description: Action not found, out of scope, or not open (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Same-actor decision refused
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth
@@ -968,6 +1097,24 @@ components:
         amount_minor: { type: integer, format: int64 }
         currency: { type: string, example: NGN }
         display: { type: string, example: "NGN 500,000.00" }
+    StatusAction:
+      type: object
+      description: One maker-checker subscriber-status action (M4e-2, VR-35-F1). SELF_EXCLUDED never appears here — it is structurally excluded from operator actions.
+      required: [action_id, telco_id, subscriber_account_id, from_status, to_status, state, requested_by, requested_at]
+      properties:
+        action_id: { type: string }
+        telco_id: { type: string }
+        subscriber_account_id: { type: string }
+        msisdn_token: { type: string }
+        current_status: { type: string }
+        from_status: { type: string, enum: [ACTIVE, BARRED, CLOSED] }
+        to_status: { type: string, enum: [ACTIVE, BARRED, CLOSED] }
+        reason: { type: string }
+        requested_by: { type: string }
+        approved_by: { type: string }
+        state: { type: string, enum: [REQUESTED, REJECTED, APPLIED] }
+        requested_at: { type: string }
+        decided_at: { type: string }
     SettlementStatement:
       type: object
       description: A settlement statement (ledger-derived; V1-SET / CFG-012).
