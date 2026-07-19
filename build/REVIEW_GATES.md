@@ -373,3 +373,16 @@ Verified at source: (1) repo reads = non-bypassable OperatorScope (fulfilments v
 **My own runs (Docker, real tcp_app):** both TestM4E packs PASS -race; recovery + configsvc + repo suites PASS. CI on 48761f2 re-verified via GitHub API (backend+quality success).
 **VR-37-F1 LOW (fold into M4e-2):** the C3 consumer floor has no test proving the refusal fires (packs cover staleness/scope/C2/audit; not config-absent → OPS_QUEUES_UNCONFIGURED). Zero-config-floor standing rule = every floor proven to fire. One test: deactivate/absent ops.queues → GET refuses with the typed error.
 **M4e-2 cleared** (mig 0027 status-action maker-checker; acceptance = C1 validator-refuses-SELF_EXCLUDED both positions, C2 CAS apply, C3 floor + floor TESTS incl. VR-37-F1, C4 recovery-vs-BARRED test, C5 partial-unique adopted; FULL-suite gate for the grant change).
+
+### VR-38 — 19 Jul (Fable 5): M4e-2 status action (2b28597) — VERIFIED CLEAN, all conditions C1-C5 + VR-37-F1 delivered with proof. VR-35-F1 CLOSED.
+Source-verified, tests run BY ME (Docker, real tcp_app), CI re-verified via GitHub API (backend+quality success):
+- **C1 exceeded:** conduct floor structural at TWO layers — table CHECKs admit only ACTIVE/BARRED/CLOSED (SELF_EXCLUDED cannot even be RECORDED as from/to, holds against bad config) + validator refuses SELF_EXCLUDED both positions AND from-CLOSED (terminal) AND distinguishes empty-list (valid refuse-all) from absent-key (refused).
+- **C2:** apply = CAS `WHERE status = $2` → typed ErrStatusDrift on RowsAffected 0 (journey test drifts status between request and approval, proves refusal); decision claim `FOR UPDATE state='REQUESTED'` serialises concurrent deciders; transition set re-checked at decision time.
+- **C3 + VR-37-F1:** TestM4E_ZeroConfigFloors deletes governed config, proves BOTH floors fire (OPS_QUEUES_UNCONFIGURED + status-action refuse-all). Floor-proven-to-fire rule satisfied.
+- **C4:** TestC4_RecoveryAgainstBarredSubscriber_StillApplies — recovery against BARRED subscriber's ACTIVE advance allocates + closes; money path never reads account status.
+- **C5:** partial-unique one-open-action index (status_action_one_open_uq); second open request → 409.
+- **Mig 0027 born column-scoped** (decision cols writable; identity/transition/requester write-once via trigger; terminal freeze even vs owner — write_offs pattern) + the designed re-grant `GRANT UPDATE (status)` landing WITH its writer+tests = 0025 discipline first designed use, exactly as VR-36 gated. Probe flipped {status:true}, msisdn_token/effective_from stay denied — verified in my probe run.
+- **Tenant sourcing structural:** telco-bounded operator acts only in own telco (body ignored); programme/global scope → 403; '*' admin must name telco. Distinct-approver at schema regardless of role.
+- **The point, proven:** journey test shows the subscriber actually BARRED and the blocked_statuses gates finally seeing it — the armed-but-dead chain from VR-35-F1 now has a live producer. VR-35-F1 CLOSED.
+Note accepted: browser verification skipped (dev-server port conflict) — surface exercised through real-HTTP journey tests; acceptable for this slice, UI look verified at M4e-3/G4.
+**M4e-3 cleared** (fault demo; C6 per-run token suffixes adopted). Then M4f support → G4.

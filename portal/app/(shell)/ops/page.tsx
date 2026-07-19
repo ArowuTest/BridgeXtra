@@ -12,8 +12,15 @@ import { useCallback, useEffect, useState } from "react";
 import {
   AmbiguousAttempt,
   ApiError,
+  DemoChain,
+  DemoRun,
+  DemoScenario,
   ParkedReversal,
   StatusAction,
+  opsDemoRun,
+  opsDemoRunDetail,
+  opsDemoRuns,
+  opsDemoScenarios,
   opsEnquireNow,
   opsFulfilments,
   opsReversalRetry,
@@ -38,7 +45,7 @@ function age(iso: string): string {
 }
 
 export default function OpsPage() {
-  const [tab, setTab] = useState<"fulfilments" | "reversals" | "subscribers">("fulfilments");
+  const [tab, setTab] = useState<"fulfilments" | "reversals" | "subscribers" | "demo">("fulfilments");
   const [attempts, setAttempts] = useState<AmbiguousAttempt[] | null>(null);
   const [staleAfter, setStaleAfter] = useState<number | null>(null);
   const [reversals, setReversals] = useState<ParkedReversal[] | null>(null);
@@ -51,17 +58,38 @@ export default function OpsPage() {
   const [reqTelco, setReqTelco] = useState("");
   const [reqTo, setReqTo] = useState<"BARRED" | "ACTIVE" | "CLOSED">("BARRED");
   const [reqReason, setReqReason] = useState("");
+  // Fault demo state.
+  const [scenarios, setScenarios] = useState<DemoScenario[] | null>(null);
+  const [demoUnavailable, setDemoUnavailable] = useState<string | null>(null);
+  const [runs, setRuns] = useState<DemoRun[] | null>(null);
+  const [chain, setChain] = useState<DemoChain | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     try {
-      const [f, r, a] = await Promise.all([opsFulfilments(), opsReversals(), opsStatusActions()]);
+      const [f, r, a, dr] = await Promise.all([
+        opsFulfilments(),
+        opsReversals(),
+        opsStatusActions(),
+        opsDemoRuns(),
+      ]);
       setAttempts(f.attempts);
       setStaleAfter(f.stale_sent_after_seconds);
       setReversals(r.reversals);
       setActions(a.actions);
+      setRuns(dr.runs);
     } catch (err) {
       setError(fmtErr(err));
+    }
+    // The demo catalogue is telco-allowlisted: a refusal here is a normal
+    // posture (disabled, or this operator's telco isn't SIM), not an error.
+    try {
+      const sc = await opsDemoScenarios();
+      setScenarios(sc.scenarios);
+      setDemoUnavailable(null);
+    } catch (err) {
+      setScenarios([]);
+      setDemoUnavailable(fmtErr(err));
     }
   }, []);
 
@@ -140,6 +168,31 @@ export default function OpsPage() {
     }
   }
 
+  async function runDemo(scenario: string) {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const r = await opsDemoRun({ scenario });
+      setNotice(`${r.run_id}: ${scenario} started against ${r.msisdn_token}.`);
+      await load();
+      await openChain(r.run_id);
+    } catch (err) {
+      setError(fmtErr(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openChain(runId: string) {
+    setError(null);
+    try {
+      setChain(await opsDemoRunDetail(runId));
+    } catch (err) {
+      setError(fmtErr(err));
+    }
+  }
+
   return (
     <>
       <h1>Ops — ambiguity queues</h1>
@@ -162,6 +215,9 @@ export default function OpsPage() {
           onClick={() => setTab("subscribers")}
         >
           Subscribers{actions ? ` (${actions.filter((a) => a.state === "REQUESTED").length} open)` : ""}
+        </button>{" "}
+        <button className={tab === "demo" ? "" : "small"} onClick={() => setTab("demo")}>
+          Fault demo
         </button>
       </div>
 
@@ -374,6 +430,140 @@ export default function OpsPage() {
                             </button>
                           </>
                         )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </>
+      )}
+
+      {tab === "demo" && (
+        <>
+          <div className="card" style={{ marginBottom: 16 }}>
+            <h2 style={{ marginTop: 0, fontSize: 16 }}>Run a fault scenario</h2>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Each run drives the REAL lending path against the simulator — a
+              genuine offer, a genuine advance, genuine ledger postings. The
+              demo is config-allowlisted to the simulator tenant and cannot
+              touch a live telco.
+            </p>
+            {demoUnavailable ? (
+              <p className="muted" style={{ margin: 0 }}>
+                Demo not available for your telco: <span className="mono">{demoUnavailable}</span>
+              </p>
+            ) : scenarios === null ? (
+              <p className="muted">Loading…</p>
+            ) : (
+              <table className="data">
+                <tbody>
+                  {scenarios.map((s) => (
+                    <tr key={s.name}>
+                      <td className="mono" style={{ whiteSpace: "nowrap" }}>{s.name}</td>
+                      <td className="muted">{s.description}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button className="small" disabled={busy} onClick={() => runDemo(s.name)}>
+                          Run
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {chain && (
+            <div className="card" style={{ marginBottom: 16 }}>
+              <h2 style={{ marginTop: 0, fontSize: 16 }}>
+                Run <span className="mono">{chain.run.run_id}</span> — {chain.run.scenario}{" "}
+                <button className="small" onClick={() => openChain(chain.run.run_id)}>
+                  Refresh
+                </button>
+              </h2>
+              <p style={{ marginTop: 0 }}>
+                Advance <span className="mono">{chain.advance.advance_id}</span> ·{" "}
+                <span className={`state state-${chain.advance.state === "ACTIVE" ? "ACTIVE" : chain.advance.state === "FULFILMENT_FAILED" ? "REJECTED" : "SUBMITTED"}`}>
+                  {chain.advance.state}
+                </span>{" "}
+                · {chain.advance.face_value.display} (outstanding {chain.advance.outstanding.display})
+              </p>
+              <h3 style={{ fontSize: 14 }}>Telco attempts</h3>
+              <table className="data">
+                <tbody>
+                  {chain.attempts.map((a) => (
+                    <tr key={a.attempt_id}>
+                      <td className="mono">#{a.attempt_no}</td>
+                      <td>
+                        <span className={`state state-${a.state === "CONFIRMED" ? "ACTIVE" : a.state === "FAILED" ? "REJECTED" : "SUBMITTED"}`}>{a.state}</span>
+                      </td>
+                      <td className="mono">{a.telco_reference || "—"}</td>
+                      <td className="muted">{a.enquiry_count} enquiries</td>
+                      <td className="muted">{a.resolved_at ? "resolved" : "chasing the telco…"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <h3 style={{ fontSize: 14 }}>Ledger postings (by correlation)</h3>
+              {chain.journals.length === 0 ? (
+                <p className="muted" style={{ margin: 0 }}>No postings yet.</p>
+              ) : (
+                <ul style={{ marginTop: 0 }}>
+                  {chain.journals.map((j) => (
+                    <li key={j.journal_id} className="mono" style={{ fontSize: 13 }}>{j.event_type}</li>
+                  ))}
+                </ul>
+              )}
+              {chain.notifications.length > 0 && (
+                <>
+                  <h3 style={{ fontSize: 14 }}>Customer messages</h3>
+                  <ul style={{ marginTop: 0 }}>
+                    {chain.notifications.map((n, i) => (
+                      <li key={i} className="mono" style={{ fontSize: 13 }}>
+                        {n.kind} · {n.state}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="card">
+            {runs === null ? (
+              <p className="muted">Loading…</p>
+            ) : runs.length === 0 ? (
+              <p className="muted" style={{ margin: 0 }}>
+                No demo runs yet. Pick a scenario above — every run is an
+                ordinary advance in the simulator tenant, and its full artifact
+                chain stays inspectable here.
+              </p>
+            ) : (
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>Started</th>
+                    <th>Run</th>
+                    <th>Scenario</th>
+                    <th>Subscriber</th>
+                    <th>By</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {runs.map((r) => (
+                    <tr key={r.run_id}>
+                      <td className="muted">{age(r.created_at)}</td>
+                      <td className="mono">{r.run_id}</td>
+                      <td className="mono">{r.scenario}</td>
+                      <td className="mono">{r.msisdn_token}</td>
+                      <td className="mono">{r.requested_by}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button className="small" onClick={() => openChain(r.run_id)}>
+                          View chain
+                        </button>
                       </td>
                     </tr>
                   ))}

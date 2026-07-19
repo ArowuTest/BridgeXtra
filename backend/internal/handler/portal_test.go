@@ -20,10 +20,12 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/handler"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/ledger"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
@@ -61,6 +63,8 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 	}
 
 	appCfg := configsvc.New(db.App)
+	led := ledger.New(appCfg)
+	orig := origination.New(db.App, appCfg, led, mno.NewHTTPAdapter(appCfg), slog.Default())
 	p := &handler.Portal{
 		Admins:     &repo.Admins{Pool: db.App},
 		Sessions:   &repo.PortalSessions{Pool: db.App},
@@ -68,7 +72,8 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Treasury:   treasury.New(db.App, appCfg, slog.Default()),
 		Ops:        ops.New(db.App, appCfg, slog.Default()),
 		Settlement: settlement.New(db.App, appCfg, slog.Default()),
-		Recovery:   recovery.New(db.App, appCfg, ledger.New(appCfg), slog.Default()),
+		Recovery:   recovery.New(db.App, appCfg, led, slog.Default()),
+		Demo:       ops.NewDemo(db.App, appCfg, orig, slog.Default()),
 		ReadPool:   db.Worker,
 		Log:        slog.Default(),
 	}

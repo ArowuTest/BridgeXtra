@@ -17,6 +17,54 @@ import (
 func init() {
 	validators["ops.queues"] = validateOpsQueues
 	validators["ops.status_actions"] = validateOpsStatusActions
+	validators["ops.fault_demo"] = validateOpsFaultDemo
+}
+
+// validateOpsFaultDemo governs the demo catalogue. Armed-but-dead prevention
+// in both directions: an ENABLED demo must name at least one telco (each with
+// a programme) and at least one scenario with a non-empty token pool — an
+// enabled-but-unrunnable demo cannot activate. A disabled demo may carry any
+// (even empty) catalogue: OFF is always a valid posture.
+func validateOpsFaultDemo(_ context.Context, _ pgx.Tx, content json.RawMessage) error {
+	var v struct {
+		Enabled *bool `json:"enabled"`
+		Telcos  map[string]struct {
+			ProgrammeID *string `json:"programme_id"`
+		} `json:"telcos"`
+		Scenarios map[string]struct {
+			Tokens      []string `json:"tokens"`
+			Description *string  `json:"description"`
+		} `json:"scenarios"`
+	}
+	if err := strictUnmarshal(content, &v); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	if v.Enabled == nil {
+		return fmt.Errorf("enabled is required (absent is not 'off')")
+	}
+	if !*v.Enabled {
+		return nil
+	}
+	if len(v.Telcos) == 0 {
+		return fmt.Errorf("an enabled demo must allowlist at least one telco — enabled-with-no-telcos is armed-but-dead")
+	}
+	for id, t := range v.Telcos {
+		if t.ProgrammeID == nil || *t.ProgrammeID == "" {
+			return fmt.Errorf("telco %q: programme_id is required", id)
+		}
+	}
+	if len(v.Scenarios) == 0 {
+		return fmt.Errorf("an enabled demo must define at least one scenario")
+	}
+	for name, sc := range v.Scenarios {
+		if len(sc.Tokens) == 0 {
+			return fmt.Errorf("scenario %q: token pool must be non-empty", name)
+		}
+		if sc.Description == nil || *sc.Description == "" {
+			return fmt.Errorf("scenario %q: description is required (the demo narrates to non-engineers)", name)
+		}
+	}
+	return nil
 }
 
 // validateOpsStatusActions governs the operator status-action transition set.

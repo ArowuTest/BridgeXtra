@@ -116,6 +116,7 @@ func main() {
 		Ops:        ops.New(appPool, configsvc.New(appPool), log),
 		Settlement: settlement.New(appPool, configsvc.New(appPool), log),
 		Recovery:   rec,
+		Demo:       ops.NewDemo(appPool, appCfg, orig, log),
 		ReadPool:   workerPool,
 		Log:        log,
 	}

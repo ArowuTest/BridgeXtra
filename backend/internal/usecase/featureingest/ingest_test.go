@@ -83,8 +83,13 @@ func TestIngest_EndToEnd_ThenDuplicateIsRecordedNoOp(t *testing.T) {
 		if err := tx.QueryRow(ctx, "SELECT count(*) FROM feature_files").Scan(&files); err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx,
-			`SELECT count(*) FROM subscriber_accounts WHERE msisdn_token ~ '^tok_sim_[0-9]{4}$'`).Scan(&subs)
+		// STRONGER than the former token-shape regex (which the M4e-3
+		// fault-demo tokens no longer match): every ingested snapshot must
+		// resolve to a real subscriber account — the join IS the invariant.
+		return tx.QueryRow(ctx, `
+			SELECT count(DISTINCT s.subscriber_account_id)
+			FROM feature_snapshots fs
+			JOIN subscriber_accounts s ON s.subscriber_account_id = fs.subscriber_account_id`).Scan(&subs)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -92,8 +97,8 @@ func TestIngest_EndToEnd_ThenDuplicateIsRecordedNoOp(t *testing.T) {
 	if snapshots != 100 || files != 1 {
 		t.Fatalf("want 100 snapshots in 1 file, got %d in %d", snapshots, files)
 	}
-	if subs < 100 {
-		t.Fatalf("feature file must introduce subscriber accounts, got %d", subs)
+	if subs != 100 {
+		t.Fatalf("every ingested snapshot must have a subscriber account, got %d of 100", subs)
 	}
 
 	// Stored features are canonical integers with quality carried through

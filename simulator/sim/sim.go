@@ -217,7 +217,16 @@ func (s *Simulator) featureFile(w http.ResponseWriter, r *http.Request) {
 
 	file := FeatureFile{TelcoID: r.PathValue("telcoId"), AsOf: asOf, Rows: make([]FeatureRow, 0, count)}
 	for i := 1; i <= count; i++ {
-		file.Rows = append(file.Rows, s.featureRow(i))
+		row := s.featureRow(i)
+		// M4e-3 fault-demo pool: a few deterministic rows carry FAULT-SHAPED
+		// tokens (the fulfilment route faults on token substring, V2-SIM-002)
+		// but ORDINARY healthy histories, so the real scoring pipeline makes
+		// them eligible and the portal demo can originate against them.
+		// Indexes chosen off the special classes (not %7 / %13).
+		if tok, ok := demoTokens[i]; ok {
+			row.MSISDNToken = tok
+		}
+		file.Rows = append(file.Rows, row)
 	}
 	if r.URL.Query().Get("malformed") == "1" {
 		// #nosec G101 -- not a credential: a synthetic tokenised-MSISDN row id
@@ -242,6 +251,17 @@ func (s *Simulator) featureFile(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, file)
+}
+
+// demoTokens maps feature-file row indexes to the fault-demo token pool
+// (M4e-3). All indexes avoid the SPIKY (%13) and THIN (%7) special classes so
+// the pool scores eligible. FAIL tokens trigger the hard-fail fulfilment
+// fault; TIMEOUT tokens the credit-then-hang EDG-005 fault; the demo_ok
+// tokens are plain (dedicated so demos never collide with test subscribers).
+var demoTokens = map[int]string{
+	80: "tok_sim_demo_ok_01", 82: "tok_sim_demo_ok_02", 83: "tok_sim_demo_ok_03",
+	92: "tok_sim_demo_FAIL_01", 94: "tok_sim_demo_FAIL_02", 95: "tok_sim_demo_FAIL_03",
+	96: "tok_sim_demo_TIMEOUT_01", 97: "tok_sim_demo_TIMEOUT_02", 99: "tok_sim_demo_TIMEOUT_03",
 }
 
 // featureRow derives one subscriber's deterministic features from the seed

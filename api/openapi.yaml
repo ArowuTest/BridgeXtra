@@ -785,6 +785,172 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/demo/scenarios:
+    get:
+      operationId: portalOpsDemoScenarios
+      summary: Governed fault-demo catalogue (roles ADMIN, OPS, RISK, FINANCE)
+      description: >
+        The scenario list from the ops.fault_demo config. The demo is
+        allowlisted per telco (seeded to the simulator tenant only) and its
+        absence or disablement refuses everything - absent config is never
+        'demo on'.
+      parameters:
+        - { name: telco_id, in: query, required: false, schema: { type: string }, description: Required only for all-scope (*) sessions }
+      responses:
+        "200":
+          description: Scenario catalogue
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [telco_id, scenarios]
+                properties:
+                  telco_id: { type: string }
+                  scenarios:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, description, pool_size]
+                      properties:
+                        name: { type: string }
+                        description: { type: string }
+                        pool_size: { type: integer }
+        "403":
+          description: Demo disabled, unconfigured, or telco not allowlisted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/demo/run:
+    post:
+      operationId: portalOpsDemoRun
+      summary: Run one fault-demo scenario through the REAL origination path (roles ADMIN, OPS)
+      description: >
+        Originates an ordinary advance against a fault-shaped simulator token
+        from the scenario's pool - no special-cased money paths. The run id is
+        both idempotency key and correlation id, so the artifact chain is
+        queryable by construction. Pool rotation (C6) picks the first token
+        without an open advance; an exhausted pool is an honest 409.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scenario]
+              properties:
+                telco_id: { type: string, description: Required only for all-scope (*) sessions }
+                scenario: { type: string }
+      responses:
+        "200":
+          description: Run started
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, scenario, advance_id, correlation_id]
+                properties:
+                  run_id: { type: string }
+                  scenario: { type: string }
+                  msisdn_token: { type: string }
+                  advance_id: { type: string }
+                  correlation_id: { type: string }
+        "400":
+          description: Unknown scenario or bad request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "403":
+          description: Demo disabled, unconfigured, or telco not allowlisted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Every pool token still holds an open advance
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/ops/demo/runs:
+    get:
+      operationId: portalOpsDemoRuns
+      summary: Recent fault-demo runs (roles ADMIN, OPS, RISK, FINANCE)
+      responses:
+        "200":
+          description: Run list, newest first (telco-level scope bound)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runs]
+                properties:
+                  runs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DemoRun"
+  /v1/portal/ops/demo/runs/{id}:
+    get:
+      operationId: portalOpsDemoRunDetail
+      summary: One run's LIVE artifact chain (roles ADMIN, OPS, RISK, FINANCE)
+      description: >
+        Read fresh from the real tables on every poll - advance state,
+        fulfilment attempts (with enquiry counts), balanced ledger journals by
+        correlation, and customer notifications - so the resolver's progress
+        shows as it happens.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Artifact chain
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, advance, attempts, journals]
+                properties:
+                  run: { $ref: "#/components/schemas/DemoRun" }
+                  advance:
+                    type: object
+                    properties:
+                      advance_id: { type: string }
+                      state: { type: string }
+                      face_value: { $ref: "#/components/schemas/MoneyView" }
+                      outstanding: { $ref: "#/components/schemas/MoneyView" }
+                      activated_at: { type: string }
+                      closed_at: { type: string }
+                  attempts:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        attempt_id: { type: string }
+                        attempt_no: { type: integer }
+                        state: { type: string }
+                        telco_reference: { type: string }
+                        enquiry_count: { type: integer }
+                        submitted_at: { type: string }
+                        resolved_at: { type: string }
+                        next_enquiry_at: { type: string }
+                  notifications:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind: { type: string }
+                        state: { type: string }
+                        created_at: { type: string }
+                        sent_at: { type: string }
+                  journals:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        journal_id: { type: string }
+                        event_type: { type: string }
+                        correlation_id: { type: string }
+        "404":
+          description: Run not found or out of scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth
@@ -1097,6 +1263,19 @@ components:
         amount_minor: { type: integer, format: int64 }
         currency: { type: string, example: NGN }
         display: { type: string, example: "NGN 500,000.00" }
+    DemoRun:
+      type: object
+      description: An immutable fault-demo run record pointing at the REAL artifacts the ordinary origination path produced (M4e-3).
+      required: [run_id, telco_id, scenario, advance_id, correlation_id]
+      properties:
+        run_id: { type: string }
+        telco_id: { type: string }
+        scenario: { type: string }
+        msisdn_token: { type: string }
+        advance_id: { type: string }
+        correlation_id: { type: string }
+        requested_by: { type: string }
+        created_at: { type: string }
     StatusAction:
       type: object
       description: One maker-checker subscriber-status action (M4e-2, VR-35-F1). SELF_EXCLUDED never appears here — it is structurally excluded from operator actions.

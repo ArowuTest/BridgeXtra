@@ -301,6 +301,174 @@ func (p *Portal) opsStatusActionDecide(approve bool) http.HandlerFunc {
 	}
 }
 
+// --- fault demo (M4e-3) ----------------------------------------------------
+
+// demoTelco resolves the demo tenant structurally: a telco-bounded operator
+// runs in their own telco; a '*' admin names one. Programme-scoped operators
+// have no telco-level authority and are refused.
+func demoTelco(w http.ResponseWriter, r *http.Request, explicit string) (string, bool) {
+	sess := sessionFrom(r.Context())
+	telco, ok := sess.OperatorScope().TelcoLevelBound()
+	if !ok {
+		writeErr(w, http.StatusForbidden, "PORTAL_SCOPE", "the demo needs telco-level scope")
+		return "", false
+	}
+	if telco == "" {
+		if explicit == "" {
+			writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "telco_id is required for all-scope sessions")
+			return "", false
+		}
+		telco = explicit
+	}
+	return telco, true
+}
+
+// opsDemoScenarios lists the governed catalogue for the operator's telco.
+func (p *Portal) opsDemoScenarios(w http.ResponseWriter, r *http.Request) {
+	telco, ok := demoTelco(w, r, r.URL.Query().Get("telco_id"))
+	if !ok {
+		return
+	}
+	scenarios, err := p.Demo.Scenarios(r.Context(), telco)
+	if err != nil {
+		p.writeDemoErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"telco_id": telco, "scenarios": scenarios})
+}
+
+// opsDemoRun starts one fault-demo run through the real origination path.
+func (p *Portal) opsDemoRun(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	var req struct {
+		TelcoID  string `json:"telco_id"`
+		Scenario string `json:"scenario"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil || req.Scenario == "" {
+		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "scenario is required")
+		return
+	}
+	telco, ok := demoTelco(w, r, req.TelcoID)
+	if !ok {
+		return
+	}
+	run, err := p.Demo.Run(r.Context(), telco, req.Scenario, sess.Actor)
+	if err != nil {
+		p.writeDemoErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"run_id": run.RunID, "scenario": run.Scenario, "msisdn_token": run.MSISDNToken,
+		"advance_id": run.AdvanceID, "correlation_id": run.CorrelationID,
+	})
+}
+
+type demoRunResponse struct {
+	RunID         string `json:"run_id"`
+	TelcoID       string `json:"telco_id"`
+	Scenario      string `json:"scenario"`
+	MSISDNToken   string `json:"msisdn_token"`
+	AdvanceID     string `json:"advance_id"`
+	CorrelationID string `json:"correlation_id"`
+	RequestedBy   string `json:"requested_by"`
+	CreatedAt     string `json:"created_at"`
+}
+
+func toDemoRunResponse(r repo.DemoRunRow) demoRunResponse {
+	return demoRunResponse{
+		RunID: r.RunID, TelcoID: r.TelcoID, Scenario: r.Scenario, MSISDNToken: r.MSISDNToken,
+		AdvanceID: r.AdvanceID, CorrelationID: r.CorrelationID, RequestedBy: r.RequestedBy,
+		CreatedAt: r.CreatedAt,
+	}
+}
+
+// opsDemoRuns lists recent runs (telco-grained: TelcoLevelBound).
+func (p *Portal) opsDemoRuns(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	runs, err := repo.ListDemoRuns(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	if err != nil {
+		p.Log.Error("portal demo runs", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	out := make([]demoRunResponse, 0, len(runs))
+	for _, dr := range runs {
+		out = append(out, toDemoRunResponse(dr))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": out})
+}
+
+// opsDemoRunDetail returns the run's LIVE artifact chain — read fresh from
+// the real tables every poll, so the resolver's progress shows as it happens.
+func (p *Portal) opsDemoRunDetail(w http.ResponseWriter, r *http.Request) {
+	sess := sessionFrom(r.Context())
+	run, err := repo.GetDemoRun(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, repo.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "DEMO_RUN_NOT_FOUND", "demo run not found")
+			return
+		}
+		p.Log.Error("portal demo run load", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	adv, attempts, notes, err := repo.GetDemoChain(r.Context(), p.ReadPool, run)
+	if err != nil {
+		p.Log.Error("portal demo chain", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	journals, err := repo.ListJournals(r.Context(), p.ReadPool, sess.OperatorScope(), "", run.CorrelationID, 50)
+	if err != nil {
+		p.Log.Error("portal demo journals", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+		return
+	}
+	attemptViews := make([]map[string]any, 0, len(attempts))
+	for _, a := range attempts {
+		attemptViews = append(attemptViews, map[string]any{
+			"attempt_id": a.AttemptID, "attempt_no": a.AttemptNo, "state": a.State,
+			"telco_reference": a.TelcoRef, "enquiry_count": a.EnquiryCount,
+			"submitted_at": a.SubmittedAt, "resolved_at": a.ResolvedAt, "next_enquiry_at": a.NextEnquiryAt,
+		})
+	}
+	noteViews := make([]map[string]any, 0, len(notes))
+	for _, n := range notes {
+		noteViews = append(noteViews, map[string]any{
+			"kind": n.Kind, "state": n.State, "created_at": n.CreatedAt, "sent_at": n.SentAt,
+		})
+	}
+	journalViews := make([]journalHeaderResponse, 0, len(journals))
+	for _, j := range journals {
+		journalViews = append(journalViews, toJournalHeader(j))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"run": toDemoRunResponse(run),
+		"advance": map[string]any{
+			"advance_id": adv.AdvanceID, "state": adv.State,
+			"face_value": toMoneyView(adv.FaceValue), "outstanding": toMoneyView(adv.Outstanding),
+			"activated_at": adv.ActivatedAt, "closed_at": adv.ClosedAt,
+		},
+		"attempts":      attemptViews,
+		"notifications": noteViews,
+		"journals":      journalViews,
+	})
+}
+
+func (p *Portal) writeDemoErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ops.ErrDemoPoolBusy):
+		writeErr(w, http.StatusConflict, "DEMO_POOL_BUSY", err.Error())
+	case errors.Is(err, ops.ErrDemoScenario):
+		writeErr(w, http.StatusBadRequest, "DEMO_SCENARIO_UNKNOWN", "unknown demo scenario")
+	case errors.Is(err, ops.ErrDemoUnavailable):
+		writeErr(w, http.StatusForbidden, "DEMO_UNAVAILABLE", "fault demo not available for this telco (disabled or not allowlisted)")
+	default:
+		p.Log.Error("portal demo", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+	}
+}
+
 func (p *Portal) writeStatusActionErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ops.ErrSameActor):

@@ -304,3 +304,59 @@ export function opsStatusActionDecide(
 ): Promise<{ action_id: string; state: string }> {
   return request("POST", `/v1/portal/ops/status-actions/${id}/${decision}`);
 }
+
+export type DemoScenario = { name: string; description: string; pool_size: number };
+
+export function opsDemoScenarios(): Promise<{ telco_id: string; scenarios: DemoScenario[] }> {
+  return request("GET", "/v1/portal/ops/demo/scenarios");
+}
+
+export type DemoRun = {
+  run_id: string;
+  telco_id: string;
+  scenario: string;
+  msisdn_token: string;
+  advance_id: string;
+  correlation_id: string;
+  requested_by: string;
+  created_at: string;
+};
+
+export function opsDemoRun(req: {
+  telco_id?: string;
+  scenario: string;
+}): Promise<{ run_id: string; scenario: string; msisdn_token: string; advance_id: string }> {
+  return request("POST", "/v1/portal/ops/demo/run", req);
+}
+
+export function opsDemoRuns(): Promise<{ runs: DemoRun[] }> {
+  return request("GET", "/v1/portal/ops/demo/runs");
+}
+
+export type DemoChain = {
+  run: DemoRun;
+  advance: {
+    advance_id: string;
+    state: string;
+    face_value: MoneyView;
+    outstanding: MoneyView;
+    activated_at?: string;
+    closed_at?: string;
+  };
+  attempts: {
+    attempt_id: string;
+    attempt_no: number;
+    state: string;
+    telco_reference?: string;
+    enquiry_count: number;
+    submitted_at: string;
+    resolved_at?: string;
+    next_enquiry_at?: string;
+  }[];
+  notifications: { kind: string; state: string; created_at: string; sent_at?: string }[];
+  journals: { journal_id: string; event_type: string; correlation_id: string }[];
+};
+
+export function opsDemoRunDetail(id: string): Promise<DemoChain> {
+  return request("GET", `/v1/portal/ops/demo/runs/${id}`);
+}

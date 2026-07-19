@@ -47,6 +47,7 @@ type Portal struct {
 	Ops        *ops.Service        // M4d breaks-queue actions (tenant tx)
 	Settlement *settlement.Service // M4d settlement verification (tenant tx)
 	Recovery   *recovery.Service   // M4e parked-reversal retry (tenant tx, reuses guarded apply)
+	Demo       *ops.Demo           // M4e-3 fault demo (real origination path, sim-only allowlist)
 	ReadPool   *pgxpool.Pool       // M4c operator cross-tenant reads (worker/BYPASSRLS)
 	Log        *slog.Logger
 }
@@ -97,6 +98,14 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/ops/status-actions":              {roleAdmin, roleOps, roleRisk},
 	"POST /v1/portal/ops/status-actions/{id}/approve": {roleAdmin, roleOps, roleRisk},
 	"POST /v1/portal/ops/status-actions/{id}/reject":  {roleAdmin, roleOps, roleRisk},
+
+	// M4e-3 fault demo: runs for OPS (+ADMIN); the artifact chain is
+	// readable by all oversight roles. Config-allowlisted to the simulator
+	// tenant — structurally cannot touch a real telco.
+	"GET /v1/portal/ops/demo/scenarios": {roleAdmin, roleOps, roleRisk, roleFinance},
+	"POST /v1/portal/ops/demo/run":      {roleAdmin, roleOps},
+	"GET /v1/portal/ops/demo/runs":      {roleAdmin, roleOps, roleRisk, roleFinance},
+	"GET /v1/portal/ops/demo/runs/{id}": {roleAdmin, roleOps, roleRisk, roleFinance},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -150,6 +159,11 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActionRequest))
 	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions/{id}/approve", p.opsStatusActionDecide(true))
 	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions/{id}/reject", p.opsStatusActionDecide(false))
+
+	p.mountRBAC(mux, "GET /v1/portal/ops/demo/scenarios", http.HandlerFunc(p.opsDemoScenarios))
+	p.mountRBAC(mux, "POST /v1/portal/ops/demo/run", http.HandlerFunc(p.opsDemoRun))
+	p.mountRBAC(mux, "GET /v1/portal/ops/demo/runs", http.HandlerFunc(p.opsDemoRuns))
+	p.mountRBAC(mux, "GET /v1/portal/ops/demo/runs/{id}", http.HandlerFunc(p.opsDemoRunDetail))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a
