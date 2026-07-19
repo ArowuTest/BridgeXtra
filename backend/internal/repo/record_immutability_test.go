@@ -83,6 +83,19 @@ func TestSelfAudit_GrantScopes(t *testing.T) {
 		{"write_offs", "approved_by", true},
 		{"write_offs", "principal_minor", false},
 		{"write_offs", "requested_by", false},
+		// advances (0022): FSM lifecycle yes, amounts/identity no.
+		{"advances", "state", true},
+		{"advances", "outstanding_minor", true},
+		{"advances", "delinquency_bucket", true},
+		{"advances", "face_value_minor", false},
+		{"advances", "fee_minor", false},
+		{"advances", "disbursed_minor", false},
+		{"advances", "subscriber_account_id", false},
+		{"advances", "correlation_id", false},
+		// funding_pools (0022): reserved/utilised yes, committed capital no.
+		{"funding_pools", "reserved_minor", true},
+		{"funding_pools", "utilised_minor", true},
+		{"funding_pools", "committed_minor", false},
 	} {
 		var can bool
 		if err := db.Admin.QueryRow(ctx,
