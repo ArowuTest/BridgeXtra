@@ -18,7 +18,7 @@ export const NAV: NavItem[] = [
   { href: "/breaks", label: "Breaks", roles: ["ADMIN", "FINANCE"] },
   { href: "/settlements", label: "Settlements", roles: ["ADMIN", "FINANCE"] },
   { href: "/ops", label: "Ops", roles: ["ADMIN", "OPS", "FINANCE"] },
-  // M4e-2/3 + M4f mount here: subscriber status actions, fault demo, Support.
+  { href: "/support", label: "Support", roles: ["ADMIN", "SUPPORT", "OPS", "RISK", "FINANCE"] },
 ];
 
 export function navFor(role: Session["role"]): NavItem[] {

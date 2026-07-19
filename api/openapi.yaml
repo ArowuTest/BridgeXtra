@@ -951,6 +951,195 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/support/subscriber:
+    get:
+      operationId: portalSupportTimeline
+      summary: Masked subscriber timeline by full token (roles ADMIN, SUPPORT, OPS, RISK, FINANCE)
+      description: >
+        The case-handling view (V2-SUB-008) - live identity, advances history,
+        notifications, complaints, and status actions. The operator supplies
+        the FULL token (received from the channel system); every token in the
+        RESPONSE is masked to its last four characters (UI-004 - masked by
+        default, enforced server-side). Read-only; telco-level scope bound.
+        No step-up reveal exists because the platform is PII-lean by design:
+        it stores tokens, not MSISDNs, and detokenisation lives with the
+        telco.
+      parameters:
+        - { name: token, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subscriber, advances]
+                properties:
+                  subscriber:
+                    type: object
+                    properties:
+                      subscriber_account_id: { type: string }
+                      telco_id: { type: string }
+                      msisdn_token_masked: { type: string }
+                      status: { type: string }
+                      effective_from: { type: string }
+                  advances:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        advance_id: { type: string }
+                        programme_id: { type: string }
+                        state: { type: string }
+                        face_value: { $ref: "#/components/schemas/MoneyView" }
+                        outstanding: { $ref: "#/components/schemas/MoneyView" }
+                        accepted_at: { type: string }
+                        closed_at: { type: string }
+                  notifications:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        kind: { type: string }
+                        state: { type: string }
+                        created_at: { type: string }
+                        sent_at: { type: string }
+                  complaints:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        complaint_id: { type: string }
+                        advance_id: { type: string }
+                        channel: { type: string }
+                        category: { type: string }
+                        narrative: { type: string }
+                        state: { type: string }
+                        resolution: { type: string }
+                        opened_at: { type: string }
+                  status_actions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        action_id: { type: string }
+                        from_status: { type: string }
+                        to_status: { type: string }
+                        reason: { type: string }
+                        state: { type: string }
+                        requested_at: { type: string }
+        "404":
+          description: No live subscriber for that token in scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/support/complaints:
+    get:
+      operationId: portalSupportComplaints
+      summary: Complaints queue, newest first (roles ADMIN, SUPPORT, OPS, RISK, FINANCE)
+      responses:
+        "200":
+          description: Complaint list (subscriber tokens masked)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [complaints]
+                properties:
+                  complaints:
+                    type: array
+                    items:
+                      type: object
+                      required: [complaint_id, telco_id, channel, category, state]
+                      properties:
+                        complaint_id: { type: string }
+                        telco_id: { type: string }
+                        msisdn_token_masked: { type: string }
+                        advance_id: { type: string }
+                        channel: { type: string }
+                        category: { type: string, enum: [DISPUTED_ADVANCE, DISPUTED_RECOVERY, DISCLOSURE, SERVICE, OTHER] }
+                        narrative: { type: string }
+                        state: { type: string, enum: [OPEN, IN_REVIEW, RESOLVED, REJECTED] }
+                        resolution: { type: string }
+                        opened_at: { type: string }
+    post:
+      operationId: portalSupportComplaintOpen
+      summary: Register a complaint (roles ADMIN, SUPPORT, OPS)
+      description: >
+        The M3f complaint register through the portal - case management, not
+        financial truth. The subscriber reference is the tokenised MSISDN.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel, category, narrative]
+              properties:
+                telco_id: { type: string, description: Required only for all-scope (*) sessions }
+                msisdn_token: { type: string }
+                advance_id: { type: string }
+                channel: { type: string }
+                category: { type: string, enum: [DISPUTED_ADVANCE, DISPUTED_RECOVERY, DISCLOSURE, SERVICE, OTHER] }
+                narrative: { type: string }
+      responses:
+        "200":
+          description: Complaint opened
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [complaint_id, state]
+                properties:
+                  complaint_id: { type: string }
+                  state: { type: string, enum: [OPEN] }
+        "404":
+          description: Referenced subscriber token unknown
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /v1/portal/support/complaints/{id}/progress:
+    post:
+      operationId: portalSupportComplaintProgress
+      summary: Progress a complaint (OPEN -> IN_REVIEW -> RESOLVED/REJECTED; roles ADMIN, SUPPORT, OPS)
+      description: >
+        Resolution is mandatory to close (schema-enforced). Closed complaints
+        are worked-to-a-reason evidence and are never resurrected - continue a
+        case by opening a new complaint. The from-state compare-and-set
+        refuses stale transitions with 409.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to]
+              properties:
+                to: { type: string, enum: [IN_REVIEW, RESOLVED, REJECTED] }
+                resolution: { type: string }
+      responses:
+        "200":
+          description: Transition applied
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [complaint_id, state]
+                properties:
+                  complaint_id: { type: string }
+                  state: { type: string }
+        "404":
+          description: Complaint not found or out of scope (no oracle)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "409":
+          description: Complaint closed, or state changed concurrently
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /healthz:
     get:
       operationId: getHealth

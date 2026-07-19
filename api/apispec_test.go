@@ -74,6 +74,10 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/ops/demo/run":       true,
 		"/v1/portal/ops/demo/runs":      true,
 		"/v1/portal/ops/demo/runs/{id}": true,
+		// M4f support workspace (masked timeline + complaints)
+		"/v1/portal/support/subscriber":               true,
+		"/v1/portal/support/complaints":               true,
+		"/v1/portal/support/complaints/{id}/progress": true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

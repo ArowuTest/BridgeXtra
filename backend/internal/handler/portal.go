@@ -106,6 +106,14 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/ops/demo/run":      {roleAdmin, roleOps},
 	"GET /v1/portal/ops/demo/runs":      {roleAdmin, roleOps, roleRisk, roleFinance},
 	"GET /v1/portal/ops/demo/runs/{id}": {roleAdmin, roleOps, roleRisk, roleFinance},
+
+	// M4f support workspace (V3-ORG-005): SUPPORT's ENTIRE write surface is
+	// the complaint workflow — case management, never financial truth. The
+	// masked timeline is read-only evidence; reads go to all console roles.
+	"GET /v1/portal/support/subscriber":                {roleAdmin, roleSupport, roleOps, roleRisk, roleFinance},
+	"GET /v1/portal/support/complaints":                {roleAdmin, roleSupport, roleOps, roleRisk, roleFinance},
+	"POST /v1/portal/support/complaints":               {roleAdmin, roleSupport, roleOps},
+	"POST /v1/portal/support/complaints/{id}/progress": {roleAdmin, roleSupport, roleOps},
 }
 
 // RBACRoutes returns a copy of the route->roles authorization map. It exists
@@ -164,6 +172,11 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/ops/demo/run", http.HandlerFunc(p.opsDemoRun))
 	p.mountRBAC(mux, "GET /v1/portal/ops/demo/runs", http.HandlerFunc(p.opsDemoRuns))
 	p.mountRBAC(mux, "GET /v1/portal/ops/demo/runs/{id}", http.HandlerFunc(p.opsDemoRunDetail))
+
+	p.mountRBAC(mux, "GET /v1/portal/support/subscriber", http.HandlerFunc(p.supportTimeline))
+	p.mountRBAC(mux, "GET /v1/portal/support/complaints", http.HandlerFunc(p.supportComplaints))
+	p.mountRBAC(mux, "POST /v1/portal/support/complaints", http.HandlerFunc(p.supportComplaintOpen))
+	p.mountRBAC(mux, "POST /v1/portal/support/complaints/{id}/progress", http.HandlerFunc(p.supportComplaintProgress))
 }
 
 // mountRBAC registers a route through the RBAC middleware and REQUIRES a

@@ -360,3 +360,87 @@ export type DemoChain = {
 export function opsDemoRunDetail(id: string): Promise<DemoChain> {
   return request("GET", `/v1/portal/ops/demo/runs/${id}`);
 }
+
+// --- M4f support workspace ---
+
+export type TimelineAdvance = {
+  advance_id: string;
+  programme_id: string;
+  state: string;
+  face_value: MoneyView;
+  outstanding: MoneyView;
+  accepted_at: string;
+  closed_at?: string;
+};
+
+export type TimelineComplaint = {
+  complaint_id: string;
+  advance_id?: string;
+  channel: string;
+  category: string;
+  narrative: string;
+  state: string;
+  resolution?: string;
+  opened_at: string;
+};
+
+export type SubscriberTimeline = {
+  subscriber: {
+    subscriber_account_id: string;
+    telco_id: string;
+    msisdn_token_masked: string;
+    status: string;
+    effective_from: string;
+  };
+  advances: TimelineAdvance[];
+  notifications: { kind: string; state: string; created_at: string; sent_at?: string }[];
+  complaints: TimelineComplaint[];
+  status_actions: {
+    action_id: string;
+    from_status: string;
+    to_status: string;
+    reason: string;
+    state: string;
+    requested_at: string;
+  }[];
+};
+
+export function supportTimeline(token: string): Promise<SubscriberTimeline> {
+  return request("GET", `/v1/portal/support/subscriber?token=${encodeURIComponent(token)}`);
+}
+
+export type ComplaintItem = {
+  complaint_id: string;
+  telco_id: string;
+  msisdn_token_masked?: string;
+  advance_id?: string;
+  channel: string;
+  category: string;
+  narrative: string;
+  state: "OPEN" | "IN_REVIEW" | "RESOLVED" | "REJECTED";
+  resolution?: string;
+  opened_at: string;
+};
+
+export function supportComplaints(): Promise<{ complaints: ComplaintItem[] }> {
+  return request("GET", "/v1/portal/support/complaints");
+}
+
+export function supportComplaintOpen(req: {
+  telco_id?: string;
+  msisdn_token?: string;
+  advance_id?: string;
+  channel: string;
+  category: string;
+  narrative: string;
+}): Promise<{ complaint_id: string; state: string }> {
+  return request("POST", "/v1/portal/support/complaints", req);
+}
+
+export function supportComplaintProgress(
+  id: string,
+  to: "IN_REVIEW" | "RESOLVED" | "REJECTED",
+  resolution?: string,
+): Promise<{ complaint_id: string; state: string }> {
+  return request("POST", `/v1/portal/support/complaints/${id}/progress`, { to, resolution });
+}
