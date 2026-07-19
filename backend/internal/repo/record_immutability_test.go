@@ -96,6 +96,24 @@ func TestSelfAudit_GrantScopes(t *testing.T) {
 		{"funding_pools", "reserved_minor", true},
 		{"funding_pools", "utilised_minor", true},
 		{"funding_pools", "committed_minor", false},
+		// offers (0023): FSM state yes, pinned money algebra / terms no.
+		{"offers", "state", true},
+		{"offers", "face_value_minor", false},
+		{"offers", "fee_minor", false},
+		{"offers", "decision_snapshot_id", false},
+		{"offers", "product_config_version_id", false},
+		// fulfilment_attempts (0023): lifecycle/enquiry yes, request evidence no.
+		{"fulfilment_attempts", "state", true},
+		{"fulfilment_attempts", "response_evidence", true},
+		{"fulfilment_attempts", "enquiry_count", true},
+		{"fulfilment_attempts", "request_evidence", false},
+		{"fulfilment_attempts", "telco_idempotency_key", false},
+		{"fulfilment_attempts", "attempt_no", false},
+		// recovery_events (0023): FSM state yes, recorded money-in event no.
+		{"recovery_events", "state", true},
+		{"recovery_events", "amount_minor", false},
+		{"recovery_events", "source_event_id", false},
+		{"recovery_events", "occurred_at", false},
 	} {
 		var can bool
 		if err := db.Admin.QueryRow(ctx,
