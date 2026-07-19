@@ -114,6 +114,39 @@ func TestSelfAudit_GrantScopes(t *testing.T) {
 		{"recovery_events", "amount_minor", false},
 		{"recovery_events", "source_event_id", false},
 		{"recovery_events", "occurred_at", false},
+		// feature_files (0024): ingest finalise yes, file identity/evidence no.
+		{"feature_files", "status", true},
+		{"feature_files", "quarantined_rows", true},
+		{"feature_files", "content_hash", false},
+		{"feature_files", "source", false},
+		// scoring_runs (0024): progress/finalise yes, pinned inputs no.
+		{"scoring_runs", "status", true},
+		{"scoring_runs", "subjects_scored", true},
+		{"scoring_runs", "policy_version_id", false},
+		{"scoring_runs", "subjects_total", false},
+		// subscriber_flags (0024): close yes, the assertion itself no.
+		{"subscriber_flags", "effective_to", true},
+		{"subscriber_flags", "flag", false},
+		{"subscriber_flags", "effective_from", false},
+		// notifications (0024): delivery state yes, what/whom sent no.
+		{"notifications", "state", true},
+		{"notifications", "provider_ref", true},
+		{"notifications", "rendered_hash", false},
+		{"notifications", "template_version", false},
+		// pending_reversals (0024): park/apply yes, money-event identity no.
+		{"pending_reversals", "state", true},
+		{"pending_reversals", "park_reason", true},
+		{"pending_reversals", "amount_minor", false},
+		{"pending_reversals", "original_source_event_id", false},
+		// complaints (0024): resolve yes, raised content no.
+		{"complaints", "state", true},
+		{"complaints", "resolution", true},
+		{"complaints", "narrative", false},
+		{"complaints", "category", false},
+		// programmes (0024): activation status yes, identity/code no.
+		{"programmes", "status", true},
+		{"programmes", "code", false},
+		{"programmes", "name", false},
 	} {
 		var can bool
 		if err := db.Admin.QueryRow(ctx,
