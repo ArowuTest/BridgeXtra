@@ -458,6 +458,12 @@ func TestM4D_BreaksQueue_TelcoScopeAndWorkflow(t *testing.T) {
 		"portal-key-fin-prog-1", "FINANCE", "programme:prg_sim_airtime01"); err != nil {
 		t.Fatal(err)
 	}
+	// A second telco-scoped finance operator — the CHECKER for two-actor break
+	// resolution (R-P0-6 Slice E1).
+	if err := admins.CreateWithRole(context.Background(), "adm_finT2", "fin_telco_2",
+		"portal-key-fin-telco-2", "FINANCE", "telco:SIM_NG"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Programme-scoped operator: NO telco-level authority -> empty, and a
 	// 404 on any action (no cross-grain leak).
@@ -478,7 +484,7 @@ func TestM4D_BreaksQueue_TelcoScopeAndWorkflow(t *testing.T) {
 		t.Fatalf("programme-scoped operator must see NO telco-level breaks, got %+v", pl.Breaks)
 	}
 	if code := f.call(t, &ps, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
-		`{"action":"RESOLVE","reason":"x"}`); code != http.StatusNotFound {
+		`{"action":"PROPOSE_RESOLVE","reason":"x"}`); code != http.StatusNotFound {
 		t.Fatalf("programme-scoped action on a telco break must be 404, got %d", code)
 	}
 
@@ -502,9 +508,20 @@ func TestM4D_BreaksQueue_TelcoScopeAndWorkflow(t *testing.T) {
 		`{"action":"ASSIGN","reason":"investigating"}`); code != http.StatusOK {
 		t.Fatalf("assign: %d", code)
 	}
+	// Two-actor resolution (R-P0-6 Slice E1): maker proposes, a DISTINCT checker
+	// approves. The maker cannot approve their own proposal.
 	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
-		`{"action":"RESOLVE","reason":"telco confirmed off-platform settlement"}`); code != http.StatusOK {
-		t.Fatalf("resolve: %d", code)
+		`{"action":"PROPOSE_RESOLVE","reason":"telco confirmed off-platform settlement"}`); code != http.StatusOK {
+		t.Fatalf("propose_resolve: %d", code)
+	}
+	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
+		`{"action":"APPROVE_RESOLVE","reason":"self approve"}`); code != http.StatusConflict {
+		t.Fatalf("maker approving their own resolution must be 409, got %d", code)
+	}
+	cs := f.login(t, "portal-key-fin-telco-2")
+	if code := f.call(t, &cs, "POST", "/v1/portal/finance/breaks/rec_break_1/action",
+		`{"action":"APPROVE_RESOLVE","reason":"verified against telco statement"}`); code != http.StatusOK {
+		t.Fatalf("approve_resolve by distinct checker: %d", code)
 	}
 	// Resolved -> gone from the open queue.
 	_, body = f.callBody(t, &ts, "GET", "/v1/portal/finance/breaks", "")
@@ -517,7 +534,7 @@ func TestM4D_BreaksQueue_TelcoScopeAndWorkflow(t *testing.T) {
 	// A reason is mandatory on actions.
 	seedBreak(t, f, "rec_break_2", "SIM_NG")
 	if code := f.call(t, &ts, "POST", "/v1/portal/finance/breaks/rec_break_2/action",
-		`{"action":"RESOLVE","reason":""}`); code != http.StatusBadRequest {
+		`{"action":"PROPOSE_RESOLVE","reason":""}`); code != http.StatusBadRequest {
 		t.Fatalf("action without a reason must be 400, got %d", code)
 	}
 }

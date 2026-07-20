@@ -250,8 +250,11 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 	if v.AutoResolve == nil {
 		return fmt.Errorf("auto_resolve is required")
 	}
-	if *v.AutoResolve && *v.AmountToleranceMinor == 0 {
-		return fmt.Errorf("auto_resolve with zero tolerance is a no-op that reads as a control — set a tolerance or disable auto_resolve")
+	// R-P0-6 Slice E1: the governed floor — a money break is NEVER auto-resolved
+	// (V1-FIN-005). auto_resolve must be false; a break clears only via the
+	// two-actor maker-checker resolution path. true is refused, not discouraged.
+	if *v.AutoResolve {
+		return fmt.Errorf("auto_resolve must be false — a money break is never auto-resolved (V1-FIN-005); resolution is a two-actor decision")
 	}
 	if v.BreakAgingAlertHours == nil || *v.BreakAgingAlertHours < 1 {
 		return fmt.Errorf("break_aging_alert_hours must be >= 1")

@@ -9,12 +9,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
@@ -49,7 +51,7 @@ func seedBreak(t *testing.T, db *testutil.DB, id string, ageHours int) {
 	}
 }
 
-func TestM3F_BreakWorkflow_AssignResolveWithReasons(t *testing.T) {
+func TestM3F_BreakWorkflow_TwoActorResolution(t *testing.T) {
 	svc, db := setup(t, "ops_breaks")
 	seedBreak(t, db, "rci_b1", 1)
 	ctx := context.Background()
@@ -60,26 +62,45 @@ func TestM3F_BreakWorkflow_AssignResolveWithReasons(t *testing.T) {
 	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "NOTE", "carol", "telco confirms outage window 02:00-02:15"); err != nil {
 		t.Fatal(err)
 	}
-	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "RESOLVE", "carol", "telco replayed missing CDR; amounts reconcile"); err != nil {
+	// R-P0-6 Slice E1: single-actor RESOLVE is retired.
+	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "RESOLVE", "carol", "one-shot"); err == nil {
+		t.Fatal("single-actor RESOLVE must be refused (two-person decision)")
+	}
+	// Maker proposes.
+	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "PROPOSE_RESOLVE", "carol", "telco replayed missing CDR; amounts reconcile"); err != nil {
 		t.Fatal(err)
 	}
-	// Resolving again: no longer an open break.
-	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "RESOLVE", "carol", "again"); err == nil {
-		t.Fatal("resolving a resolved break must refuse")
+	// The maker cannot approve their own proposal (four-eyes).
+	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "APPROVE_RESOLVE", "carol", "self approve"); !errors.Is(err, repo.ErrSelfApproveResolution) {
+		t.Fatalf("self-approval must be refused by four-eyes, got %v", err)
+	}
+	// A distinct checker approves — the break clears.
+	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "APPROVE_RESOLVE", "dave", "verified against telco statement"); err != nil {
+		t.Fatal(err)
+	}
+	// Proposing again: no longer an open break.
+	if err := svc.BreakAction(ctx, "SIM_NG", "rci_b1", "PROPOSE_RESOLVE", "carol", "again"); err == nil {
+		t.Fatal("proposing a resolution for a resolved break must refuse")
 	}
 
-	var resolution string
-	var actions int
-	if err := db.Admin.QueryRow(ctx,
-		`SELECT resolution FROM recon_items WHERE recon_item_id='rci_b1'`).Scan(&resolution); err != nil {
+	var resolution, proposedBy, resolvedBy string
+	if err := db.Admin.QueryRow(ctx, `
+		SELECT resolution, resolution_proposed_by, resolved_by
+		FROM recon_items WHERE recon_item_id='rci_b1'`).Scan(&resolution, &proposedBy, &resolvedBy); err != nil {
 		t.Fatal(err)
 	}
+	if resolution == "" || proposedBy != "carol" || resolvedBy != "dave" {
+		t.Fatalf("break must close with a two-actor trail: resolution=%q proposed_by=%q resolved_by=%q", resolution, proposedBy, resolvedBy)
+	}
+	var actions int
 	if err := db.Admin.QueryRow(ctx,
 		`SELECT count(*) FROM recon_break_actions WHERE recon_item_id='rci_b1'`).Scan(&actions); err != nil {
 		t.Fatal(err)
 	}
-	if resolution == "" || actions != 3 {
-		t.Fatalf("break must close with reason and full action trail: resolution=%q actions=%d", resolution, actions)
+	// ASSIGN + NOTE + PROPOSE_RESOLVE + APPROVE_RESOLVE(dave); the refused actions
+	// rolled back and logged nothing.
+	if actions != 4 {
+		t.Fatalf("only successful actions are logged, got %d", actions)
 	}
 }
 

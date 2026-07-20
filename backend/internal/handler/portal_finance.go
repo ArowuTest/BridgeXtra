@@ -133,7 +133,13 @@ func (p *Portal) financeBreaks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"breaks": out})
 }
 
-var breakActions = map[string]bool{"ASSIGN": true, "RESOLVE": true, "ESCALATE": true, "NOTE": true}
+// Break resolution is a two-actor decision (R-P0-6 Slice E1): PROPOSE_RESOLVE
+// (maker) then APPROVE_RESOLVE (distinct checker). Single-actor RESOLVE is
+// retired — a money break is never cleared by one actor (auto_resolve=false).
+var breakActions = map[string]bool{
+	"ASSIGN": true, "ESCALATE": true, "NOTE": true,
+	"PROPOSE_RESOLVE": true, "APPROVE_RESOLVE": true,
+}
 
 // financeBreakAction applies ASSIGN/RESOLVE/ESCALATE/NOTE to a break. The
 // break is loaded within scope first (no-oracle 404); the action runs as the
@@ -159,7 +165,7 @@ func (p *Portal) financeBreakAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !breakActions[req.Action] {
-		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "action must be ASSIGN|RESOLVE|ESCALATE|NOTE")
+		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "action must be ASSIGN|ESCALATE|NOTE|PROPOSE_RESOLVE|APPROVE_RESOLVE")
 		return
 	}
 	if req.Reason == "" {
@@ -169,6 +175,14 @@ func (p *Portal) financeBreakAction(w http.ResponseWriter, r *http.Request) {
 	if err := p.Ops.BreakAction(r.Context(), brk.TelcoID, brk.ReconItemID, req.Action, sess.Actor, req.Reason); err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "BREAK_NOT_FOUND", "reconciliation break not found or already resolved")
+			return
+		}
+		if errors.Is(err, repo.ErrSelfApproveResolution) {
+			writeErr(w, http.StatusConflict, "BREAK_FOUR_EYES", "the approver of a break resolution must differ from the proposer")
+			return
+		}
+		if errors.Is(err, repo.ErrNoProposedResolution) {
+			writeErr(w, http.StatusConflict, "BREAK_NO_PROPOSAL", "no proposed resolution to approve — PROPOSE_RESOLVE first")
 			return
 		}
 		p.Log.Error("portal break action", "err", err)

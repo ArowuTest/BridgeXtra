@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ---------------------------------------------------------------------------
@@ -18,9 +19,20 @@ import (
 
 type Breaks struct{}
 
+// ErrSelfApproveResolution: the schema two-actor CHECK fired — the break
+// resolution approver equals its proposer (R-P0-6 Slice E1).
+var ErrSelfApproveResolution = errors.New("repo: break resolution approver must differ from proposer (two-person decision)")
+
+// ErrNoProposedResolution: APPROVE_RESOLVE targeted a break with no proposed
+// resolution to approve.
+var ErrNoProposedResolution = errors.New("repo: break has no proposed resolution to approve")
+
 // Action appends one break action (append-only by grants) and applies its
-// lifecycle effect. Resolution REQUIRES a reason and stamps the item;
-// assignment stamps the assignee; NOTE/ESCALATE only log.
+// lifecycle effect. Resolution is a two-actor decision (R-P0-6 Slice E1): a
+// maker PROPOSE_RESOLVEs, a distinct checker APPROVE_RESOLVEs, and only then is
+// the break cleared — the auto_resolve=false floor made structural (a break is
+// never cleared by a single actor). ASSIGN stamps the assignee; NOTE/ESCALATE
+// only log.
 func (Breaks) Action(ctx context.Context, tx pgx.Tx, telcoID, reconItemID, action, actor, reason string) error {
 	if actor == "" || reason == "" {
 		return fmt.Errorf("actor and reason are required for break actions")
@@ -37,17 +49,44 @@ func (Breaks) Action(ctx context.Context, tx pgx.Tx, telcoID, reconItemID, actio
 		if ct.RowsAffected() == 0 {
 			return fmt.Errorf("recon item %q is not an open break: %w", reconItemID, ErrNotFound)
 		}
-	case "RESOLVE":
+	case "PROPOSE_RESOLVE":
+		// Maker step: propose a resolution for an open break not already proposed.
 		ct, err := tx.Exec(ctx, `
-			UPDATE recon_items SET resolved_at = now(), resolution = $2
-			WHERE recon_item_id = $1 AND status LIKE 'BREAK_%' AND resolved_at IS NULL`,
-			reconItemID, reason)
+			UPDATE recon_items
+			SET resolution_proposed_by = $2, resolution_proposed_reason = $3, resolution_proposed_at = now()
+			WHERE recon_item_id = $1 AND status LIKE 'BREAK_%'
+			  AND resolved_at IS NULL AND resolution_proposed_by IS NULL`,
+			reconItemID, actor, reason)
 		if err != nil {
 			return err
 		}
 		if ct.RowsAffected() == 0 {
-			return fmt.Errorf("recon item %q is not an open break: %w", reconItemID, ErrNotFound)
+			return fmt.Errorf("recon item %q is not an open break awaiting a resolution proposal: %w", reconItemID, ErrNotFound)
 		}
+	case "APPROVE_RESOLVE":
+		// Checker step: a DISTINCT actor approves the proposed resolution, clearing
+		// the break. The two-actor CHECK (0041) arbitrates four-eyes: a same-actor
+		// approval raises SQLSTATE 23514 -> ErrSelfApproveResolution.
+		ct, err := tx.Exec(ctx, `
+			UPDATE recon_items SET resolved_at = now(), resolved_by = $2, resolution = $3
+			WHERE recon_item_id = $1 AND status LIKE 'BREAK_%'
+			  AND resolved_at IS NULL AND resolution_proposed_by IS NOT NULL`,
+			reconItemID, actor, reason)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+				return ErrSelfApproveResolution
+			}
+			return err
+		}
+		if ct.RowsAffected() == 0 {
+			return fmt.Errorf("%w: %q", ErrNoProposedResolution, reconItemID)
+		}
+	case "RESOLVE":
+		// Single-actor resolution is retired by Slice E1 — the two-actor CHECK
+		// would reject it structurally anyway. Callers must PROPOSE_RESOLVE then
+		// APPROVE_RESOLVE (auto_resolve=false floor).
+		return fmt.Errorf("single-actor RESOLVE is not permitted — use PROPOSE_RESOLVE then APPROVE_RESOLVE (two-person decision)")
 	case "ESCALATE", "NOTE":
 		// log-only actions; the item row is untouched
 	default:
