@@ -90,12 +90,20 @@ jobs:
       # V2-TST-016: merge is blocked when this job fails. Includes the SF-3
       # tenant-isolation negative pack (fresh databases per test package) and
       # the G0-F2 reviewer reproducer.
+      #
+      # -p 2 bounds package-level parallelism: the DB-heavy packages share ONE
+      # Postgres, and the default (GOMAXPROCS) run starved it enough that a
+      # package could hit the 10-min timeout under load (a non-deterministic
+      # FAIL that looked like a coverage dip because a timed-out package's
+      # coverage was lost). -race reports fire regardless of -p, so bounding
+      # parallelism removes the starvation without masking any real race. The
+      # reviewer confirmed 22/22 packages green, exit 0, under -p 2.
       - name: Race-enabled test suite with coverage
         env:
           CI: "true"
           TCP_TEST_HOSTPORT: localhost:5434
         run: >
-          go test -race -count=1
+          go test -race -count=1 -p 2
           -coverprofile=coverage.out
           -coverpkg=./backend/internal/...
           ./backend/... ./simulator/...
