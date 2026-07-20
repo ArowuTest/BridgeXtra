@@ -84,11 +84,16 @@ func (f *fixture) activeAdvance(t *testing.T) entity.Advance {
 	return res.Advance
 }
 
+// A stable event timestamp: a real telco event carries its own occurred-at,
+// and a REPLAY of that event carries the SAME one (R-P0-2 hashes it, so a
+// wall-clock time.Now() here would make every "replay" look divergent).
+var fixedOccurredAt = time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
 func (f *fixture) ingest(t *testing.T, sourceID string, minor int64) recovery.IngestResult {
 	t.Helper()
 	out, err := f.rec.Ingest(tenantCtx(), recovery.IngestCmd{
 		SourceEventID: sourceID, MSISDNToken: "tok_sim_0001",
-		Amount: entity.MustMoney(minor, entity.NGN), OccurredAt: time.Now().UTC(),
+		Amount: entity.MustMoney(minor, entity.NGN), OccurredAt: fixedOccurredAt,
 		CorrelationID: "cor-" + sourceID,
 	})
 	if err != nil {

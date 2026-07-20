@@ -3,6 +3,7 @@ package repo
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 
@@ -49,6 +50,24 @@ func (Idempotency) Get(ctx context.Context, tx pgx.Tx, telcoID, operation, key s
 		return r, ErrNotFound
 	}
 	return r, err
+}
+
+// SetResponse persists the exact outcome of a first-time command onto its
+// idempotency record, in the SAME tx that committed the business effect
+// (R-P0-2). A later valid replay returns this byte-for-byte, so the original
+// outcome is reproduced rather than re-derived. Never touches request_hash.
+func (Idempotency) SetResponse(ctx context.Context, tx pgx.Tx, telcoID, operation, key string, status int, body []byte) error {
+	ct, err := tx.Exec(ctx, `
+		UPDATE idempotency_records SET response_status=$4, response_body=$5
+		WHERE telco_id=$1 AND operation=$2 AND idem_key=$3`,
+		telcoID, operation, key, status, body)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("idempotency record %s/%s/%s: %w", telcoID, operation, key, ErrNotFound)
+	}
+	return nil
 }
 
 // MarkTerminal flags the record as eligible for TTL sweep (SF-5): only flows

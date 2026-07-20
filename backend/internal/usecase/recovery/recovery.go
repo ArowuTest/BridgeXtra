@@ -7,6 +7,8 @@ package recovery
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +41,7 @@ type Service struct {
 	outbox      repo.Outbox
 	reversals   repo.PendingReversals
 	audit       repo.Audit
+	idem        repo.Idempotency
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, log *slog.Logger) *Service {
@@ -81,13 +84,154 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 		return IngestResult{}, fmt.Errorf("recovery amount must be positive")
 	}
 
+	telcoID, err := platform.TenantFrom(ctx)
+	if err != nil {
+		return IngestResult{}, err
+	}
+	// R-P0-2: the canonical fingerprint of the incoming event. Dedup on the
+	// source_event_id ALONE accepts a divergent payload (changed amount) as a
+	// silent replay; this hash forces equivalence.
+	sourceHash := recoverySourceHash(telcoID, cmd)
+
 	var out IngestResult
-	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
-		telcoID, err := platform.TenantFrom(ctx)
+	var divergent bool
+	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		// Claim (telco, "recovery.ingest", source_event_id) atomically with
+		// the hash, in the SAME tx that books the money. A duplicate only
+		// replays when its hash MATCHES; a divergent body is refused, never
+		// silently accepted (mirrors R-P0-1).
+		rec, stored, err := s.idem.PutIfAbsent(ctx, tx, entity.IdempotencyRecord{
+			TelcoID: telcoID, Operation: "recovery.ingest", IdemKey: cmd.SourceEventID,
+			RequestHash: sourceHash, ResponseStatus: 0, ResponseBody: []byte(`{}`),
+		})
 		if err != nil {
 			return err
 		}
+		if !stored {
+			if rec.RequestHash != sourceHash {
+				divergent = true
+				return ErrDivergentRecovery
+			}
+			// EDG-018 replay: return the EXACT original outcome (Applied,
+			// Excess, AdvanceClosed) recorded on the first ingest.
+			res, err := decodeIngestResult(rec.ResponseBody)
+			if err != nil {
+				return err
+			}
+			res.Replayed = true
+			out = res
+			return nil
+		}
+		res, err := s.classifyAndApply(ctx, tx, telcoID, cmd)
+		if err != nil {
+			return err
+		}
+		body, err := encodeIngestResult(res)
+		if err != nil {
+			return err
+		}
+		if err := s.idem.SetResponse(ctx, tx, telcoID, "recovery.ingest", cmd.SourceEventID, 200, body); err != nil {
+			return err
+		}
+		out = res
+		return nil
+	})
+	if divergent {
+		s.recordDivergentRecovery(ctx, telcoID, cmd, sourceHash)
+		return IngestResult{}, ErrDivergentRecovery
+	}
+	return out, err
+}
 
+// ErrDivergentRecovery (R-P0-2): a telco reused a source_event_id with a
+// DIFFERENT payload (amount/currency/token/occurred_at). Never applied as a
+// silent replay — refused loudly with a security audit for reconciliation.
+var ErrDivergentRecovery = errors.New("recovery: source event id reused with a divergent payload")
+
+// recoverySourceHash is the canonical equivalence fingerprint of a recovery
+// event over its material fields. Deterministic (fixed struct field order).
+func recoverySourceHash(telcoID string, cmd IngestCmd) string {
+	b, _ := json.Marshal(struct {
+		Telco      string `json:"telco_id"`
+		Source     string `json:"source_event_id"`
+		Amount     int64  `json:"amount_minor"`
+		Currency   string `json:"currency"`
+		Token      string `json:"msisdn_token"`
+		OccurredAt string `json:"occurred_at"`
+	}{telcoID, cmd.SourceEventID, cmd.Amount.Amount(), string(cmd.Amount.Currency()),
+		cmd.MSISDNToken, cmd.OccurredAt.UTC().Format(time.RFC3339Nano)})
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+type ingestResultDTO struct {
+	RecoveryEventID string `json:"recovery_event_id"`
+	State           string `json:"state"`
+	AppliedMinor    int64  `json:"applied_minor"`
+	AppliedCur      string `json:"applied_currency"`
+	ExcessMinor     int64  `json:"excess_minor"`
+	ExcessCur       string `json:"excess_currency"`
+	AdvanceClosed   bool   `json:"advance_closed"`
+}
+
+func encodeIngestResult(r IngestResult) ([]byte, error) {
+	d := ingestResultDTO{
+		RecoveryEventID: r.RecoveryEventID, State: string(r.State), AdvanceClosed: r.AdvanceClosed,
+	}
+	if r.Applied.IsSet() {
+		d.AppliedMinor, d.AppliedCur = r.Applied.Amount(), string(r.Applied.Currency())
+	}
+	if r.Excess.IsSet() {
+		d.ExcessMinor, d.ExcessCur = r.Excess.Amount(), string(r.Excess.Currency())
+	}
+	return json.Marshal(d)
+}
+
+func decodeIngestResult(b []byte) (IngestResult, error) {
+	var d ingestResultDTO
+	if err := json.Unmarshal(b, &d); err != nil {
+		return IngestResult{}, err
+	}
+	r := IngestResult{
+		RecoveryEventID: d.RecoveryEventID,
+		State:           entity.RecoveryEventState(d.State),
+		AdvanceClosed:   d.AdvanceClosed,
+	}
+	if d.AppliedCur != "" {
+		r.Applied = entity.MustMoney(d.AppliedMinor, entity.Currency(d.AppliedCur))
+	}
+	if d.ExcessCur != "" {
+		r.Excess = entity.MustMoney(d.ExcessMinor, entity.Currency(d.ExcessCur))
+	}
+	return r, nil
+}
+
+// recordDivergentRecovery writes the DIVERGENT_DUPLICATE security-audit
+// out-of-band (the ingest tx rolled back). No PII — the token is not logged.
+func (s *Service) recordDivergentRecovery(ctx context.Context, telcoID string, cmd IngestCmd, sourceHash string) {
+	tctx := platform.WithTenant(ctx, telcoID)
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		return s.audit.Insert(ctx, tx, entity.AuditEvent{
+			ID: platform.NewID("aud"), TelcoID: telcoID, Actor: "channel:telco",
+			Action: "recovery.ingest.divergent_duplicate", TargetType: "source_event_id", TargetID: cmd.SourceEventID,
+			Reason: fmt.Sprintf("recovery source event reused with a divergent payload (amount=%d %s hash=%s)",
+				cmd.Amount.Amount(), cmd.Amount.Currency(), sourceHash),
+		})
+	})
+	if err != nil {
+		s.Log.Error("failed to record recovery DIVERGENT_DUPLICATE audit", "source_event_id", cmd.SourceEventID, "err", err)
+	}
+	s.Log.Warn("DIVERGENT_DUPLICATE: recovery source event reused with a different payload",
+		"source_event_id", cmd.SourceEventID, "amount", cmd.Amount.String())
+}
+
+// classifyAndApply performs the actual ingest — subscriber match, event
+// insert, and the matched / unmatched / quarantine / write-off-income paths —
+// returning the outcome. Called once per unique source event; the idempotency
+// gate above guarantees exactly-once execution and exact-replay of the result.
+func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID string, cmd IngestCmd) (IngestResult, error) {
+	var out IngestResult
+	err := func() error {
 		// Subscriber match BEFORE insert so the event row carries the link.
 		var subscriberID string
 		sub, err := s.subscribers.GetLiveByToken(ctx, tx, cmd.MSISDNToken)
@@ -114,7 +258,9 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 			return err
 		}
 		if !created {
-			// EDG-018: telco replay — return the original outcome, touch nothing.
+			// Defensive backstop: the idempotency gate above should have
+			// caught a duplicate. A conflict here means the two disagree —
+			// return the stored event state rather than double-book.
 			existing, err := s.events.GetBySource(ctx, tx, cmd.SourceEventID)
 			if err != nil {
 				return err
@@ -247,7 +393,7 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 		// EDG-019: a reversal that arrived BEFORE this original was parked —
 		// apply it now, in the same transaction, so the pair nets exactly.
 		return s.applyParkedIfAny(ctx, tx, &out, cmd)
-	})
+	}()
 	return out, err
 }
 

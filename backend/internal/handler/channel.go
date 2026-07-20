@@ -264,6 +264,9 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		// R-P0-1: same idempotency key, different request. Not a replay —
 		// the client must use a fresh key for a new command.
 		writeErr(w, http.StatusConflict, "DIVERGENT_DUPLICATE", "idempotency key already used for a different request; use a fresh key")
+	case errors.Is(err, recovery.ErrDivergentRecovery):
+		// R-P0-2: same source_event_id, different payload — refused, audited.
+		writeErr(w, http.StatusConflict, "DIVERGENT_DUPLICATE", "source event id already used for a different payload")
 	case errors.Is(err, origination.ErrSubscriberIneligible):
 		writeErr(w, http.StatusForbidden, "SUBSCRIBER_INACTIVE", "subscriber not eligible")
 	case errors.Is(err, repo.ErrConcurrentAdvanceBlocked):
