@@ -127,6 +127,25 @@ func TestRP07_NoDisclosurePolicy_FailsClosed(t *testing.T) {
 	}
 }
 
+// The fail-closed conduct invariant is enforced at the DB itself: a consent
+// inserted without disclosure/session/acceptance evidence is rejected by the
+// BEFORE INSERT trigger, so the guarantee does not depend on the application
+// remembering to set it. (Legacy pre-R-P0-7 rows are grandfathered — the
+// trigger only checks new inserts, which is why the columns are nullable.)
+func TestRP07_ConsentEvidenceRequiredByDBTrigger(t *testing.T) {
+	f := newFixture(t, "rp07_dbtrig", 0, 2_000)
+	_, err := f.db.Admin.Exec(context.Background(), `
+		INSERT INTO consents (consent_id, telco_id, advance_id, subscriber_account_id,
+		  disclosed_terms, content_hash, channel)
+		VALUES ('cns_bad','SIM_NG','adv_x','sub_x','{}'::jsonb,'h','USSD')`)
+	if err == nil {
+		t.Fatal("a consent without disclosure evidence must be rejected by the DB trigger")
+	}
+	if !strings.Contains(err.Error(), "R-P0-7") {
+		t.Fatalf("rejection must come from the disclosure-evidence trigger, got: %v", err)
+	}
+}
+
 func assertNoAdvance(t *testing.T, f *fixture) {
 	t.Helper()
 	var n int

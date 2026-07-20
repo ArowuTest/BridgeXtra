@@ -52,19 +52,42 @@ GRANT SELECT ON disclosure_snapshots TO tcp_worker;
 
 -- ---------------------------------------------------------------------------
 -- consents enrichment: bind the accepted terms to the snapshot the customer
--- was shown, and capture the channel/session/acceptance evidence. These become
--- REQUIRED (NOT NULL) — an advance cannot exist without proof of what was
--- disclosed and that it was accepted through a real channel session. telco_
--- evidence is the optional DD-06 slot for a telco-supplied acceptance
--- signature. Fresh-from-zero migration + pre-launch, so NOT NULL is safe.
--- consents keeps its SELECT,INSERT-only grant (append-only) — new columns are
--- covered by the existing table-level grant.
+-- was shown, and capture the channel/session/acceptance evidence. An advance
+-- must not exist without proof of what was disclosed and that it was accepted
+-- through a real channel session (R-P0-7). telco_evidence is the optional DD-06
+-- slot for a telco-supplied acceptance signature. consents keeps its
+-- SELECT,INSERT-only grant (append-only) — new columns are covered by the
+-- existing table-level grant.
+--
+-- The columns are NULLABLE at the schema level so this migration applies on a
+-- DB that already holds pre-R-P0-7 consents (a consent minted before disclosure
+-- capture existed legitimately lacks it — a NOT NULL column would fail those
+-- legacy rows, SQLSTATE 23502). The go-forward invariant is instead enforced by
+-- a BEFORE INSERT trigger: every NEW consent MUST carry the evidence, while
+-- existing rows are grandfathered (a table CHECK would re-validate them and
+-- fail). Same fail-closed guarantee for all new advances, legacy-safe. IF NOT
+-- EXISTS keeps the whole file idempotent across a retried boot-migrate.
 -- ---------------------------------------------------------------------------
 ALTER TABLE consents
-  ADD COLUMN disclosure_snapshot_id TEXT NOT NULL REFERENCES disclosure_snapshots(disclosure_snapshot_id),
-  ADD COLUMN session_id    TEXT NOT NULL,        -- channel session (telco-supplied)
-  ADD COLUMN accepted_at   TIMESTAMPTZ NOT NULL, -- when the customer accepted
-  ADD COLUMN telco_evidence JSONB;               -- DD-06: telco acceptance signature (optional)
+  ADD COLUMN IF NOT EXISTS disclosure_snapshot_id TEXT REFERENCES disclosure_snapshots(disclosure_snapshot_id),
+  ADD COLUMN IF NOT EXISTS session_id    TEXT,        -- channel session (telco-supplied)
+  ADD COLUMN IF NOT EXISTS accepted_at   TIMESTAMPTZ, -- when the customer accepted
+  ADD COLUMN IF NOT EXISTS telco_evidence JSONB;      -- DD-06: telco acceptance signature (optional)
+
+-- Fail-closed conduct invariant for NEW consents (grandfathers legacy rows).
+CREATE OR REPLACE FUNCTION consents_require_disclosure_evidence()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.disclosure_snapshot_id IS NULL OR NEW.session_id IS NULL OR NEW.accepted_at IS NULL THEN
+    RAISE EXCEPTION 'consent requires disclosure_snapshot_id, session_id and accepted_at (R-P0-7)';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_consents_require_disclosure_evidence ON consents;
+CREATE TRIGGER trg_consents_require_disclosure_evidence
+  BEFORE INSERT ON consents
+  FOR EACH ROW EXECUTE FUNCTION consents_require_disclosure_evidence();
 
 -- ---------------------------------------------------------------------------
 -- Seed disclosure.policy for the sim programme. Programme-scoped like
