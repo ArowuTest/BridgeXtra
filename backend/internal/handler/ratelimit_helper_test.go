@@ -6,7 +6,8 @@ import "github.com/ArowuTest/telco-credit-platform/backend/internal/platform/rat
 // 429; the dedicated rate-limit tests build tight limiters of their own.
 func testLimiter() *ratelimit.Limiter {
 	return ratelimit.New(map[string]ratelimit.Limit{
-		"login":   {RatePerMinute: 1e9, Burst: 1e9},
-		"channel": {RatePerMinute: 1e9, Burst: 1e9},
+		"login":      {RatePerMinute: 1e9, Burst: 1e9},
+		"channel":    {RatePerMinute: 1e9, Burst: 1e9},
+		"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
 	})
 }

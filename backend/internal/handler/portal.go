@@ -41,17 +41,18 @@ const (
 
 // Portal serves the operator console API.
 type Portal struct {
-	Admins     *repo.Admins
-	Sessions   *repo.PortalSessions
-	Config     *configsvc.Service  // ADMIN config lifecycle (M4b UI sits on this)
-	Treasury   *treasury.Service   // M4c guardrail re-arm actions (tenant tx)
-	Ops        *ops.Service        // M4d breaks-queue actions (tenant tx)
-	Settlement *settlement.Service // M4d settlement verification (tenant tx)
-	Recovery   *recovery.Service   // M4e parked-reversal retry (tenant tx, reuses guarded apply)
-	Demo       *ops.Demo           // M4e-3 fault demo (real origination path, sim-only allowlist)
-	ReadPool   *pgxpool.Pool       // M4c operator cross-tenant reads (worker/BYPASSRLS)
-	Limiter    *ratelimit.Limiter  // R-P0-8 inbound rate limit (login)
-	Log        *slog.Logger
+	Admins            *repo.Admins
+	Sessions          *repo.PortalSessions
+	Config            *configsvc.Service  // ADMIN config lifecycle (M4b UI sits on this)
+	Treasury          *treasury.Service   // M4c guardrail re-arm actions (tenant tx)
+	Ops               *ops.Service        // M4d breaks-queue actions (tenant tx)
+	Settlement        *settlement.Service // M4d settlement verification (tenant tx)
+	Recovery          *recovery.Service   // M4e parked-reversal retry (tenant tx, reuses guarded apply)
+	Demo              *ops.Demo           // M4e-3 fault demo (real origination path, sim-only allowlist)
+	ReadPool          *pgxpool.Pool       // M4c operator cross-tenant reads (worker/BYPASSRLS)
+	Limiter           *ratelimit.Limiter  // R-P0-8 inbound rate limit (login)
+	TrustedProxyCount int                 // R-P2-7 client-IP derivation
+	Log               *slog.Logger
 }
 
 // routeRoles is THE authorization map: method+pattern -> allowed roles.
@@ -139,7 +140,8 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 		panic("portal: rate limiter is required (R-P0-8 fail-closed)")
 	}
 	// R-P0-8: /login is rate-limited by client IP (credential-stuffing).
-	mux.Handle("POST /v1/portal/login", rateLimited(p.Limiter, "login", clientIP, http.HandlerFunc(p.login)))
+	loginKey := func(r *http.Request) string { return clientIP(r, p.TrustedProxyCount) }
+	mux.Handle("POST /v1/portal/login", rateLimited(p.Limiter, "login", loginKey, http.HandlerFunc(p.login)))
 	mux.Handle("POST /v1/portal/logout", p.withSession(http.HandlerFunc(p.logout)))
 
 	p.mountRBAC(mux, "GET /v1/portal/me", http.HandlerFunc(p.me))

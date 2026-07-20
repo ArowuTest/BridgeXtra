@@ -107,7 +107,7 @@ func main() {
 
 	// R-P0-8: inbound rate limiter from governed config — fail-closed: the API
 	// refuses to boot without it, so no surface ever runs unlimited.
-	limiter, err := handler.LoadRateLimiter(ctx, configsvc.New(workerPool))
+	limiter, trustedProxies, err := handler.LoadRateLimiter(ctx, configsvc.New(workerPool))
 	if err != nil {
 		log.Error("rate limiter (required at boot)", "err", err)
 		os.Exit(1)
@@ -120,17 +120,18 @@ func main() {
 		Config:   configsvc.New(workerPool),
 		// Re-arm actions run as the app role in a tenant tx; operator reads span
 		// telcos on the worker pool (BYPASSRLS) bounded by the operator's scope.
-		Treasury:   treasury.New(appPool, configsvc.New(appPool), log),
-		Ops:        ops.New(appPool, configsvc.New(appPool), log),
-		Settlement: settlement.New(appPool, configsvc.New(appPool), log),
-		Recovery:   rec,
-		Demo:       ops.NewDemo(appPool, appCfg, orig, log),
-		ReadPool:   workerPool,
-		Limiter:    limiter,
-		Log:        log,
+		Treasury:          treasury.New(appPool, configsvc.New(appPool), log),
+		Ops:               ops.New(appPool, configsvc.New(appPool), log),
+		Settlement:        settlement.New(appPool, configsvc.New(appPool), log),
+		Recovery:          rec,
+		Demo:              ops.NewDemo(appPool, appCfg, orig, log),
+		ReadPool:          workerPool,
+		Limiter:           limiter,
+		TrustedProxyCount: trustedProxies,
+		Log:               log,
 	}
 	portal.Mount(mux)
-	channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, Log: log}
+	channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, TrustedProxyCount: trustedProxies, Log: log}
 	channel.Mount(mux, auth)
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()

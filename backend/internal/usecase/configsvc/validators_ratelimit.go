@@ -20,13 +20,20 @@ func init() {
 
 func validateRateLimit(_ context.Context, _ pgx.Tx, content json.RawMessage) error {
 	var v struct {
-		Surfaces map[string]struct {
+		TrustedProxyCount *int `json:"trusted_proxy_count"`
+		Surfaces          map[string]struct {
 			RequestsPerMinute *float64 `json:"requests_per_minute"`
 			Burst             *float64 `json:"burst"`
 		} `json:"surfaces"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
+	}
+	// R-P2-7: how many proxies in front of us to trust for X-Forwarded-For.
+	// Required and non-negative — an absent value would silently pick between
+	// "trust nothing" and "trust the client", and IP-keying depends on it.
+	if v.TrustedProxyCount == nil || *v.TrustedProxyCount < 0 {
+		return fmt.Errorf("trusted_proxy_count is required and must be >= 0 (R-P2-7)")
 	}
 	if len(v.Surfaces) == 0 {
 		return fmt.Errorf("surfaces must be non-empty — an unlimited limiter is not a control")
@@ -39,8 +46,10 @@ func validateRateLimit(_ context.Context, _ pgx.Tx, content json.RawMessage) err
 			return fmt.Errorf("surface %q: burst must be >= 1", name)
 		}
 	}
-	// The two inbound edges this control exists for must be present.
-	for _, required := range []string{"login", "channel"} {
+	// The inbound edges this control exists for: login (IP), the channel
+	// per-telco fairness bucket, and channel_ip — the always-on pre-auth IP
+	// throttle that a rotating-invalid-key flood cannot bypass (R-P0-8a-F1).
+	for _, required := range []string{"login", "channel", "channel_ip"} {
 		if _, ok := v.Surfaces[required]; !ok {
 			return fmt.Errorf("surface %q is required (R-P0-8 inbound edge)", required)
 		}
