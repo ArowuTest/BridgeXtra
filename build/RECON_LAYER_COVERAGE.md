@@ -1,5 +1,11 @@
 # Recon layer coverage (R-P0-6 Slice D4)
 
+> **GO-LIVE CONTROL (reviewer VR-52, registered at G4 pass):** this file is a
+> go-live control map, not just documentation. When a real independent
+> telco/bank/bureau source becomes available for RECOVERY, SETTLEMENT, or BUREAU
+> (via DD-06 or bureau integration), that layer **must be armed** as a `layerSpec`
+> before the corresponding product goes live. Tracked as a Gate-C/D item.
+
 The `recon_runs.layer` column and every index/uniqueness key already carry the
 layer, and as of D4 the engine (`reconcileLayer` + `layerSpec`) is layer-generic:
 a layer supplies only its name and how to fetch its platform-side money records,
