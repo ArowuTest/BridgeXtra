@@ -199,8 +199,13 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 	if v.CircuitErrThreshPct == nil || *v.CircuitErrThreshPct < 1 || *v.CircuitErrThreshPct > 100 {
 		return fmt.Errorf("circuit_error_threshold_pct must be 1..100")
 	}
-	if v.CircuitMinRequests == nil || *v.CircuitMinRequests < 1 {
-		return fmt.Errorf("circuit_min_requests must be >= 1")
+	// R-P0-8b-F1: the breaker evaluates a rolling error rate over the last
+	// circuit_min_requests calls, so this is also the breaker's sample-window
+	// size. A finite ceiling keeps that window (a) a bounded allocation and
+	// (b) a real control — a five-figure min sample would leave a low-volume
+	// telco's breaker perpetually below quorum, i.e. armed-but-dead.
+	if v.CircuitMinRequests == nil || *v.CircuitMinRequests < 1 || *v.CircuitMinRequests > 10_000 {
+		return fmt.Errorf("circuit_min_requests must be 1..10000 (also the rolling error-rate sample window)")
 	}
 	// R-P0-8b: the open→half-open cooldown. Required so the breaker is a real
 	// control, not the armed-but-dead pair of thresholds it was before.

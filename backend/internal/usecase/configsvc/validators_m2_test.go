@@ -120,6 +120,23 @@ func TestG2F3_AdapterCeilingRequired(t *testing.T) {
 	}
 }
 
+// R-P0-8b-F1: circuit_min_requests doubles as the breaker's rolling error-rate
+// sample window, so it must be a finite, positive quantum — a five-figure min
+// sample would keep a low-volume telco's breaker perpetually below quorum
+// (armed-but-dead) and size an unbounded allocation.
+func TestRP08BF1_CircuitSampleWindowBounded(t *testing.T) {
+	svc, _ := newSvc(t, "cfg_rp08bf1")
+	scope := "telco:SIM_NG"
+	const base = `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":1000000000000`
+	cases := map[string]string{
+		"min_requests zero":   base + `,"circuit_min_requests":0}`,
+		"min_requests absurd": base + `,"circuit_min_requests":10001}`,
+	}
+	for label, content := range cases {
+		mustReject(t, svc, "telco.adapter", scope, label, content)
+	}
+}
+
 func TestM2_SeededDomainsActive(t *testing.T) {
 	svc, _ := newSvc(t, "cfg_m2seeds")
 	ctx := context.Background()

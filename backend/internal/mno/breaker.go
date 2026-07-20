@@ -4,13 +4,22 @@ package mno
 // The telco.adapter config already carried circuit_error_threshold_pct and
 // circuit_min_requests, but nothing read them — armed-but-dead. This activates
 // them (plus a governed cooldown) so a DOWN telco is circuit-broken instead of
-// hammered: once failures cross the threshold over a minimum sample, the
-// circuit OPENS and calls short-circuit to Unknown (INV-009 — the resolver
+// hammered: once the error RATE crosses the threshold over a minimum sample,
+// the circuit OPENS and calls short-circuit to Unknown (INV-009 — the resolver
 // enquires; money is never guessed) until a cooldown lets one probe through.
 //
 // "Failure" here means the telco did not RESPOND (transport error / 5xx) — a
 // telco that answers, even with a business FAILED, is healthy and must not
 // trip the breaker.
+//
+// R-P0-8b-F1: the error rate is measured over a genuine ROLLING window — a ring
+// buffer of the last circuit_min_requests outcomes. An earlier version zeroed
+// the sample on every success, so between resets the window held only failures;
+// at the trip check failures==total, and failures*100 >= pct*total collapsed to
+// 100 >= pct — true for any pct ≤ 100. That made circuit_error_threshold_pct
+// inert (the breaker was really a consecutive-failure count) and pct=10 behaved
+// identically to pct=90. With a rolling window each success now DILUTES the rate
+// instead of erasing history, so the configured percentage governs the trip.
 
 import (
 	"sync"
@@ -35,16 +44,27 @@ type breakerCfg struct {
 type breaker struct {
 	cfg breakerCfg
 
-	mu        sync.Mutex
-	state     breakerState
+	mu    sync.Mutex
+	state breakerState
+	// window is a ring buffer of the last cfg.minRequests outcomes (true = a
+	// failure). failures is the running count of failures currently held in it,
+	// and filled is how many slots carry a real sample (0..len(window)). Once
+	// the window is full the error rate is failures/filled — a true rolling rate
+	// that circuit_error_threshold_pct gates against.
+	window    []bool
+	pos       int
+	filled    int
 	failures  int
-	total     int
 	openUntil time.Time
 	now       func() time.Time
 }
 
 func newBreaker(cfg breakerCfg) *breaker {
-	return &breaker{cfg: cfg, state: breakerClosed, now: time.Now}
+	size := cfg.minRequests
+	if size < 1 {
+		size = 1 // defensive; the validator already floors min_requests at 1
+	}
+	return &breaker{cfg: cfg, state: breakerClosed, window: make([]bool, size), now: time.Now}
 }
 
 // allow reports whether a call may proceed. An OPEN circuit refuses until its
@@ -82,14 +102,25 @@ func (b *breaker) record(success bool) {
 		}
 		return
 	}
-	if success {
-		// Healthy response resets the window (fresh evaluation each burst).
-		b.failures, b.total = 0, 0
-		return
+
+	// Slide the rolling window by one: evict the oldest sample (adjusting the
+	// failure count) before overwriting its slot, so successes dilute the rate
+	// rather than erasing the window.
+	if b.filled == len(b.window) {
+		if b.window[b.pos] {
+			b.failures--
+		}
+	} else {
+		b.filled++
 	}
-	b.failures++
-	b.total++
-	if b.total >= b.cfg.minRequests && b.failures*100 >= b.cfg.thresholdPct*b.total {
+	b.window[b.pos] = !success
+	if !success {
+		b.failures++
+	}
+	b.pos = (b.pos + 1) % len(b.window)
+
+	// Only evaluate on a full sample, and trip on the error RATE over it.
+	if b.filled >= b.cfg.minRequests && b.failures*100 >= b.cfg.thresholdPct*b.filled {
 		b.trip()
 	}
 }
@@ -97,10 +128,17 @@ func (b *breaker) record(success bool) {
 func (b *breaker) trip() {
 	b.state = breakerOpen
 	b.openUntil = b.now().Add(b.cfg.cooldown)
-	b.failures, b.total = 0, 0
+	b.clearWindow()
 }
 
 func (b *breaker) reset() {
 	b.state = breakerClosed
-	b.failures, b.total = 0, 0
+	b.clearWindow()
+}
+
+func (b *breaker) clearWindow() {
+	for i := range b.window {
+		b.window[i] = false
+	}
+	b.pos, b.filled, b.failures = 0, 0, 0
 }
