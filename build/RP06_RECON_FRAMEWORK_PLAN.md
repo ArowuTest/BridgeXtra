@@ -79,8 +79,14 @@ turns the skeleton into a production framework in verifiable slices.
     run, single-use. Worker jobs `-recon-override-propose/-approve` (armed).
     5 adversarial tests: happy, approval-required, four-eyes self-approve,
     single-use, count-bound, baseline-staleness.
-  - **D4 — multi-layer.** Extend the header/manifest machinery to the RECOVERY,
-    SETTLEMENT and BUREAU layers (fulfilment is the reference impl).
+  - **D4 — multi-layer. DONE (honest scope).** Investigation: RECOVERY/SETTLEMENT/
+    BUREAU have no independent telco-side pull source, so arming reconcilers for
+    them would be stubs. D4 instead makes the engine genuinely layer-generic
+    (`layerSpec` + `reconcileLayer`, fulfilment as reference impl) and documents
+    the real per-layer coverage (build/RECON_LAYER_COVERAGE.md): RECOVERY
+    reconciled at ingest (R-P0-2), SETTLEMENT by settlement.VerifyReproducible,
+    BUREAU dormant. Genericity proven by recon_rp06d4_test.go (a 2nd layer driven
+    end-to-end through the shared engine; layer-scoped coexistence + supersession).
 
 - **Slice E — Maker-checker break resolution + signed evidence pack.** Wire the
   governed `auto_resolve=false` floor into an explicit two-actor break-resolution

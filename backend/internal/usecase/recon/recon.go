@@ -141,13 +141,62 @@ type telcoTransaction struct {
 	CreditedAt        time.Time `json:"credited_at"` // R-P0-6 Slice C: telco-side event time (period bound)
 }
 
-// platformRecord is the platform side of the fulfilment layer.
+// platformRecord is the platform side of a reconciliation: one money-bearing
+// record keyed by its match key, with amount/currency and (optionally) the
+// telco reference the platform believes settled it.
 type platformRecord struct {
-	AdvanceID      string
+	AdvanceID      string // the match key on the platform side (advance id for FULFILMENT)
 	State          string
 	FaceValueMinor int64
 	Currency       string
 	TelcoReference string
+}
+
+// layerSpec is what makes the recon framework MULTI-LAYER (R-P0-6 Slice D4): the
+// header/manifest/control-total/period-watermark/completeness/override/supersession
+// machinery is layer-agnostic, and a layer supplies only its NAME and how to
+// fetch the platform-side money records for a window. FULFILMENT is the reference
+// implementation; a new layer (with a real telco-side source) is a registration,
+// not a fork of the engine. See build/RECON_LAYER_COVERAGE.md for why only
+// FULFILMENT is armed today (RECOVERY reconciles at ingest via R-P0-2, SETTLEMENT
+// self-verifies against the ledger, BUREAU is a dormant pipe — none has an
+// independent telco-side pull source to reconcile against, and fabricating one
+// would be a stub).
+type layerSpec struct {
+	name          string
+	fetchPlatform func(ctx context.Context, tx pgx.Tx, programmeID string, periodStart, periodEnd time.Time) (map[string]platformRecord, error)
+}
+
+// fulfilmentSpec is the reference layer: platform-approved advances (money OUT)
+// bounded to the window by activation time, joined to their CONFIRMED telco
+// reference, reconciled against the telco's credit records.
+func fulfilmentSpec() layerSpec {
+	return layerSpec{
+		name: layerFulfilment,
+		fetchPlatform: func(ctx context.Context, tx pgx.Tx, programmeID string, periodStart, periodEnd time.Time) (map[string]platformRecord, error) {
+			plat := map[string]platformRecord{}
+			rows, err := tx.Query(ctx, `
+				SELECT a.advance_id, a.state, a.face_value_minor, a.currency, COALESCE(fa.telco_reference,'')
+				FROM advances a
+				LEFT JOIN fulfilment_attempts fa
+				  ON fa.advance_id = a.advance_id AND fa.state = 'CONFIRMED'
+				WHERE a.programme_id = $1
+				  AND a.state IN ('ACTIVE','PARTIALLY_RECOVERED','CLOSED')
+				  AND a.activated_at >= $2 AND a.activated_at < $3`, programmeID, periodStart, periodEnd)
+			if err != nil {
+				return nil, err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var p platformRecord
+				if err := rows.Scan(&p.AdvanceID, &p.State, &p.FaceValueMinor, &p.Currency, &p.TelcoReference); err != nil {
+					return nil, err
+				}
+				plat[p.AdvanceID] = p
+			}
+			return plat, rows.Err()
+		},
+	}
 }
 
 // Summary reports one reconciliation run (V2-REC-007 control totals).
@@ -239,7 +288,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 			"telco", telcoID, "programme", programmeID, "watermark", periodStart.UTC().Format(time.RFC3339))
 		return Summary{RunID: platform.NewID("run"), PeriodStart: periodStart, PeriodEnd: cutoff, NothingToReconcile: true}, nil
 	}
-	return s.reconcile(ctx, telcoID, programmeID, periodStart, cutoff, telcoRecords, tol)
+	return s.reconcileLayer(ctx, fulfilmentSpec(), telcoID, programmeID, periodStart, cutoff, telcoRecords, tol)
 }
 
 // ReconcilePeriod re-reconciles an EXPLICIT window [periodStart, periodEnd) —
@@ -254,7 +303,7 @@ func (s *Service) ReconcilePeriod(ctx context.Context, telcoID, programmeID stri
 	if err != nil {
 		return Summary{RunID: platform.NewID("run")}, err
 	}
-	return s.reconcile(ctx, telcoID, programmeID, periodStart, periodEnd, telcoRecords, tol)
+	return s.reconcileLayer(ctx, fulfilmentSpec(), telcoID, programmeID, periodStart, periodEnd, telcoRecords, tol)
 }
 
 // ReconcileRecentPeriods re-reconciles every ACTIVE fulfilment window that
@@ -333,7 +382,7 @@ func (s *Service) ReconcileRecentPeriods(ctx context.Context, telcoID, programme
 			out = append(out, Summary{PeriodStart: p.periodStart, PeriodEnd: p.periodEnd, Unchanged: true})
 			continue
 		}
-		sum, err := s.reconcile(ctx, telcoID, programmeID, p.periodStart, p.periodEnd, telcoRecords, tol)
+		sum, err := s.reconcileLayer(ctx, fulfilmentSpec(), telcoID, programmeID, p.periodStart, p.periodEnd, telcoRecords, tol)
 		if err != nil {
 			return out, err
 		}
@@ -477,7 +526,7 @@ func (s *Service) loadForRecon(ctx context.Context, telcoID, programmeID string)
 // reconcile reconciles a bounded window [periodStart, periodEnd) and writes the
 // immutable run header + items (or a REJECTED header if the windowed source is
 // below the completeness floor for a re-reconcile of the same period).
-func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, periodStart, periodEnd time.Time, telcoRecords []telcoTransaction, tol toleranceCfg) (Summary, error) {
+func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, programmeID string, periodStart, periodEnd time.Time, telcoRecords []telcoTransaction, tol toleranceCfg) (Summary, error) {
 	runID := platform.NewID("run")
 	sum := Summary{RunID: runID, TelcoRecords: len(telcoRecords), PeriodStart: periodStart, PeriodEnd: periodEnd}
 	var srcCount int64
@@ -500,29 +549,9 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 		}
 		sum.SourceControlTotalMinor, sum.SourceHash = srcTotal, srcHash
 
-		// Platform side, bounded to the window by activation time.
-		plat := map[string]platformRecord{}
-		rows, err := tx.Query(ctx, `
-			SELECT a.advance_id, a.state, a.face_value_minor, a.currency, COALESCE(fa.telco_reference,'')
-			FROM advances a
-			LEFT JOIN fulfilment_attempts fa
-			  ON fa.advance_id = a.advance_id AND fa.state = 'CONFIRMED'
-			WHERE a.programme_id = $1
-			  AND a.state IN ('ACTIVE','PARTIALLY_RECOVERED','CLOSED')
-			  AND a.activated_at >= $2 AND a.activated_at < $3`, programmeID, periodStart, periodEnd)
+		// Platform side (layer-supplied), bounded to the window.
+		plat, err := spec.fetchPlatform(ctx, tx, programmeID, periodStart, periodEnd)
 		if err != nil {
-			return err
-		}
-		for rows.Next() {
-			var p platformRecord
-			if err := rows.Scan(&p.AdvanceID, &p.State, &p.FaceValueMinor, &p.Currency, &p.TelcoReference); err != nil {
-				rows.Close()
-				return err
-			}
-			plat[p.AdvanceID] = p
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
 			return err
 		}
 		sum.PlatformRecords = len(plat)
@@ -671,7 +700,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 		if err := tx.QueryRow(ctx, `
 			SELECT run_id, source_record_count FROM recon_runs
 			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE' AND period_start=$4`,
-			telcoID, programmeID, layerFulfilment, periodStart).Scan(&priorActiveRunID, &priorCount); err != nil {
+			telcoID, programmeID, spec.name, periodStart).Scan(&priorActiveRunID, &priorCount); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				priorExists = false
 			} else {
@@ -696,7 +725,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 					WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND period_start=$4
 					  AND state='APPROVED' AND baseline_active_run_id=$5
 					  AND authorized_source_count <= $6`,
-					telcoID, programmeID, layerFulfilment, periodStart, priorActiveRunID, srcCount).Scan(&overrideToConsume)
+					telcoID, programmeID, spec.name, periodStart, priorActiveRunID, srcCount).Scan(&overrideToConsume)
 				if errors.Is(err, pgx.ErrNoRows) {
 					sum.Rejected = true
 					if _, err := tx.Exec(ctx, `
@@ -707,7 +736,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 						  matched_count, break_count, state, created_by)
 						VALUES ($1,$2,$3,$4, $5,$6,
 						  $7,$8,$9, $10,$11, 0,0, 'REJECTED', 'worker:recon')`,
-						runID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
+						runID, telcoID, programmeID, spec.name, periodStart, periodEnd,
 						srcCount, srcTotal, srcHash, int64(len(plat)), platTotal); err != nil {
 						return err
 					}
@@ -729,7 +758,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 		if _, err := tx.Exec(ctx, `
 			UPDATE recon_runs SET state='SUPERSEDED', superseded_by=$1
 			WHERE telco_id=$2 AND programme_id=$3 AND layer=$4 AND state='ACTIVE' AND period_start=$5`,
-			runID, telcoID, programmeID, layerFulfilment, periodStart); err != nil {
+			runID, telcoID, programmeID, spec.name, periodStart); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -740,7 +769,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 			  matched_count, break_count, created_by)
 			VALUES ($1,$2,$3,$4, $5,$6,
 			  $7,$8,$9, $10,$11, $12,$13, 'worker:recon')`,
-			runID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
+			runID, telcoID, programmeID, spec.name, periodStart, periodEnd,
 			srcCount, srcTotal, srcHash,
 			int64(len(plat)), platTotal,
 			int64(sum.Matched), int64(breaks)); err != nil {
