@@ -89,8 +89,10 @@ func TestEDG005_Continuation_ResolverActivatesExactlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := f.orig.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_TIMEOUT_r1",
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].Offer.OfferID, MSISDNToken: "tok_TIMEOUT_r1",
 		IdemKey: "res-to-1", CorrelationID: "cor-res-to",
+		DisclosureRef: offers[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-res-to", AcceptedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +150,7 @@ func TestEDG007_CrashBetweenTx1AndTx2_StaleSentRecoveredOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	advID := f.manualTx1(t, offers[0], "tok_crash_r2")
+	advID := f.manualTx1(t, offers[0].Offer, "tok_crash_r2")
 	f.sim.CreditDirect(advID, 5_000, "NGN") // telco succeeded; we never heard
 
 	// Stale-SENT threshold: backdate the attempt past delays[0]=10s.
@@ -184,7 +186,7 @@ func TestEDG008_NeverLanded_NotFoundFailsAndReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = f.manualTx1(t, offers[0], "tok_crash_r3") // crash BEFORE the call: simulator never saw it
+	_ = f.manualTx1(t, offers[0].Offer, "tok_crash_r3") // crash BEFORE the call: simulator never saw it
 	if _, err := f.db.Admin.Exec(context.Background(),
 		`UPDATE fulfilment_attempts SET submitted_at = now() - interval '1 hour'`); err != nil {
 		t.Fatal(err)
@@ -216,8 +218,10 @@ func TestVR7b_StillUnknown_QuietRescheduleNoEventFlood(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := f.orig.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_TIMEOUT_r4",
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].Offer.OfferID, MSISDNToken: "tok_TIMEOUT_r4",
 		IdemKey: "res-vr7b", CorrelationID: "cor-vr7b",
+		DisclosureRef: offers[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-res-vr7b", AcceptedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}

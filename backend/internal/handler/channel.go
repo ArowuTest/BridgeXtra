@@ -98,12 +98,29 @@ type offerResponse struct {
 	Repayment entity.Money `json:"repayment"`
 	FeeModel  string       `json:"fee_model"`
 	ExpiresAt time.Time    `json:"expires_at"`
+	// R-P0-7: the disclosure the channel MUST render, and the reference to echo
+	// back at confirm as proof of what was shown.
+	DisclosureRef     string    `json:"disclosure_ref"`
+	DisclosureText    string    `json:"disclosure_text"`
+	TotalCostText     string    `json:"total_cost_text"`
+	DisclosureLocale  string    `json:"disclosure_locale"`
+	TemplateID        string    `json:"template_id"`
+	TemplateVersion   string    `json:"template_version"`
+	DisclosureExpires time.Time `json:"disclosure_expires_at"`
 }
 
 type confirmRequest struct {
 	ProgrammeID string `json:"programme_id"`
 	OfferID     string `json:"offer_id"`
 	MSISDNToken string `json:"msisdn_token"`
+	// R-P0-7 consent/channel evidence. Channel/SessionID/AcceptedAt are
+	// telco-supplied (DD-06); DisclosureRef echoes the presented disclosure;
+	// TelcoEvidence is the optional telco acceptance signature.
+	DisclosureRef string          `json:"disclosure_ref"`
+	Channel       string          `json:"channel"`
+	SessionID     string          `json:"session_id"`
+	AcceptedAt    time.Time       `json:"accepted_at"`
+	TelcoEvidence json.RawMessage `json:"telco_evidence,omitempty"`
 }
 
 type advanceResponse struct {
@@ -171,11 +188,16 @@ func (h *Channel) getOffers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]offerResponse, 0, len(offers))
-	for _, o := range offers {
+	for _, ov := range offers {
+		o, d := ov.Offer, ov.Disclosure
 		out = append(out, offerResponse{
 			OfferID: o.OfferID, FaceValue: o.FaceValue, Fee: o.Fee,
 			Disbursed: o.Disbursed, Repayment: o.Repayment,
 			FeeModel: string(o.FeeModel), ExpiresAt: o.ExpiresAt,
+			DisclosureRef: d.DisclosureSnapshotID, DisclosureText: d.RenderedBody,
+			TotalCostText: d.TotalCostText, DisclosureLocale: d.Locale,
+			TemplateID: d.TemplateID, TemplateVersion: d.TemplateVersion,
+			DisclosureExpires: d.ExpiresAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -200,6 +222,11 @@ func (h *Channel) confirm(w http.ResponseWriter, r *http.Request) {
 		MSISDNToken:   req.MSISDNToken,
 		IdemKey:       idemKey,
 		CorrelationID: platform.CorrelationFrom(r.Context()),
+		DisclosureRef: req.DisclosureRef,
+		Channel:       req.Channel,
+		SessionID:     req.SessionID,
+		AcceptedAt:    req.AcceptedAt,
+		TelcoEvidence: req.TelcoEvidence,
 	})
 	if err != nil {
 		h.writeDomainErr(w, r, err)
@@ -293,6 +320,21 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 	case errors.Is(err, origination.ErrDecisionUnavailable):
 		// EDG-014 boundary: stale/absent decision is a customer-safe no-offer.
 		writeErr(w, http.StatusConflict, "NO_OFFER_AVAILABLE", "no offer available at this time")
+	case errors.Is(err, origination.ErrDisclosureRequired),
+		errors.Is(err, origination.ErrAcceptanceEvidenceMissing):
+		// R-P0-7: a confirm without disclosure/channel/session/acceptance
+		// evidence is malformed — the client must re-fetch offers and accept.
+		writeErr(w, http.StatusBadRequest, "DISCLOSURE_EVIDENCE_REQUIRED", "disclosure reference and channel/session/acceptance evidence are required")
+	case errors.Is(err, origination.ErrDisclosureMismatch),
+		errors.Is(err, origination.ErrDisclosureExpired):
+		// R-P0-7: the echoed disclosure does not match the offer, or acceptance
+		// fell outside its validity — request fresh offers and re-disclose.
+		writeErr(w, http.StatusConflict, "DISCLOSURE_MISMATCH", "disclosure no longer valid for this offer; request fresh offers")
+	case errors.Is(err, origination.ErrChannelNotAllowed):
+		writeErr(w, http.StatusBadRequest, "CHANNEL_NOT_ALLOWED", "this channel is not permitted for this programme")
+	case errors.Is(err, origination.ErrDisclosureUnavailable):
+		// Fail-closed: no active disclosure policy — cannot disclose, cannot serve.
+		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
 	case errors.Is(err, origination.ErrOverlayBlocked):
 		// V2-SCR-015: which flag fired is logged upstream, never disclosed.
 		writeErr(w, http.StatusForbidden, "SERVICE_RESTRICTED", "service not available for this subscriber right now")

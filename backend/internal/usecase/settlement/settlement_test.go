@@ -69,8 +69,10 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := orig.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].Offer.OfferID, MSISDNToken: "tok_sim_0001",
 		IdemKey: "set-adv-1", CorrelationID: "cor-set-1",
+		DisclosureRef: offers[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-set-1", AcceptedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -129,8 +131,10 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := orig.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers2[0].OfferID, MSISDNToken: "tok_sim_0001",
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers2[0].Offer.OfferID, MSISDNToken: "tok_sim_0001",
 		IdemKey: "set-adv-2", CorrelationID: "cor-set-3",
+		DisclosureRef: offers2[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-set-2", AcceptedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatal(err)
 	}

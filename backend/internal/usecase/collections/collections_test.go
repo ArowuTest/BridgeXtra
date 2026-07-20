@@ -78,8 +78,10 @@ func (f *fixture) activeAdvance(t *testing.T) entity.Advance {
 		t.Fatal(err)
 	}
 	res, err := f.orig.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].Offer.OfferID, MSISDNToken: "tok_sim_0001",
 		IdemKey: "col-adv-1", CorrelationID: "cor-col-adv",
+		DisclosureRef: offers[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-col", AcceptedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)

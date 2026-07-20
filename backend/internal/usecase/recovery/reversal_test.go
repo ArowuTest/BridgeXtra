@@ -9,6 +9,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
@@ -229,8 +230,10 @@ func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) 
 		t.Fatal(err)
 	}
 	resB, err := f.orig.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].Offer.OfferID, MSISDNToken: "tok_sim_0001",
 		IdemKey: "rec-adv-B", CorrelationID: "cor-rec-B",
+		DisclosureRef: offers[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-rec-B", AcceptedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatal(err)

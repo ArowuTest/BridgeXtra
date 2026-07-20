@@ -78,26 +78,32 @@ func (SubscriberFlags) Clear(ctx context.Context, tx pgx.Tx, subscriberAccountID
 type Consents struct{}
 
 type Consent struct {
-	ConsentID           string
-	TelcoID             string
-	AdvanceID           string
-	SubscriberAccountID string
-	DisclosedTerms      []byte
-	ContentHash         string
-	Channel             string
-	CapturedAt          time.Time
+	ConsentID            string
+	TelcoID              string
+	AdvanceID            string
+	SubscriberAccountID  string
+	DisclosureSnapshotID string // R-P0-7: the disclosure the customer was shown
+	DisclosedTerms       []byte
+	ContentHash          string
+	Channel              string // R-P0-7: real channel (no longer hardcoded)
+	SessionID            string // R-P0-7: channel session (telco-supplied, DD-06)
+	AcceptedAt           time.Time
+	TelcoEvidence        []byte // R-P0-7/DD-06: optional telco acceptance signature
+	CapturedAt           time.Time
 }
 
 // Insert writes the consent record — called INSIDE the confirm transaction,
 // so an advance without consent evidence cannot exist (UNIQUE(advance_id)
-// also makes the replay path safe).
+// also makes the replay path safe). R-P0-7: the record binds the disclosure
+// snapshot the customer accepted plus the channel/session/acceptance evidence.
 func (Consents) Insert(ctx context.Context, tx pgx.Tx, c Consent) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO consents
-		  (consent_id, telco_id, advance_id, subscriber_account_id, disclosed_terms, content_hash, channel)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		c.ConsentID, c.TelcoID, c.AdvanceID, c.SubscriberAccountID,
-		c.DisclosedTerms, c.ContentHash, c.Channel)
+		  (consent_id, telco_id, advance_id, subscriber_account_id, disclosure_snapshot_id,
+		   disclosed_terms, content_hash, channel, session_id, accepted_at, telco_evidence)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		c.ConsentID, c.TelcoID, c.AdvanceID, c.SubscriberAccountID, c.DisclosureSnapshotID,
+		c.DisclosedTerms, c.ContentHash, c.Channel, c.SessionID, c.AcceptedAt, c.TelcoEvidence)
 	if err != nil {
 		return fmt.Errorf("insert consent: %w", err)
 	}
@@ -108,11 +114,11 @@ func (Consents) Insert(ctx context.Context, tx pgx.Tx, c Consent) error {
 func (Consents) GetByAdvance(ctx context.Context, tx pgx.Tx, advanceID string) (Consent, error) {
 	var c Consent
 	err := tx.QueryRow(ctx, `
-		SELECT consent_id, telco_id, advance_id, subscriber_account_id,
-		       disclosed_terms, content_hash, channel, captured_at
+		SELECT consent_id, telco_id, advance_id, subscriber_account_id, disclosure_snapshot_id,
+		       disclosed_terms, content_hash, channel, session_id, accepted_at, telco_evidence, captured_at
 		FROM consents WHERE advance_id = $1`, advanceID).
-		Scan(&c.ConsentID, &c.TelcoID, &c.AdvanceID, &c.SubscriberAccountID,
-			&c.DisclosedTerms, &c.ContentHash, &c.Channel, &c.CapturedAt)
+		Scan(&c.ConsentID, &c.TelcoID, &c.AdvanceID, &c.SubscriberAccountID, &c.DisclosureSnapshotID,
+			&c.DisclosedTerms, &c.ContentHash, &c.Channel, &c.SessionID, &c.AcceptedAt, &c.TelcoEvidence, &c.CapturedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return c, fmt.Errorf("consent for advance %q: %w", advanceID, ErrNotFound)
 	}

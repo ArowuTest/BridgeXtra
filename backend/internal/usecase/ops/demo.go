@@ -157,9 +157,15 @@ func (d *Demo) Run(ctx context.Context, telcoID, scenario, actor string) (repo.D
 	if len(offers) == 0 {
 		return run, fmt.Errorf("demo offers (%s): empty ladder", token)
 	}
+	// R-P0-7: the demo confirms with the disclosure the customer was shown —
+	// echo the snapshot reference and supply channel/session/acceptance
+	// evidence, exactly as the real USSD channel does.
+	ov := offers[0]
 	res, err := d.Orig.Confirm(tctx, origination.ConfirmCmd{
-		ProgrammeID: tc.ProgrammeID, OfferID: offers[0].OfferID, MSISDNToken: token,
+		ProgrammeID: tc.ProgrammeID, OfferID: ov.Offer.OfferID, MSISDNToken: token,
 		IdemKey: runID, CorrelationID: runID,
+		DisclosureRef: ov.Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "demo-" + runID, AcceptedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		return run, fmt.Errorf("demo confirm (%s): %w", token, err)

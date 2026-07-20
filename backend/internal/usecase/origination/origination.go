@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -56,7 +57,20 @@ var (
 	// must be the SAME request; a different body under the same key is a
 	// client/security error, never a silent replay of the original advance.
 	ErrDivergentDuplicate = errors.New("origination: idempotency key reused with a divergent request")
+
+	// R-P0-7 consent/channel disclosure-evidence errors.
+	ErrDisclosureUnavailable     = errors.New("origination: no active disclosure policy") // fail-closed: cannot disclose -> cannot offer
+	ErrDisclosureRequired        = errors.New("origination: disclosure reference is required at confirm")
+	ErrDisclosureMismatch        = errors.New("origination: disclosure reference does not match the offer presented")
+	ErrDisclosureExpired         = errors.New("origination: acceptance falls outside the disclosure validity window")
+	ErrChannelNotAllowed         = errors.New("origination: channel is not permitted for this disclosure policy")
+	ErrAcceptanceEvidenceMissing = errors.New("origination: channel/session acceptance evidence is required at confirm")
 )
+
+// acceptanceSkew tolerates modest clock skew between the telco channel (which
+// stamps accepted_at) and us when checking that acceptance happened inside the
+// disclosure's validity window.
+const acceptanceSkew = 2 * time.Minute
 
 // confirmRequestHash is the canonical equivalence fingerprint of a confirm
 // command (R-P0-1). Only the fields that DEFINE the command are hashed —
@@ -91,6 +105,7 @@ type Service struct {
 	subscribers repo.Subscribers
 	decisions   repo.Decisions
 	offers      repo.Offers
+	disclosures repo.DisclosureSnapshots
 	pools       repo.FundingPools
 	advances    repo.Advances
 	attempts    repo.Attempts
@@ -124,6 +139,109 @@ type overlaysCfg struct {
 	BlockingFlags       []string `json:"blocking_flags"`
 	SimSwapCooloffHours int      `json:"sim_swap_cooloff_hours"`
 	CheckAt             []string `json:"check_at"`
+}
+
+// disclosureCfg is the governed disclosure.policy (R-P0-7). The disclosure a
+// customer sees is config, not code — de-hardcoding the previously literal
+// Channel:"USSD". The validator guarantees the templates disclose the repayment
+// total and that allowed_channels/supported_locales are non-empty.
+type disclosureCfg struct {
+	TemplateID        string   `json:"template_id"`
+	TemplateVersion   string   `json:"template_version"`
+	DefaultLocale     string   `json:"default_locale"`
+	SupportedLocales  []string `json:"supported_locales"`
+	AllowedChannels   []string `json:"allowed_channels"`
+	BodyTemplate      string   `json:"body_template"`
+	TotalCostTemplate string   `json:"total_cost_template"`
+}
+
+func (d disclosureCfg) channelAllowed(ch string) bool {
+	for _, c := range d.AllowedChannels {
+		if c == ch {
+			return true
+		}
+	}
+	return false
+}
+
+// OfferView pairs an offer with the exact disclosure snapshot presented for it
+// (R-P0-7). The channel renders Disclosure.RenderedBody and echoes
+// Disclosure.DisclosureSnapshotID back at confirm as proof of what was shown.
+type OfferView struct {
+	Offer      entity.Offer
+	Disclosure entity.DisclosureSnapshot
+}
+
+// renderTemplate substitutes the money placeholders in a disclosure template.
+// Deterministic — the same offer always renders byte-identical text, so the
+// content hash is stable and the snapshot is reproducible.
+func renderTemplate(tmpl string, o entity.Offer) string {
+	return strings.NewReplacer(
+		"{{face}}", o.FaceValue.String(),
+		"{{fee}}", o.Fee.String(),
+		"{{disbursed}}", o.Disbursed.String(),
+		"{{repayment}}", o.Repayment.String(),
+		"{{currency}}", string(o.FaceValue.Currency()),
+	).Replace(tmpl)
+}
+
+// buildDisclosureSnapshot renders and hashes the disclosure for one offer. The
+// content hash covers the identifying + money + rendered fields, so any later
+// tampering with the stored row is detectable (mirrors decision_snapshots).
+func buildDisclosureSnapshot(dc disclosureCfg, cfgVersionID, locale string, o entity.Offer, now time.Time) entity.DisclosureSnapshot {
+	body := renderTemplate(dc.BodyTemplate, o)
+	totalCost := renderTemplate(dc.TotalCostTemplate, o)
+	canonical, _ := json.Marshal(struct {
+		Template  string `json:"template_id"`
+		Version   string `json:"template_version"`
+		Locale    string `json:"locale"`
+		Currency  string `json:"currency"`
+		Face      int64  `json:"face_value_minor"`
+		Fee       int64  `json:"fee_minor"`
+		Disbursed int64  `json:"disbursed_minor"`
+		Repayment int64  `json:"repayment_minor"`
+		Body      string `json:"rendered_body"`
+		TotalCost string `json:"total_cost_text"`
+		OfferID   string `json:"offer_id"`
+	}{dc.TemplateID, dc.TemplateVersion, locale, string(o.FaceValue.Currency()),
+		o.FaceValue.Amount(), o.Fee.Amount(), o.Disbursed.Amount(), o.Repayment.Amount(),
+		body, totalCost, o.OfferID})
+	sum := sha256.Sum256(canonical)
+	return entity.DisclosureSnapshot{
+		DisclosureSnapshotID:      platform.NewID("dsc"),
+		TelcoID:                   o.TelcoID,
+		ProgrammeID:               o.ProgrammeID,
+		OfferID:                   o.OfferID,
+		TemplateID:                dc.TemplateID,
+		TemplateVersion:           dc.TemplateVersion,
+		Locale:                    locale,
+		DisclosureConfigVersionID: cfgVersionID,
+		Currency:                  o.FaceValue.Currency(),
+		FaceValue:                 o.FaceValue,
+		Fee:                       o.Fee,
+		Disbursed:                 o.Disbursed,
+		Repayment:                 o.Repayment,
+		RenderedBody:              body,
+		TotalCostText:             totalCost,
+		ContentHash:               hex.EncodeToString(sum[:]),
+		IssuedAt:                  now,
+		ExpiresAt:                 o.ExpiresAt, // short-lived: tied to offer validity
+	}
+}
+
+// loadDisclosureCfg reads the ACTIVE disclosure.policy for a programme. Absent
+// or unparseable = fail-closed (ErrDisclosureUnavailable): a programme that
+// cannot disclose its terms must not serve or confirm an advance.
+func (s *Service) loadDisclosureCfg(ctx context.Context, programmeID string, now time.Time) (disclosureCfg, string, error) {
+	cfgV, err := s.Config.ActiveAt(ctx, "disclosure.policy", "programme:"+programmeID, now)
+	if err != nil {
+		return disclosureCfg{}, "", fmt.Errorf("%w: %v", ErrDisclosureUnavailable, err)
+	}
+	var dc disclosureCfg
+	if err := json.Unmarshal(cfgV.Content, &dc); err != nil {
+		return disclosureCfg{}, "", fmt.Errorf("%w: parse: %v", ErrDisclosureUnavailable, err)
+	}
+	return dc, cfgV.ConfigVersionID, nil
 }
 
 // checkOverlays applies the real-time risk overlays (V2-SCR-015) at the given
@@ -188,7 +306,7 @@ func requireValidDecision(dec entity.DecisionSnapshot, now time.Time) error {
 // GetOffers returns the subscriber's valid offers, generating the ladder from
 // the governed product config when none exist (V2-OFR-009 reuse). Every value
 // on an offer derives from config + the pinned decision — nothing hardcoded.
-func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string) ([]entity.Offer, error) {
+func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string) ([]OfferView, error) {
 	now := time.Now().UTC()
 	cfgV, err := s.Config.ActiveAt(ctx, "product.airtime", "programme:"+programmeID, now)
 	if err != nil {
@@ -198,8 +316,15 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 	if err := json.Unmarshal(cfgV.Content, &pc); err != nil {
 		return nil, fmt.Errorf("product config parse: %w", err)
 	}
+	// R-P0-7: the disclosure policy is required to serve an offer — a programme
+	// that cannot disclose its terms must not present one (fail-closed).
+	dc, dcVer, err := s.loadDisclosureCfg(ctx, programmeID, now)
+	if err != nil {
+		return nil, err
+	}
+	locale := dc.DefaultLocale
 
-	var out []entity.Offer
+	var out []OfferView
 	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		// M3d: a suspended programme serves NOTHING (guardrail tripped or
 		// operator action) — fail closed at the first touch.
@@ -231,7 +356,16 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 			return err
 		}
 		if len(existing) > 0 {
-			out = existing
+			// Re-serve: the disclosure snapshot minted with each offer is the
+			// canonical record; load it so the channel re-renders exactly what
+			// was first presented (never a fresh reconstruction).
+			for _, o := range existing {
+				snap, err := s.disclosures.GetByOffer(ctx, tx, o.OfferID)
+				if err != nil {
+					return err
+				}
+				out = append(out, OfferView{Offer: o, Disclosure: snap})
+			}
 			return nil
 		}
 		dec, err := s.decisions.GetCurrent(ctx, tx, sub.SubscriberAccountID)
@@ -252,8 +386,14 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 			if err := s.offers.Insert(ctx, tx, o); err != nil {
 				return err
 			}
+			// R-P0-7: mint the disclosure snapshot in the SAME tx as the offer,
+			// so an offer never exists without the exact terms presented for it.
+			snap := buildDisclosureSnapshot(dc, dcVer, locale, o, now)
+			if err := s.disclosures.Insert(ctx, tx, snap); err != nil {
+				return err
+			}
+			out = append(out, OfferView{Offer: o, Disclosure: snap})
 		}
-		out = built
 		return nil
 	})
 	return out, err
@@ -320,12 +460,22 @@ func buildLadder(sub entity.SubscriberAccount, dec entity.DecisionSnapshot, prog
 }
 
 // ConfirmCmd is one customer confirmation (channel-idempotent via IdemKey).
+// R-P0-7: DisclosureRef echoes the disclosure snapshot the customer was shown,
+// and Channel/SessionID/AcceptedAt are the acceptance evidence (channel + the
+// telco-supplied session and acceptance timestamp — DD-06). TelcoEvidence is
+// the optional telco acceptance signature.
 type ConfirmCmd struct {
 	ProgrammeID   string
 	OfferID       string
 	MSISDNToken   string
 	IdemKey       string
 	CorrelationID string
+
+	DisclosureRef string
+	Channel       string
+	SessionID     string
+	AcceptedAt    time.Time
+	TelcoEvidence json.RawMessage
 }
 
 // ConfirmResult reports the (possibly replayed) advance.
@@ -339,12 +489,33 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 	if cmd.IdemKey == "" || cmd.CorrelationID == "" {
 		return ConfirmResult{}, fmt.Errorf("idempotency key and correlation id are required")
 	}
+	// R-P0-7: consent/channel disclosure evidence is mandatory. Cheap presence
+	// checks fail fast, before any DB work, so a malformed confirm never claims
+	// an idempotency slot. A confirm without proof of what was disclosed and
+	// that it was accepted through a real channel session is refused.
+	if cmd.DisclosureRef == "" {
+		return ConfirmResult{}, ErrDisclosureRequired
+	}
+	if cmd.Channel == "" || cmd.SessionID == "" || cmd.AcceptedAt.IsZero() {
+		return ConfirmResult{}, ErrAcceptanceEvidenceMissing
+	}
 
 	telcoID, err := platform.TenantFrom(ctx)
 	if err != nil {
 		return ConfirmResult{}, err
 	}
 	reqHash := confirmRequestHash(cmd)
+
+	// The channel must be one the programme's disclosure policy permits — this
+	// de-hardcodes the previously literal "USSD" and is governed config.
+	now0 := time.Now().UTC()
+	dc, _, err := s.loadDisclosureCfg(ctx, cmd.ProgrammeID, now0)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+	if !dc.channelAllowed(cmd.Channel) {
+		return ConfirmResult{}, fmt.Errorf("%w: %q", ErrChannelNotAllowed, cmd.Channel)
+	}
 
 	// ---- tx1: accept + reserve + record attempt ---------------------------
 	var adv entity.Advance
@@ -442,6 +613,28 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 			return err
 		}
 
+		// R-P0-7: bind the confirm to the exact disclosure the customer was
+		// shown. The client echoes DisclosureRef; we load the canonical snapshot
+		// for this offer (server truth) and require them to match — a fabricated
+		// or foreign reference cannot resolve to this offer. Acceptance must have
+		// happened inside the disclosure's validity window (issued..expires, with
+		// modest skew), so a replayed or backdated acceptance is refused.
+		snap, err := s.disclosures.GetByOffer(ctx, tx, offer.OfferID)
+		if errors.Is(err, repo.ErrNotFound) {
+			return fmt.Errorf("%w: no disclosure on record for offer", ErrDisclosureMismatch)
+		}
+		if err != nil {
+			return err
+		}
+		if snap.DisclosureSnapshotID != cmd.DisclosureRef {
+			return ErrDisclosureMismatch
+		}
+		if cmd.AcceptedAt.Before(snap.IssuedAt.Add(-acceptanceSkew)) ||
+			cmd.AcceptedAt.After(snap.ExpiresAt.Add(acceptanceSkew)) ||
+			cmd.AcceptedAt.After(now.Add(acceptanceSkew)) {
+			return ErrDisclosureExpired
+		}
+
 		// Create the advance FIRST, pool-less (0006): the one-active contest
 		// is decided at this INSERT, before any pool lock exists — a losing
 		// contender therefore never holds the pool row, which is what broke
@@ -495,30 +688,41 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 			return err
 		}
 
-		// Consent/disclosure evidence IN the confirm transaction (V2-REG-001):
-		// an advance cannot exist without the exact terms the customer
-		// accepted. The record is what was DISCLOSED — offer-pinned amounts,
-		// fee model and decision provenance — hashed for tamper evidence.
+		// Consent/disclosure evidence IN the confirm transaction (V2-REG-001,
+		// R-P0-7): an advance cannot exist without proof of WHAT was disclosed
+		// and THAT it was accepted through a real channel session. The record
+		// binds the disclosure snapshot the customer was shown (its exact
+		// rendered text, template, version, locale and content hash) plus the
+		// channel/session/acceptance evidence — no server-reconstructed terms,
+		// no hardcoded channel.
 		terms, err := json.Marshal(map[string]any{
-			"offer_id":             offer.OfferID,
-			"face_value_minor":     offer.FaceValue.Amount(),
-			"fee_minor":            offer.Fee.Amount(),
-			"disbursed_minor":      offer.Disbursed.Amount(),
-			"repayment_minor":      offer.Repayment.Amount(),
-			"currency":             string(offer.FaceValue.Currency()),
-			"fee_model":            string(offer.FeeModel),
-			"decision_snapshot_id": offer.DecisionSnapshotID,
-			"product_config":       offer.ProductConfigVersionID,
+			"disclosure_snapshot_id": snap.DisclosureSnapshotID,
+			"template_id":            snap.TemplateID,
+			"template_version":       snap.TemplateVersion,
+			"locale":                 snap.Locale,
+			"rendered_body":          snap.RenderedBody,
+			"total_cost_text":        snap.TotalCostText,
+			"face_value_minor":       snap.FaceValue.Amount(),
+			"fee_minor":              snap.Fee.Amount(),
+			"disbursed_minor":        snap.Disbursed.Amount(),
+			"repayment_minor":        snap.Repayment.Amount(),
+			"currency":               string(snap.Currency),
+			"decision_snapshot_id":   offer.DecisionSnapshotID,
+			"product_config":         offer.ProductConfigVersionID,
 		})
 		if err != nil {
 			return err
 		}
-		termsHash := sha256.Sum256(terms)
 		if err := s.consents.Insert(ctx, tx, repo.Consent{
 			ConsentID: platform.NewID("cns"), TelcoID: sub.TelcoID,
 			AdvanceID: adv.AdvanceID, SubscriberAccountID: sub.SubscriberAccountID,
-			DisclosedTerms: terms, ContentHash: hex.EncodeToString(termsHash[:]),
-			Channel: "USSD",
+			DisclosureSnapshotID: snap.DisclosureSnapshotID,
+			DisclosedTerms:       terms,
+			ContentHash:          snap.ContentHash, // the hash of what we disclosed
+			Channel:              cmd.Channel,
+			SessionID:            cmd.SessionID,
+			AcceptedAt:           cmd.AcceptedAt,
+			TelcoEvidence:        cmd.TelcoEvidence,
 		}); err != nil {
 			return err
 		}

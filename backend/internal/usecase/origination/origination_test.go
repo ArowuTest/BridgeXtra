@@ -94,7 +94,7 @@ func tenantCtx() context.Context {
 	return platform.WithTenant(context.Background(), "SIM_NG")
 }
 
-func (f *fixture) offersFor(t *testing.T, token string) []entity.Offer {
+func (f *fixture) offersFor(t *testing.T, token string) []origination.OfferView {
 	t.Helper()
 	offers, err := f.svc.GetOffers(tenantCtx(), "prg_sim_airtime01", token)
 	if err != nil {
@@ -116,20 +116,29 @@ func (f *fixture) poolState(t *testing.T) (reserved, utilised int64) {
 	return
 }
 
+// acceptFor builds a confirm command carrying the R-P0-7 acceptance evidence
+// for a presented offer: the disclosure snapshot reference the customer was
+// shown, plus channel/session/accepted-at — exactly as the real channel does.
+func acceptFor(ov origination.OfferView, token, idem, corr string) origination.ConfirmCmd {
+	return origination.ConfirmCmd{
+		ProgrammeID: ov.Offer.ProgrammeID, OfferID: ov.Offer.OfferID, MSISDNToken: token,
+		IdemKey: idem, CorrelationID: corr,
+		DisclosureRef: ov.Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-" + idem, AcceptedAt: time.Now().UTC(),
+	}
+}
+
 func TestWalkingSkeleton_SuccessPath_ActiveBalancedLedgerCorrelated(t *testing.T) {
 	f := newFixture(t, "orig_success", 0, 2_000)
 	offers := f.offersFor(t, "tok_sim_0001") // seeded subscriber, ₦500 cap
 
 	// Ladder derives from config: 5000..50000 kobo, 10% upfront fee.
 	first := offers[0]
-	if first.FaceValue.Amount() != 5_000 || first.Fee.Amount() != 500 || first.Disbursed.Amount() != 4_500 {
-		t.Fatalf("offer economics from config wrong: %+v", first)
+	if first.Offer.FaceValue.Amount() != 5_000 || first.Offer.Fee.Amount() != 500 || first.Offer.Disbursed.Amount() != 4_500 {
+		t.Fatalf("offer economics from config wrong: %+v", first.Offer)
 	}
 
-	res, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: first.OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "confirm-1", CorrelationID: "cor-e2e-1",
-	})
+	res, err := f.svc.Confirm(tenantCtx(), acceptFor(first, "tok_sim_0001", "confirm-1", "cor-e2e-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,10 +181,7 @@ func TestEDG001_DuplicateConfirm_ReplaysOriginal_OneAdvance(t *testing.T) {
 	f := newFixture(t, "orig_edg001", 0, 2_000)
 	offers := f.offersFor(t, "tok_sim_0001")
 
-	cmd := origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "dup-key", CorrelationID: "cor-dup",
-	}
+	cmd := acceptFor(offers[0], "tok_sim_0001", "dup-key", "cor-dup")
 	r1, err := f.svc.Confirm(tenantCtx(), cmd)
 	if err != nil {
 		t.Fatal(err)
@@ -214,13 +220,9 @@ func TestEDG002_ConcurrentConfirms_ExactlyOneOpenAdvance(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-				ProgrammeID:   "prg_sim_airtime01",
-				OfferID:       offers[i%len(offers)].OfferID,
-				MSISDNToken:   "tok_sim_0001",
-				IdemKey:       fmt.Sprintf("conc-%d", i),
-				CorrelationID: fmt.Sprintf("cor-conc-%d", i),
-			})
+			_, err := f.svc.Confirm(tenantCtx(), acceptFor(
+				offers[i%len(offers)], "tok_sim_0001",
+				fmt.Sprintf("conc-%d", i), fmt.Sprintf("cor-conc-%d", i)))
 			results <- err
 		}(i)
 	}
@@ -261,10 +263,7 @@ func TestFAIL_ReleasesReservation_NoJournal(t *testing.T) {
 	f.seedSubscriber(t, "sub_fail_1", "tok_FAIL_20", 50_000)
 	offers := f.offersFor(t, "tok_FAIL_20")
 
-	res, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_FAIL_20",
-		IdemKey: "fail-1", CorrelationID: "cor-fail",
-	})
+	res, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_FAIL_20", "fail-1", "cor-fail"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,10 +288,7 @@ func TestEDG005_TimeoutAfterSuccess_UnknownNoJournalReservationHeld(t *testing.T
 	f.seedSubscriber(t, "sub_to_1", "tok_TIMEOUT_20", 50_000)
 	offers := f.offersFor(t, "tok_TIMEOUT_20")
 
-	res, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_TIMEOUT_20",
-		IdemKey: "to-1", CorrelationID: "cor-to",
-	})
+	res, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_TIMEOUT_20", "to-1", "cor-to"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,13 +325,10 @@ func TestEDG011_ExpiredOffer_SafeRejection(t *testing.T) {
 	// Force-expire the offer (admin surgery simulating menu-to-confirm delay).
 	if _, err := f.db.Admin.Exec(context.Background(),
 		`UPDATE offers SET expires_at = now() - interval '1 minute' WHERE offer_id = $1`,
-		offers[0].OfferID); err != nil {
+		offers[0].Offer.OfferID); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "exp-1", CorrelationID: "cor-exp",
-	})
+	_, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_sim_0001", "exp-1", "cor-exp"))
 	if !errors.Is(err, origination.ErrOfferExpired) {
 		t.Fatalf("want ErrOfferExpired, got %v", err)
 	}
@@ -382,7 +375,7 @@ func TestOfferReuse_SecondEnquiryReturnsSameLadder(t *testing.T) {
 	f := newFixture(t, "orig_reuse", 0, 2_000)
 	first := f.offersFor(t, "tok_sim_0001")
 	second := f.offersFor(t, "tok_sim_0001")
-	if len(first) != len(second) || first[0].OfferID != second[0].OfferID {
+	if len(first) != len(second) || first[0].Offer.OfferID != second[0].Offer.OfferID {
 		t.Fatalf("valid offers must be reused (V2-OFR-009): %d vs %d", len(first), len(second))
 	}
 }

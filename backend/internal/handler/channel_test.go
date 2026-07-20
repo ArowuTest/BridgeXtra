@@ -111,8 +111,10 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 		t.Fatalf("offers: %d %s", resp.StatusCode, body)
 	}
 	var offers []struct {
-		OfferID   string `json:"offer_id"`
-		FaceValue struct {
+		OfferID       string `json:"offer_id"`
+		DisclosureRef string `json:"disclosure_ref"`
+		DisclosureTxt string `json:"disclosure_text"`
+		FaceValue     struct {
 			AmountMinor int64  `json:"amount_minor"`
 			Currency    string `json:"currency"`
 		} `json:"face_value"`
@@ -123,10 +125,18 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 	if len(offers) == 0 || offers[0].FaceValue.AmountMinor != 5_000 || offers[0].FaceValue.Currency != "NGN" {
 		t.Fatalf("offer ladder wrong: %s", body)
 	}
+	// R-P0-7: the channel must receive a disclosure to render and a reference
+	// to echo back.
+	if offers[0].DisclosureRef == "" || offers[0].DisclosureTxt == "" {
+		t.Fatalf("offers must carry disclosure evidence: %s", body)
+	}
 
-	// 2. Confirm with correlation — 201 ACTIVE.
-	confirmBody := map[string]string{
+	// 2. Confirm with correlation — 201 ACTIVE. The channel echoes the
+	// disclosure reference and supplies channel/session/acceptance evidence.
+	confirmBody := map[string]any{
 		"programme_id": "prg_sim_airtime01", "offer_id": offers[0].OfferID, "msisdn_token": "tok_sim_0001",
+		"disclosure_ref": offers[0].DisclosureRef, "channel": "USSD",
+		"session_id": "wire-sess-1", "accepted_at": time.Now().UTC().Format(time.RFC3339),
 	}
 	resp, body = f.do(t, http.MethodPost, "/v1/advances", map[string]string{
 		"Idempotency-Key": "wire-idem-1", "X-Correlation-Id": "cor-wire-1",
@@ -284,7 +294,8 @@ func TestChannel_UnknownFulfilment_202Processing(t *testing.T) {
 		t.Fatalf("offers: %d", resp.StatusCode)
 	}
 	var offers []struct {
-		OfferID string `json:"offer_id"`
+		OfferID       string `json:"offer_id"`
+		DisclosureRef string `json:"disclosure_ref"`
 	}
 	if err := json.Unmarshal(body, &offers); err != nil {
 		t.Fatal(err)
@@ -292,8 +303,10 @@ func TestChannel_UnknownFulfilment_202Processing(t *testing.T) {
 
 	resp, body = f.do(t, http.MethodPost, "/v1/advances", map[string]string{
 		"Idempotency-Key": "wire-to-1",
-	}, map[string]string{
+	}, map[string]any{
 		"programme_id": "prg_sim_airtime01", "offer_id": offers[0].OfferID, "msisdn_token": "tok_TIMEOUT_w1",
+		"disclosure_ref": offers[0].DisclosureRef, "channel": "USSD",
+		"session_id": "wire-sess-to", "accepted_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	// V2-ADV-016: ambiguity is a safe 202 PROCESSING with a status route —
 	// never an exposed UNKNOWN, never an invitation to retry.
@@ -320,7 +333,8 @@ func TestChannel_ExpiredOffer_409StableCode(t *testing.T) {
 		t.Fatal("offers")
 	}
 	var offers []struct {
-		OfferID string `json:"offer_id"`
+		OfferID       string `json:"offer_id"`
+		DisclosureRef string `json:"disclosure_ref"`
 	}
 	if err := json.Unmarshal(body, &offers); err != nil {
 		t.Fatal(err)
@@ -331,8 +345,10 @@ func TestChannel_ExpiredOffer_409StableCode(t *testing.T) {
 	}
 	resp, body = f.do(t, http.MethodPost, "/v1/advances", map[string]string{
 		"Idempotency-Key": "wire-exp-1",
-	}, map[string]string{
+	}, map[string]any{
 		"programme_id": "prg_sim_airtime01", "offer_id": offers[0].OfferID, "msisdn_token": "tok_sim_0001",
+		"disclosure_ref": offers[0].DisclosureRef, "channel": "USSD",
+		"session_id": "wire-sess-exp", "accepted_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if resp.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte("OFFER_EXPIRED")) {
 		t.Fatalf("expired offer must be 409 OFFER_EXPIRED: %d %s", resp.StatusCode, body)

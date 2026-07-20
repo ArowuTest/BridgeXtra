@@ -190,6 +190,30 @@ type Offer struct {
 	CreatedAt              time.Time
 }
 
+// DisclosureSnapshot is the exact disclosure presented for one offer (R-P0-7),
+// minted at menu generation and referenced back at confirm. Append-only; its
+// integrity is the server-computed ContentHash. 1:1 with Offer.
+type DisclosureSnapshot struct {
+	DisclosureSnapshotID      string
+	TelcoID                   string
+	ProgrammeID               string
+	OfferID                   string
+	TemplateID                string
+	TemplateVersion           string
+	Locale                    string
+	DisclosureConfigVersionID string
+	Currency                  Currency
+	FaceValue                 Money
+	Fee                       Money
+	Disbursed                 Money
+	Repayment                 Money
+	RenderedBody              string
+	TotalCostText             string
+	ContentHash               string
+	IssuedAt                  time.Time
+	ExpiresAt                 time.Time
+}
+
 type Advance struct {
 	AdvanceID           string
 	TelcoID             string

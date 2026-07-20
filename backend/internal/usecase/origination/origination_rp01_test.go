@@ -33,18 +33,12 @@ func TestRP01_SameKeyDifferentOffer_DivergentDuplicate(t *testing.T) {
 	if len(offers) < 2 {
 		t.Fatal("need >=2 offers")
 	}
-	r1, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "rp01-k1", CorrelationID: "cor-1",
-	})
+	r1, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_sim_0001", "rp01-k1", "cor-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// SAME key, DIFFERENT offer.
-	_, err = f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[1].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "rp01-k1", CorrelationID: "cor-2",
-	})
+	_, err = f.svc.Confirm(tenantCtx(), acceptFor(offers[1], "tok_sim_0001", "rp01-k1", "cor-2"))
 	if !errors.Is(err, origination.ErrDivergentDuplicate) {
 		t.Fatalf("same key + different offer must be a divergent duplicate, got %v", err)
 	}
@@ -63,10 +57,7 @@ func TestRP01_SameKeyDifferentOffer_DivergentDuplicate(t *testing.T) {
 		t.Fatalf("divergent duplicate must record a security audit, got %d", audits)
 	}
 	// A later SAME-body replay of the ORIGINAL request still works.
-	r2, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "rp01-k1", CorrelationID: "cor-3",
-	})
+	r2, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_sim_0001", "rp01-k1", "cor-3"))
 	if err != nil || !r2.Replayed || r2.Advance.AdvanceID != r1.Advance.AdvanceID {
 		t.Fatalf("same-request replay must still return the original advance: %+v %v", r2, err)
 	}
@@ -80,16 +71,10 @@ func TestRP01_SameKeyDifferentToken_DivergentDuplicate(t *testing.T) {
 	offersA := f.offersFor(t, "tok_sim_0001")
 	offersB := f.offersFor(t, "tok_rp01_b")
 
-	if _, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offersA[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "rp01-shared", CorrelationID: "cor-a",
-	}); err != nil {
+	if _, err := f.svc.Confirm(tenantCtx(), acceptFor(offersA[0], "tok_sim_0001", "rp01-shared", "cor-a")); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offersB[0].OfferID, MSISDNToken: "tok_rp01_b",
-		IdemKey: "rp01-shared", CorrelationID: "cor-b",
-	})
+	_, err := f.svc.Confirm(tenantCtx(), acceptFor(offersB[0], "tok_rp01_b", "rp01-shared", "cor-b"))
 	if !errors.Is(err, origination.ErrDivergentDuplicate) {
 		t.Fatalf("same key across subscribers must be a divergent duplicate, got %v", err)
 	}
@@ -108,10 +93,7 @@ func TestRP01_SameKeyDifferentToken_DivergentDuplicate(t *testing.T) {
 func TestRP01_ConcurrentSameKeySameBody_OneAdvanceBothReplay(t *testing.T) {
 	f := newFixture(t, "rp01_cc_same", 0, 2_000)
 	offers := f.offersFor(t, "tok_sim_0001")
-	cmd := origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "rp01-cc", CorrelationID: "cor-cc",
-	}
+	cmd := acceptFor(offers[0], "tok_sim_0001", "rp01-cc", "cor-cc")
 	const n = 6
 	var wg sync.WaitGroup
 	ids := make([]string, n)
@@ -164,10 +146,7 @@ func TestRP01_ConcurrentSameKeyDifferentBody_DivergentRefused(t *testing.T) {
 			defer wg.Done()
 			// Half use offer0, half offer1 — same key for all.
 			off := offers[i%2]
-			r, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-				ProgrammeID: "prg_sim_airtime01", OfferID: off.OfferID, MSISDNToken: "tok_sim_0001",
-				IdemKey: "rp01-ccdiv", CorrelationID: "cor",
-			})
+			r, err := f.svc.Confirm(tenantCtx(), acceptFor(off, "tok_sim_0001", "rp01-ccdiv", "cor"))
 			results[i].err = err
 			if err == nil {
 				results[i].id = r.Advance.AdvanceID
@@ -210,10 +189,7 @@ func TestRP01_ConcurrentSameKeyDifferentBody_DivergentRefused(t *testing.T) {
 func TestRP01_CrashAfterCommit_RetryReplaysNotDoubleLends(t *testing.T) {
 	f := newFixture(t, "rp01_crash", 0, 2_000)
 	offers := f.offersFor(t, "tok_sim_0001")
-	cmd := origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "rp01-crash", CorrelationID: "cor",
-	}
+	cmd := acceptFor(offers[0], "tok_sim_0001", "rp01-crash", "cor")
 	r1, err := f.svc.Confirm(tenantCtx(), cmd)
 	if err != nil {
 		t.Fatal(err)

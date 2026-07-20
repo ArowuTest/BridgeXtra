@@ -192,6 +192,72 @@ func (Offers) SetState(ctx context.Context, tx pgx.Tx, offerID string, from, to 
 }
 
 // ---------------------------------------------------------------------------
+// Disclosure snapshots (R-P0-7): the exact disclosure presented for one offer,
+// minted in the same tx as the offer, referenced back at confirm. Append-only.
+// ---------------------------------------------------------------------------
+
+type DisclosureSnapshots struct{}
+
+func (DisclosureSnapshots) Insert(ctx context.Context, tx pgx.Tx, d entity.DisclosureSnapshot) error {
+	_, err := tx.Exec(ctx, `
+		INSERT INTO disclosure_snapshots
+		  (disclosure_snapshot_id, telco_id, programme_id, offer_id, template_id,
+		   template_version, locale, disclosure_config_version_id, currency,
+		   face_value_minor, fee_minor, disbursed_minor, repayment_minor,
+		   rendered_body, total_cost_text, content_hash, expires_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+		d.DisclosureSnapshotID, d.TelcoID, d.ProgrammeID, d.OfferID, d.TemplateID,
+		d.TemplateVersion, d.Locale, d.DisclosureConfigVersionID, string(d.Currency),
+		d.FaceValue.Amount(), d.Fee.Amount(), d.Disbursed.Amount(), d.Repayment.Amount(),
+		d.RenderedBody, d.TotalCostText, d.ContentHash, d.ExpiresAt)
+	if err != nil {
+		return fmt.Errorf("insert disclosure snapshot: %w", err)
+	}
+	return nil
+}
+
+const disclosureCols = `disclosure_snapshot_id, telco_id, programme_id, offer_id, template_id,
+	template_version, locale, disclosure_config_version_id, currency,
+	face_value_minor, fee_minor, disbursed_minor, repayment_minor,
+	rendered_body, total_cost_text, content_hash, issued_at, expires_at`
+
+func disclosureScan(row pgx.Row) (entity.DisclosureSnapshot, error) {
+	var d entity.DisclosureSnapshot
+	var face, fee, disb, rep int64
+	var cur string
+	err := row.Scan(&d.DisclosureSnapshotID, &d.TelcoID, &d.ProgrammeID, &d.OfferID, &d.TemplateID,
+		&d.TemplateVersion, &d.Locale, &d.DisclosureConfigVersionID, &cur,
+		&face, &fee, &disb, &rep, &d.RenderedBody, &d.TotalCostText, &d.ContentHash,
+		&d.IssuedAt, &d.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return d, ErrNotFound
+	}
+	if err != nil {
+		return d, err
+	}
+	c := entity.Currency(cur)
+	d.Currency = c
+	if d.FaceValue, err = entity.NewMoney(face, c); err != nil {
+		return d, err
+	}
+	if d.Fee, err = entity.NewMoney(fee, c); err != nil {
+		return d, err
+	}
+	if d.Disbursed, err = entity.NewMoney(disb, c); err != nil {
+		return d, err
+	}
+	d.Repayment, err = entity.NewMoney(rep, c)
+	return d, err
+}
+
+// GetByOffer returns the canonical disclosure snapshot for an offer (1:1). This
+// is the server truth the client's echoed reference is checked against.
+func (DisclosureSnapshots) GetByOffer(ctx context.Context, tx pgx.Tx, offerID string) (entity.DisclosureSnapshot, error) {
+	return disclosureScan(tx.QueryRow(ctx,
+		`SELECT `+disclosureCols+` FROM disclosure_snapshots WHERE offer_id = $1`, offerID))
+}
+
+// ---------------------------------------------------------------------------
 // Funding pools (V2-TRE-002: atomic conditional reservation — never
 // read-then-write)
 // ---------------------------------------------------------------------------

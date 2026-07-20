@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -41,10 +42,7 @@ func TestM2E_OverlayBlocksOfferAndConfirm(t *testing.T) {
 		t.Fatalf("flagged subscriber must be overlay-blocked at OFFER, got %v", err)
 	}
 	// CONFIRM checkpoint blocked — the money-moving moment.
-	_, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_ovl",
-		IdemKey: "ovl-confirm-1", CorrelationID: "cor-ovl-1",
-	})
+	_, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_ovl", "ovl-confirm-1", "cor-ovl-1"))
 	if !errors.Is(err, origination.ErrOverlayBlocked) {
 		t.Fatalf("flagged subscriber must be overlay-blocked at CONFIRM, got %v", err)
 	}
@@ -54,10 +52,7 @@ func TestM2E_OverlayBlocksOfferAndConfirm(t *testing.T) {
 		UPDATE subscriber_flags SET effective_to = now() WHERE subscriber_account_id='sub_ovl'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_ovl",
-		IdemKey: "ovl-confirm-2", CorrelationID: "cor-ovl-2",
-	}); err != nil {
+	if _, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_ovl", "ovl-confirm-2", "cor-ovl-2")); err != nil {
 		t.Fatalf("cleared flag must restore service: %v", err)
 	}
 }
@@ -96,10 +91,7 @@ func TestM2E_EDG014_ExpiredDecision_NoOfferNoConfirm(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_stale",
-		IdemKey: "stale-confirm-1", CorrelationID: "cor-stale-1",
-	})
+	_, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_stale", "stale-confirm-1", "cor-stale-1"))
 	if !errors.Is(err, origination.ErrDecisionUnavailable) {
 		t.Fatalf("EDG-014: confirming against an expired decision must refuse, got %v", err)
 	}
@@ -117,42 +109,49 @@ func TestM2E_EDG014_ExpiredDecision_NoOfferNoConfirm(t *testing.T) {
 func TestM2E_ConsentEvidence_WrittenInConfirmTx(t *testing.T) {
 	f := newFixture(t, "m2e_consent", 0, 2_000)
 	offers := f.offersFor(t, "tok_sim_0001")
+	ov := offers[0]
 
-	res, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "cns-confirm-1", CorrelationID: "cor-cns-1",
-	})
+	res, err := f.svc.Confirm(tenantCtx(), acceptFor(ov, "tok_sim_0001", "cns-confirm-1", "cor-cns-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
+	// R-P0-7: the consent record binds the disclosure snapshot the customer was
+	// shown (not a server reconstruction) plus the channel/session/acceptance
+	// evidence, and its content hash equals the snapshot's — proving the terms
+	// accepted are the terms disclosed.
 	var terms []byte
-	var hash string
+	var hash, snapID, channel, sessionID string
+	var acceptedAt time.Time
 	if err := f.db.Admin.QueryRow(context.Background(), `
-		SELECT disclosed_terms, content_hash FROM consents WHERE advance_id = $1`,
-		res.Advance.AdvanceID).Scan(&terms, &hash); err != nil {
+		SELECT disclosed_terms, content_hash, disclosure_snapshot_id, channel, session_id, accepted_at
+		FROM consents WHERE advance_id = $1`,
+		res.Advance.AdvanceID).Scan(&terms, &hash, &snapID, &channel, &sessionID, &acceptedAt); err != nil {
 		t.Fatalf("V2-REG-001: an advance must carry consent evidence: %v", err)
+	}
+	if snapID != ov.Disclosure.DisclosureSnapshotID {
+		t.Fatalf("consent must bind the disclosure the customer was shown: %s vs %s", snapID, ov.Disclosure.DisclosureSnapshotID)
+	}
+	if hash != ov.Disclosure.ContentHash {
+		t.Fatalf("consent content hash must equal the disclosure snapshot hash: %s vs %s", hash, ov.Disclosure.ContentHash)
+	}
+	if channel != "USSD" || sessionID != "sess-cns-confirm-1" || acceptedAt.IsZero() {
+		t.Fatalf("consent must record real channel/session/acceptance evidence: %s/%s/%v", channel, sessionID, acceptedAt)
 	}
 	var tv struct {
 		FaceValueMinor int64  `json:"face_value_minor"`
-		FeeMinor       int64  `json:"fee_minor"`
-		FeeModel       string `json:"fee_model"`
+		RepaymentMinor int64  `json:"repayment_minor"`
+		RenderedBody   string `json:"rendered_body"`
 	}
 	if err := json.Unmarshal(terms, &tv); err != nil {
 		t.Fatal(err)
 	}
-	if tv.FaceValueMinor != offers[0].FaceValue.Amount() || tv.FeeMinor != offers[0].Fee.Amount() || tv.FeeModel == "" {
-		t.Fatalf("consent must record the EXACT disclosed terms: %s", terms)
-	}
-	if hash == "" {
-		t.Fatal("consent content hash required (tamper evidence)")
+	if tv.FaceValueMinor != ov.Offer.FaceValue.Amount() || tv.RepaymentMinor != ov.Offer.Repayment.Amount() || tv.RenderedBody == "" {
+		t.Fatalf("consent must record the EXACT disclosed terms + rendered text: %s", terms)
 	}
 
 	// Replay does not duplicate consent (UNIQUE(advance_id)).
-	if _, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "cns-confirm-1", CorrelationID: "cor-cns-1",
-	}); err != nil {
+	if _, err := f.svc.Confirm(tenantCtx(), acceptFor(ov, "tok_sim_0001", "cns-confirm-1", "cor-cns-1")); err != nil {
 		t.Fatal(err)
 	}
 	var consents int
@@ -168,10 +167,7 @@ func TestM2E_ConsentEvidence_WrittenInConfirmTx(t *testing.T) {
 func TestM2E_NotificationEvidence_SentViaCanonicalSMS(t *testing.T) {
 	f := newFixture(t, "m2e_notify", 0, 2_000)
 	offers := f.offersFor(t, "tok_sim_0001")
-	res, err := f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: "tok_sim_0001",
-		IdemKey: "ntf-confirm-1", CorrelationID: "cor-ntf-1",
-	})
+	res, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_sim_0001", "ntf-confirm-1", "cor-ntf-1"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -48,8 +48,10 @@ func (f *fixture) confirmFor(t *testing.T, token, idem string) (origination.Conf
 		return origination.ConfirmResult{}, err
 	}
 	return f.svc.Confirm(tenantCtx(), origination.ConfirmCmd{
-		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].OfferID, MSISDNToken: token,
+		ProgrammeID: "prg_sim_airtime01", OfferID: offers[0].Offer.OfferID, MSISDNToken: token,
 		IdemKey: idem, CorrelationID: "cor-" + idem,
+		DisclosureRef: offers[0].Disclosure.DisclosureSnapshotID,
+		Channel:       "USSD", SessionID: "sess-" + idem, AcceptedAt: time.Now().UTC(),
 	})
 }
 

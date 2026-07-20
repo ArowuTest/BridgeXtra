@@ -1232,11 +1232,31 @@ paths:
           application/json:
             schema:
               type: object
-              required: [programme_id, offer_id, msisdn_token]
+              required: [programme_id, offer_id, msisdn_token, disclosure_ref, channel, session_id, accepted_at]
               properties:
                 programme_id: { type: string }
                 offer_id: { type: string }
                 msisdn_token: { type: string }
+                disclosure_ref:
+                  type: string
+                  description: >
+                    R-P0-7: the disclosure_ref from the offer, echoed back as
+                    proof of the exact terms the customer was shown. Must match
+                    the offer's disclosure snapshot or the confirm is refused.
+                channel:
+                  type: string
+                  description: The channel the disclosure was accepted through; must be one the programme's disclosure policy permits (de-hardcodes USSD).
+                session_id:
+                  type: string
+                  description: Telco-supplied channel session identifier (DD-06).
+                accepted_at:
+                  type: string
+                  format: date-time
+                  description: When the customer accepted; must fall within the disclosure's validity window.
+                telco_evidence:
+                  type: object
+                  nullable: true
+                  description: Optional telco-supplied acceptance signature/evidence (DD-06).
       responses:
         "201":
           description: Advance ACTIVE — value credited
@@ -1400,7 +1420,7 @@ components:
         currency: { type: string, minLength: 3, maxLength: 3, example: NGN }
     Offer:
       type: object
-      required: [offer_id, face_value, fee, disbursed, repayment, fee_model, expires_at]
+      required: [offer_id, face_value, fee, disbursed, repayment, fee_model, expires_at, disclosure_ref, disclosure_text, total_cost_text]
       properties:
         offer_id: { type: string }
         face_value: { $ref: "#/components/schemas/Money" }
@@ -1409,6 +1429,18 @@ components:
         repayment: { $ref: "#/components/schemas/Money" }
         fee_model: { type: string, enum: [DEDUCTED_UPFRONT, ADDED_TO_REPAYMENT] }
         expires_at: { type: string, format: date-time }
+        disclosure_ref:
+          type: string
+          description: >
+            R-P0-7: reference to the disclosure snapshot presented for this
+            offer. The channel MUST render disclosure_text and echo this ref
+            back at confirm as proof of what was shown.
+        disclosure_text: { type: string, description: The exact disclosure to render to the customer. }
+        total_cost_text: { type: string, description: The total-cost representation (what the customer will repay). }
+        disclosure_locale: { type: string }
+        template_id: { type: string }
+        template_version: { type: string }
+        disclosure_expires_at: { type: string, format: date-time }
     Advance:
       type: object
       description: Customer-safe advance view (V2-ADV-016 — internal ambiguity never exposed).
