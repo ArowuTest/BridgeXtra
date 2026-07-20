@@ -163,6 +163,10 @@ type Summary struct {
 	PeriodStart        time.Time
 	PeriodEnd          time.Time
 	NothingToReconcile bool
+	// Unchanged is set by ReconcileRecentPeriods when a re-swept window's telco
+	// source is byte-identical to its recorded run — nothing new arrived, so the
+	// prior run is left ACTIVE untouched (no supersession, no money-trail churn).
+	Unchanged bool
 }
 
 type toleranceCfg struct {
@@ -182,6 +186,11 @@ type toleranceCfg struct {
 	// window ends at now-lag, so records still in flight are not reconciled
 	// prematurely. 0 = no lag.
 	ReconLagSeconds int `json:"recon_lag_seconds"`
+	// RereconcileLookbackSeconds (R-P0-6 Slice D2, VR-50-F1): how far back the
+	// scheduled re-reconcile re-sweeps. A settled window that ended within this
+	// horizon is re-reconciled so a late-arriving telco credit is recovered
+	// rather than stranded as a missing-telco break. Required and positive.
+	RereconcileLookbackSeconds int `json:"rereconcile_lookback_seconds"`
 }
 
 // RunFulfilment reconciles the next incremental fulfilment window
@@ -230,6 +239,96 @@ func (s *Service) ReconcilePeriod(ctx context.Context, telcoID, programmeID stri
 	return s.reconcile(ctx, telcoID, programmeID, periodStart, periodEnd, telcoRecords, tol)
 }
 
+// ReconcileRecentPeriods re-reconciles every ACTIVE fulfilment window that
+// ended within the governed rereconcile_lookback_seconds — the scheduled
+// recovery path for late-arriving telco records (VR-50-F1 / REC-006).
+//
+// The incremental RunFulfilment advances the watermark past a window based on
+// the telco records present AT RUN TIME. A telco credit that lands AFTER its
+// window was reconciled is never revisited by future incremental runs (they
+// start at the advanced watermark), so it would be stranded forever as a
+// BREAK_MISSING_TELCO. This re-sweeps recent settled windows: a window whose
+// telco source is byte-identical to its recorded run is SKIPPED (nothing new
+// arrived — no supersession, no money-trail churn), and a window whose source
+// changed is re-reconciled, superseding the prior run so the stranded break
+// becomes a MATCHED. The completeness floor still guards each re-reconcile
+// inside reconcile(), so a shrunk/truncated feed for a window is REJECTED and
+// the good run kept. Returns one Summary per recent window (Unchanged=true for
+// the skipped ones).
+func (s *Service) ReconcileRecentPeriods(ctx context.Context, telcoID, programmeID string) ([]Summary, error) {
+	tol, telcoRecords, err := s.loadForRecon(ctx, telcoID, programmeID)
+	if err != nil {
+		return nil, err
+	}
+	horizon := time.Now().UTC().Add(-time.Duration(tol.RereconcileLookbackSeconds) * time.Second)
+
+	// Snapshot the recent ACTIVE windows up front. Each period_start is unique
+	// among ACTIVE runs (the partial unique index), and re-reconciling one
+	// supersedes only that period, so iterating the snapshot processes each
+	// window exactly once even as reconcile() writes successor runs.
+	type periodRow struct {
+		periodStart, periodEnd time.Time
+		sourceHash             string
+	}
+	var periods []periodRow
+	tctx := platform.WithTenant(ctx, telcoID)
+	if err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT period_start, period_end, source_hash
+			FROM recon_runs
+			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE'
+			  AND period_end >= $4
+			ORDER BY period_start`,
+			telcoID, programmeID, layerFulfilment, horizon)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var p periodRow
+			if err := rows.Scan(&p.periodStart, &p.periodEnd, &p.sourceHash); err != nil {
+				return err
+			}
+			periods = append(periods, p)
+		}
+		return rows.Err()
+	}); err != nil {
+		return nil, err
+	}
+
+	out := make([]Summary, 0, len(periods))
+	for _, p := range periods {
+		// Cheap gate: window the telco source to [periodStart, periodEnd) and
+		// hash it. If the manifest is identical to the recorded run, nothing new
+		// arrived for this window — skip it (no supersession, no trail churn).
+		windowed := make([]telcoTransaction, 0, len(telcoRecords))
+		for _, tr := range telcoRecords {
+			if !tr.CreditedAt.Before(p.periodStart) && tr.CreditedAt.Before(p.periodEnd) {
+				windowed = append(windowed, tr)
+			}
+		}
+		_, _, h, mErr := sourceManifest(windowed, tol.MaxAmountMinor)
+		if mErr != nil {
+			return out, mErr
+		}
+		if h == p.sourceHash {
+			out = append(out, Summary{PeriodStart: p.periodStart, PeriodEnd: p.periodEnd, Unchanged: true})
+			continue
+		}
+		sum, err := s.reconcile(ctx, telcoID, programmeID, p.periodStart, p.periodEnd, telcoRecords, tol)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, sum)
+	}
+	if len(periods) > 0 {
+		s.Log.Info("scheduled re-reconcile swept recent settled windows (VR-50-F1)",
+			"telco", telcoID, "programme", programmeID, "windows", len(periods),
+			"horizon", horizon.Format(time.RFC3339))
+	}
+	return out, nil
+}
+
 // loadForRecon reads the governed tolerance (all fail-closed floors enforced)
 // and fetches the telco-side records.
 func (s *Service) loadForRecon(ctx context.Context, telcoID, programmeID string) (toleranceCfg, []telcoTransaction, error) {
@@ -253,6 +352,12 @@ func (s *Service) loadForRecon(ctx context.Context, telcoID, programmeID string)
 	// R-P0-6 Slice C: the settling lag bounds the window end; negative is refused.
 	if tol.ReconLagSeconds < 0 {
 		return tol, nil, fmt.Errorf("recon.tolerance recon_lag_seconds must be >= 0")
+	}
+	// R-P0-6 Slice D2: a positive re-reconcile lookback is required — a zero/absent
+	// horizon leaves late-arriving telco credits stranded as missing-telco breaks
+	// (armed-but-dead), defeating the whole point of the scheduled re-reconcile.
+	if tol.RereconcileLookbackSeconds <= 0 {
+		return tol, nil, fmt.Errorf("recon.tolerance rereconcile_lookback_seconds must be > 0 — refusing (late arrivals would be stranded)")
 	}
 	recs, err := s.fetchTelcoRecords(ctx, telcoID)
 	if err != nil {

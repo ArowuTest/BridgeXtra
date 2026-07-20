@@ -55,16 +55,22 @@ turns the skeleton into a production framework in verifiable slices.
 
 - **Slice D — Data-quality + coverage + multi-layer.** Reviewer-accumulated
   scope (VR-48/49/50-F1), built as gated sub-slices:
-  - **D1 — EDG-006 contradictory status.** A key carrying BOTH a FAILED and a
-    SUCCESS telco record in the window is a data-quality anomaly — classify it
-    `BREAK_CONTRADICTORY_TELCO_STATUS`, never silently reconcile the SUCCESS as
-    clean. **← building now.**
-  - **D2 — VR-50-F1 late-arrival re-reconcile (REC-006).** The incremental
+  - **D1 — EDG-006 contradictory status. DONE (78385c1, VR-51 clean).** A key
+    carrying BOTH a FAILED and a SUCCESS telco record in the window is a
+    data-quality anomaly — classified `BREAK_CONTRADICTORY_TELCO_STATUS`, never
+    a silent MATCHED. mig 0038; Summary.Contradictory; recon_rp06d1_test.go.
+  - **D2 — VR-50-F1 late-arrival re-reconcile (REC-006). DONE.** The incremental
     watermark advances past a window based on the data present at run time; a
-    telco record that arrives AFTER its window was reconciled is never picked up
-    by future incremental runs. Add (a) a re-reconcile trigger — scheduled
-    re-reconcile of the last N settled periods — and (b) an adversarial test:
-    land a late record, prove a re-reconcile recovers it.
+    telco record that arrives AFTER its window was reconciled is stranded as a
+    missing-telco break. `ReconcileRecentPeriods` re-sweeps ACTIVE windows that
+    ended within the governed `rereconcile_lookback_seconds` (mig 0039, seeded 7d,
+    required positive): a window whose telco source is byte-identical is skipped
+    (no churn), one whose source changed is re-reconciled — recovering the late
+    credit as MATCHED while the completeness floor still guards each re-reconcile.
+    Wired into the `-recon` worker job (armed, not dead code). Adversarial test
+    recon_rp06d2_test.go proves incremental does NOT recover but the re-sweep does,
+    with the original break preserved in the superseded run; plus no-op-idempotence
+    and lookback-bound tests.
   - **D3 — completeness maker-checker override (VR-48).** A two-actor
     accept-anyway for a legitimately low-volume window that the completeness
     floor rejected, so a genuinely quiet period isn't stuck unreconciled.

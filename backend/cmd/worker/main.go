@@ -313,6 +313,29 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 			fmt.Printf("recon %s/%s run=%s matched=%d missing_platform=%d missing_telco=%d amount_mismatch=%d\n",
 				tc.TelcoID, p.ProgrammeID, sum.RunID, sum.Matched,
 				sum.MissingPlatform, sum.MissingTelco, sum.AmountMismatch)
+
+			// R-P0-6 Slice D2 (VR-50-F1): after the incremental run advances the
+			// watermark, re-sweep recent settled windows so a telco credit that
+			// arrived late (behind the watermark) is recovered instead of stranded
+			// as a missing-telco break. The re-swept windows are strictly earlier
+			// than the incremental window just reconciled, so their breaks are not
+			// double-counted; an unchanged window is skipped (no trail churn).
+			resweeps, err := svc.ReconcileRecentPeriods(ctx, tc.TelcoID, p.ProgrammeID)
+			if err != nil {
+				log.Error("recon re-sweep failed", "telco", tc.TelcoID, "programme", p.ProgrammeID, "err", err)
+				os.Exit(1)
+			}
+			for _, rs := range resweeps {
+				if rs.Unchanged {
+					continue
+				}
+				rsBreaks := rs.MissingPlatform + rs.MissingTelco + rs.AmountMismatch
+				totalBreaks += rsBreaks
+				fmt.Printf("recon-resweep %s/%s run=%s period=[%s,%s) matched=%d missing_platform=%d missing_telco=%d amount_mismatch=%d\n",
+					tc.TelcoID, p.ProgrammeID, rs.RunID,
+					rs.PeriodStart.UTC().Format(time.RFC3339), rs.PeriodEnd.UTC().Format(time.RFC3339),
+					rs.Matched, rs.MissingPlatform, rs.MissingTelco, rs.AmountMismatch)
+			}
 		}
 	}
 	if totalBreaks > 0 {

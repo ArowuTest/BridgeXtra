@@ -230,6 +230,7 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 		MaxAmountMinor       *int64   `json:"max_amount_minor"`
 		MinCompletenessRatio *float64 `json:"min_completeness_ratio"`
 		ReconLagSeconds      *int     `json:"recon_lag_seconds"`
+		RereconcileLookback  *int     `json:"rereconcile_lookback_seconds"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -267,6 +268,14 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 	// mis-set value from parking the window indefinitely in the past.
 	if v.ReconLagSeconds == nil || *v.ReconLagSeconds < 0 || *v.ReconLagSeconds > 604_800 {
 		return fmt.Errorf("recon_lag_seconds must be 0..604800 (the settling lag before a window is reconciled)")
+	}
+	// R-P0-6 Slice D2 (VR-50-F1): the late-arrival re-reconcile horizon. A
+	// telco credit that lands after its window was reconciled is recovered by the
+	// scheduled re-reconcile only if the window ended within this horizon. Required
+	// and POSITIVE — a zero/absent lookback would silently strand late arrivals as
+	// missing-telco breaks (armed-but-dead). Ceiling 90d keeps the sweep bounded.
+	if v.RereconcileLookback == nil || *v.RereconcileLookback < 1 || *v.RereconcileLookback > 7_776_000 {
+		return fmt.Errorf("rereconcile_lookback_seconds must be in 1..7776000 (the late-arrival re-reconcile horizon)")
 	}
 	return nil
 }
