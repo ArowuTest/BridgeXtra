@@ -51,7 +51,7 @@ func newFixture(t *testing.T, suffix string, simHold time.Duration, adapterTimeo
 	// Point the SIM_NG adapter at this test's simulator through the governed
 	// lifecycle (no redeploy — the owner directive, exercised constantly).
 	ctx := context.Background()
-	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":%d,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":100000000}`, srv.URL, adapterTimeoutMs)
+	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":%d,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":100000000}`, srv.URL, adapterTimeoutMs)
 	c, err := cfg.CreateDraft(ctx, "telco.adapter", "telco:SIM_NG", "alice", "test sim", []byte(content))
 	if err != nil {
 		t.Fatal(err)

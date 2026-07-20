@@ -31,7 +31,7 @@ func setup(t *testing.T, suffix string) (*Service, *testutil.DB, *httptest.Serve
 	// exactly how the deployed environment was re-pointed.
 	svcCfg := configsvc.New(db.Worker)
 	ctx := context.Background()
-	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":100000000}`, simulator.URL)
+	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":100000000}`, simulator.URL)
 	c, err := svcCfg.CreateDraft(ctx, "telco.adapter", "telco:SIM_NG", "alice", "test sim", []byte(content))
 	if err != nil {
 		t.Fatal(err)

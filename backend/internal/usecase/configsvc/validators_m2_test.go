@@ -110,10 +110,10 @@ func TestG2F3_AdapterCeilingRequired(t *testing.T) {
 	scope := "telco:SIM_NG"
 
 	cases := map[string]string{
-		"ceiling absent":   `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20}`,
-		"ceiling zero":     `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":0}`,
-		"ceiling absurd":   `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":9223372036854775807}`,
-		"ceiling negative": `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":-1}`,
+		"ceiling absent":   `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30}`,
+		"ceiling zero":     `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":0}`,
+		"ceiling absurd":   `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":9223372036854775807}`,
+		"ceiling negative": `{"fulfilment_url":"http://localhost:8091","request_timeout_ms":3000,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":-1}`,
 	}
 	for label, content := range cases {
 		mustReject(t, svc, "telco.adapter", scope, label, content)

@@ -175,6 +175,7 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 		RetryBudget            *int    `json:"retry_budget"`
 		CircuitErrThreshPct    *int    `json:"circuit_error_threshold_pct"`
 		CircuitMinRequests     *int    `json:"circuit_min_requests"`
+		CircuitCooldownSeconds *int    `json:"circuit_cooldown_seconds"`
 		MaxWeeklyRechargeMinor *int64  `json:"max_weekly_recharge_minor"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
@@ -200,6 +201,11 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 	}
 	if v.CircuitMinRequests == nil || *v.CircuitMinRequests < 1 {
 		return fmt.Errorf("circuit_min_requests must be >= 1")
+	}
+	// R-P0-8b: the open→half-open cooldown. Required so the breaker is a real
+	// control, not the armed-but-dead pair of thresholds it was before.
+	if v.CircuitCooldownSeconds == nil || *v.CircuitCooldownSeconds < 1 || *v.CircuitCooldownSeconds > 3600 {
+		return fmt.Errorf("circuit_cooldown_seconds must be 1..3600 (the circuit-breaker open→half-open cooldown)")
 	}
 	// G2-F3: the feed plausibility ceiling — a corrupt row near int64-max
 	// must be quarantined at ingest, never scored. Required, positive, and

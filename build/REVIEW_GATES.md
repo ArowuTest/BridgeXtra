@@ -430,3 +430,11 @@ Verified GOOD at source + my runs: Limiter.Allow fail-closed (unknown scope / no
 
 R-P0-8b (adapter circuit breaker) split is legit — circuit_error_threshold_pct/circuit_min_requests are validator-required but unread by adapter.go (armed-but-dead, my [[reachability-invariant]] class); wiring needs a cooldown field + seed supersession. Own slice, fine.
 **Gate A: 5.5 of 8 P0s. R-P0-8a lands WITH F1 open (fold into 8b or a follow-up before Gate A close). Remaining: R-P0-8a-F1, R-P0-8b, R-P0-7, R-P0-6.**
+
+### VR-44 — 19 Jul (Fable 5): R-P0-8a-F1 + R-P2-7 (f0e6205) — VERIFIED CLEAN by falsification. Bypass structurally closed.
+The fix for a bypass can re-introduce it via a spoofable IP derivation — so I attacked the derivation first. Verified at source:
+- **Trusted-proxy client-IP = rightmost-N-trusted (spoof-safe):** `idx = len(parts) - trustedHops` → with 1 hop reads the entry the Render LB APPENDED (real client); attacker-injected XFF entries sit LEFT and are ignored. Fail-safe fallback to RemoteAddr on idx<0/empty. Correct under a correctly-set trusted_proxy_count (comment: direct deploy must set 0). Config validator requires trusted_proxy_count>=0 + all 3 surfaces; 0032 supersede.
+- **Two-tier ordering correct:** `channel_ip` (IP-keyed) wraps `auth.Wrap(...)` → rotating-key flood refused PRE-auth by IP bucket, before any DB lookup. `perTelcoRateLimit` runs INSIDE auth.Wrap, keyed on `platform.TenantFrom(ctx)` = the VALIDATED telco → a forged key can NEVER mint a bucket (TenantAuth 401s it first). Fail-safe: no tenant post-auth → 500 refuse, never bypass.
+- **The complement tests now EXIST (the ones the original slice lacked):** TestClientIP_TrustedProxy/{direct_spoof_ignored, render_one_hop, spoofed_prefix, two_hops, no_xff} + TestRP08F1_RotatingInvalidKeys_StillThrottledByIP (30 distinct forged keys, one IP → 429). ALL PASS in my -race run; login pack still green; CI green.
+Falsification questions all resolve safe: rotating-key flood → IP bucket (pre-auth); XFF spoof → rightmost-trusted ignores injection; forged-key post-auth bucket → impossible (auth rejects first); nil-limiter/missing-tenant → fail-closed. R-P0-8a-F1 CLOSED, R-P2-7 CLOSED (elevated P2→Gate-A, landed).
+**Gate A: 6.5 of 8. Remaining: R-P0-8b (adapter circuit breaker), R-P0-7 (consent evidence token), R-P0-6 (recon framework).** Builder cleared for R-P0-8b.

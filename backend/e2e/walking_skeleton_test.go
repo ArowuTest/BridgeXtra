@@ -63,7 +63,7 @@ func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeout
 	// Point the adapter at this simulator through the governed lifecycle.
 	cfgW := configsvc.New(db.Worker)
 	ctx := context.Background()
-	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":%d,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":100000000}`, simSrv.URL, adapterTimeoutMs)
+	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":%d,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":100000000}`, simSrv.URL, adapterTimeoutMs)
 	c, err := cfgW.CreateDraft(ctx, "telco.adapter", "telco:SIM_NG", "alice", "e2e sim", []byte(content))
 	if err != nil {
 		t.Fatal(err)

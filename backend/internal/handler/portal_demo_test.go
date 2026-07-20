@@ -46,7 +46,7 @@ func newDemoFixture(t *testing.T, suffix string) (*portalFixture, *fulfilmentres
 	t.Cleanup(srv.Close)
 
 	svcCfg := configsvc.New(f.db.Worker)
-	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":500,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"max_weekly_recharge_minor":100000000}`, srv.URL)
+	content := fmt.Sprintf(`{"fulfilment_url":%q,"request_timeout_ms":500,"retry_budget":0,"circuit_error_threshold_pct":50,"circuit_min_requests":20,"circuit_cooldown_seconds":30,"max_weekly_recharge_minor":100000000}`, srv.URL)
 	c, err := svcCfg.CreateDraft(ctx, "telco.adapter", "telco:SIM_NG", "alice", "demo sim", []byte(content))
 	if err != nil {
 		t.Fatal(err)

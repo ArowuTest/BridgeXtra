@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
@@ -85,17 +86,46 @@ type HTTPAdapter struct {
 	Config *configsvc.Service
 	// HTTPClient is injectable for tests; timeout comes from config per call.
 	HTTPClient *http.Client
+
+	// R-P0-8b: one circuit breaker per telco, created lazily from the telco's
+	// governed circuit_* config on first use.
+	mu       sync.Mutex
+	breakers map[string]*breaker
 }
 
 func NewHTTPAdapter(cfg *configsvc.Service) *HTTPAdapter {
 	// SSRF egress guard (VR-32): 0 = no client timeout, the per-call context
 	// deadline governs.
-	return &HTTPAdapter{Config: cfg, HTTPClient: egress.SafeClient(0)}
+	return &HTTPAdapter{Config: cfg, HTTPClient: egress.SafeClient(0), breakers: map[string]*breaker{}}
 }
 
 type adapterCfg struct {
-	FulfilmentURL    string `json:"fulfilment_url"`
-	RequestTimeoutMs int    `json:"request_timeout_ms"`
+	FulfilmentURL          string `json:"fulfilment_url"`
+	RequestTimeoutMs       int    `json:"request_timeout_ms"`
+	CircuitErrThreshPct    int    `json:"circuit_error_threshold_pct"`
+	CircuitMinRequests     int    `json:"circuit_min_requests"`
+	CircuitCooldownSeconds int    `json:"circuit_cooldown_seconds"`
+}
+
+// breakerFor returns the telco's circuit breaker, creating it from config on
+// first use. Circuit policy changes take effect on restart (acceptable for a
+// stability control; documented).
+func (a *HTTPAdapter) breakerFor(telcoID string, cfg adapterCfg) *breaker {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.breakers == nil {
+		a.breakers = map[string]*breaker{}
+	}
+	b := a.breakers[telcoID]
+	if b == nil {
+		b = newBreaker(breakerCfg{
+			thresholdPct: cfg.CircuitErrThreshPct,
+			minRequests:  cfg.CircuitMinRequests,
+			cooldown:     time.Duration(cfg.CircuitCooldownSeconds) * time.Second,
+		})
+		a.breakers[telcoID] = b
+	}
+	return b
 }
 
 func (a *HTTPAdapter) cfgFor(ctx context.Context, telcoID string) (adapterCfg, error) {
@@ -143,6 +173,19 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 		return Result{}, err
 	}
 
+	res := Result{RequestEvidence: body}
+
+	// R-P0-8b: if this telco's circuit is OPEN, do NOT dial a down telco —
+	// short-circuit to Unknown (INV-009: the resolver enquires when the telco
+	// recovers; money is never guessed). Exposure was reserved in the confirm
+	// tx already, so this only spares the doomed HTTP call.
+	br := a.breakerFor(telcoID, cfg)
+	if !br.allow() {
+		res.Outcome = OutcomeUnknown
+		res.ResponseEvidence = []byte(`{"circuit_open":true}`)
+		return res, nil
+	}
+
 	callCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.RequestTimeoutMs)*time.Millisecond)
 	defer cancel()
 
@@ -153,19 +196,21 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Idempotency-Key", telcoIdempotencyKey)
-
-	res := Result{RequestEvidence: body}
 	resp, err := a.HTTPClient.Do(httpReq)
 	if err != nil {
 		// Conservative classification (INV-009): once Do begins, the request
 		// MAY have reached the telco (timeout-after-success is exactly this
 		// shape). Unknown — the resolver enquires; a never-landed request
 		// resolves to NOT_FOUND there and is then safely failed.
+		br.record(false) // R-P0-8b: no response = a health failure
 		res.Outcome = OutcomeUnknown
 		res.ResponseEvidence = []byte(fmt.Sprintf(`{"transport_error":%q}`, err.Error()))
 		return res, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// R-P0-8b: the telco RESPONDED (even a 4xx) unless it 5xx'd — a responsive
+	// telco, business-FAILED included, is healthy and must not trip the breaker.
+	br.record(resp.StatusCode < 500)
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		res.Outcome = OutcomeUnknown
