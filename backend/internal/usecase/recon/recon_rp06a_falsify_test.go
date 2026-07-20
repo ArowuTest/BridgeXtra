@@ -96,7 +96,7 @@ func TestRP06A_EmptyOrPartialRerunDoesNotSupersede(t *testing.T) {
 	}
 	*feed = []telcoTransaction{matchTxn("a1", 5_000), matchTxn("a2", 5_000), matchTxn("a3", 5_000), matchTxn("a4", 5_000)}
 	ctx := context.Background()
-	if _, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01"); err != nil {
+	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
 	good, goodCount := f.activeRun(t)
@@ -106,7 +106,7 @@ func TestRP06A_EmptyOrPartialRerunDoesNotSupersede(t *testing.T) {
 
 	// Empty rerun → REJECTED, the good run stays ACTIVE.
 	*feed = []telcoTransaction{}
-	sumEmpty, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	sumEmpty, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestRP06A_EmptyOrPartialRerunDoesNotSupersede(t *testing.T) {
 
 	// Truncated rerun (1 of 4 = 25% < 50% floor) → REJECTED, good run stays.
 	*feed = []telcoTransaction{matchTxn("a1", 5_000)}
-	sumPartial, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	sumPartial, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestRP06A_EmptyOrPartialRerunDoesNotSupersede(t *testing.T) {
 
 	// A complete rerun (all 4) supersedes normally.
 	*feed = []telcoTransaction{matchTxn("a1", 5_000), matchTxn("a2", 5_000), matchTxn("a3", 5_000), matchTxn("a4", 5_000)}
-	sumFull, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	sumFull, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestRP06A_SupersessionPreservesPriorItems(t *testing.T) {
 	// First run: empty feed → the platform advance is a BREAK_MISSING_TELCO item
 	// under run1 (first run has no prior, so an empty feed is allowed).
 	*feed = []telcoTransaction{}
-	sum1, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	sum1, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestRP06A_SupersessionPreservesPriorItems(t *testing.T) {
 
 	// A complete rerun supersedes run1 (floor of a 0-count prior is 0).
 	*feed = []telcoTransaction{matchTxn("adv_b", 5_000)}
-	if _, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01"); err != nil {
+	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
 	if f.runState(t, sum1.RunID) != "SUPERSEDED" {

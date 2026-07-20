@@ -120,11 +120,12 @@ func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service 
 
 // telcoTransaction is the canonical telco-side record (simulator /sim/transactions).
 type telcoTransaction struct {
-	PlatformRequestID string `json:"platform_request_id"`
-	TelcoReference    string `json:"telco_transaction_reference"`
-	FaceValueMinor    int64  `json:"face_value_minor"`
-	Currency          string `json:"currency"`
-	Status            string `json:"status"`
+	PlatformRequestID string    `json:"platform_request_id"`
+	TelcoReference    string    `json:"telco_transaction_reference"`
+	FaceValueMinor    int64     `json:"face_value_minor"`
+	Currency          string    `json:"currency"`
+	Status            string    `json:"status"`
+	CreditedAt        time.Time `json:"credited_at"` // R-P0-6 Slice C: telco-side event time (period bound)
 }
 
 // platformRecord is the platform side of the fulfilment layer.
@@ -155,6 +156,12 @@ type Summary struct {
 	// Rejected is true when the run failed the completeness floor and was
 	// recorded as REJECTED without superseding the prior ACTIVE run.
 	Rejected bool
+	// R-P0-6 Slice C: the bounded window this run reconciled. NothingToReconcile
+	// is true when the window was empty (no settled time since the watermark) —
+	// no run is written.
+	PeriodStart        time.Time
+	PeriodEnd          time.Time
+	NothingToReconcile bool
 }
 
 type toleranceCfg struct {
@@ -170,52 +177,116 @@ type toleranceCfg struct {
 	// of the prior ACTIVE run's source record count to supersede it. An empty or
 	// truncated feed is REJECTED, never allowed to wipe a good reconciliation.
 	MinCompletenessRatio float64 `json:"min_completeness_ratio"`
+	// ReconLagSeconds (R-P0-6 Slice C): the settling lag. The reconciliation
+	// window ends at now-lag, so records still in flight are not reconciled
+	// prematurely. 0 = no lag.
+	ReconLagSeconds int `json:"recon_lag_seconds"`
 }
 
-// RunFulfilment reconciles the fulfilment layer for one telco/programme.
+// RunFulfilment reconciles the next incremental fulfilment window
+// [watermark, now-lag) for one telco/programme. The watermark is the max
+// period_end of prior ACTIVE runs for this scope (genesis = epoch), so the
+// first run bounds all settled history and later runs are incremental. Distinct
+// periods coexist as separate ACTIVE runs.
 func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string) (Summary, error) {
-	runID := platform.NewID("run")
-	sum := Summary{RunID: runID}
+	tol, telcoRecords, err := s.loadForRecon(ctx, telcoID, programmeID)
+	if err != nil {
+		return Summary{RunID: platform.NewID("run")}, err
+	}
+	cutoff := time.Now().UTC().Add(-time.Duration(tol.ReconLagSeconds) * time.Second)
 
-	// Tolerance from governed config (zero + no auto-resolve floor).
+	var periodStart time.Time
+	tctx := platform.WithTenant(ctx, telcoID)
+	if err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT COALESCE(MAX(period_end), to_timestamp(0))
+			FROM recon_runs WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE'`,
+			telcoID, programmeID, layerFulfilment).Scan(&periodStart)
+	}); err != nil {
+		return Summary{}, err
+	}
+	if !cutoff.After(periodStart) {
+		// No settled time has elapsed since the watermark — nothing to reconcile.
+		s.Log.Info("reconciliation window empty — nothing settled since watermark",
+			"telco", telcoID, "programme", programmeID, "watermark", periodStart.UTC().Format(time.RFC3339))
+		return Summary{RunID: platform.NewID("run"), PeriodStart: periodStart, PeriodEnd: cutoff, NothingToReconcile: true}, nil
+	}
+	return s.reconcile(ctx, telcoID, programmeID, periodStart, cutoff, telcoRecords, tol)
+}
+
+// ReconcilePeriod re-reconciles an EXPLICIT window [periodStart, periodEnd) —
+// the operator re-run path for a corrected or late telco file covering a past
+// period. It supersedes the prior ACTIVE run for exactly that period, guarded
+// by the completeness floor so a truncated re-run cannot wipe the good one.
+func (s *Service) ReconcilePeriod(ctx context.Context, telcoID, programmeID string, periodStart, periodEnd time.Time) (Summary, error) {
+	if !periodEnd.After(periodStart) {
+		return Summary{}, fmt.Errorf("recon period end must be after start")
+	}
+	tol, telcoRecords, err := s.loadForRecon(ctx, telcoID, programmeID)
+	if err != nil {
+		return Summary{RunID: platform.NewID("run")}, err
+	}
+	return s.reconcile(ctx, telcoID, programmeID, periodStart, periodEnd, telcoRecords, tol)
+}
+
+// loadForRecon reads the governed tolerance (all fail-closed floors enforced)
+// and fetches the telco-side records.
+func (s *Service) loadForRecon(ctx context.Context, telcoID, programmeID string) (toleranceCfg, []telcoTransaction, error) {
+	var tol toleranceCfg
 	cv, err := s.Config.ActiveAt(ctx, "recon.tolerance", "programme:"+programmeID, time.Now().UTC())
 	if err != nil {
-		return sum, fmt.Errorf("recon.tolerance config: %w", err)
+		return tol, nil, fmt.Errorf("recon.tolerance config: %w", err)
 	}
-	var tol toleranceCfg
 	if err := json.Unmarshal(cv.Content, &tol); err != nil {
-		return sum, err
+		return tol, nil, err
 	}
-	// R-P0-4 fail-closed floor: without a credible-amount ceiling there is no
-	// safe way to compare external telco amounts. Refuse rather than risk an
-	// overflow or accept an absurd value.
+	// R-P0-4: a credible-amount ceiling is required — the overflow guard for
+	// comparing external telco amounts.
 	if tol.MaxAmountMinor <= 0 {
-		return sum, fmt.Errorf("recon.tolerance has no max_amount_minor — refusing (unbounded external amounts are not reconcilable)")
+		return tol, nil, fmt.Errorf("recon.tolerance has no max_amount_minor — refusing (unbounded external amounts are not reconcilable)")
 	}
-	// R-P0-6 fail-closed floor: without a completeness ratio there is no rule
-	// protecting a good run from being wiped by an empty/truncated rerun. Refuse.
+	// R-P0-6: a completeness ratio is required — the rerun-wipe protection.
 	if tol.MinCompletenessRatio <= 0 || tol.MinCompletenessRatio > 1 {
-		return sum, fmt.Errorf("recon.tolerance min_completeness_ratio must be in (0,1] — refusing (no rerun-completeness protection)")
+		return tol, nil, fmt.Errorf("recon.tolerance min_completeness_ratio must be in (0,1] — refusing (no rerun-completeness protection)")
 	}
-
-	telcoRecords, err := s.fetchTelcoRecords(ctx, telcoID)
+	// R-P0-6 Slice C: the settling lag bounds the window end; negative is refused.
+	if tol.ReconLagSeconds < 0 {
+		return tol, nil, fmt.Errorf("recon.tolerance recon_lag_seconds must be >= 0")
+	}
+	recs, err := s.fetchTelcoRecords(ctx, telcoID)
 	if err != nil {
-		return sum, err
+		return tol, nil, err
 	}
-	sum.TelcoRecords = len(telcoRecords)
+	return tol, recs, nil
+}
 
-	// R-P0-6: the source manifest is computed over exactly what was ingested,
-	// before any comparison — it is the run's provenance record. A control-total
-	// overflow is refused here (never a wrapped total).
-	srcCount, srcTotal, srcHash, err := sourceManifest(telcoRecords, tol.MaxAmountMinor)
-	if err != nil {
-		return sum, err
-	}
-	sum.SourceControlTotalMinor, sum.SourceHash = srcTotal, srcHash
-
+// reconcile reconciles a bounded window [periodStart, periodEnd) and writes the
+// immutable run header + items (or a REJECTED header if the windowed source is
+// below the completeness floor for a re-reconcile of the same period).
+func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, periodStart, periodEnd time.Time, telcoRecords []telcoTransaction, tol toleranceCfg) (Summary, error) {
+	runID := platform.NewID("run")
+	sum := Summary{RunID: runID, TelcoRecords: len(telcoRecords), PeriodStart: periodStart, PeriodEnd: periodEnd}
+	var srcCount int64
 	tctx := platform.WithTenant(ctx, telcoID)
-	err = repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
-		// Platform side: money-bearing advances + their confirmed references.
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+
+		// Bound the telco side to the window by credited_at, then compute the
+		// manifest over exactly the windowed source set (overflow refused).
+		windowed := make([]telcoTransaction, 0, len(telcoRecords))
+		for _, tr := range telcoRecords {
+			if !tr.CreditedAt.Before(periodStart) && tr.CreditedAt.Before(periodEnd) {
+				windowed = append(windowed, tr)
+			}
+		}
+		var srcTotal int64
+		var srcHash string
+		var mErr error
+		if srcCount, srcTotal, srcHash, mErr = sourceManifest(windowed, tol.MaxAmountMinor); mErr != nil {
+			return mErr
+		}
+		sum.SourceControlTotalMinor, sum.SourceHash = srcTotal, srcHash
+
+		// Platform side, bounded to the window by activation time.
 		plat := map[string]platformRecord{}
 		rows, err := tx.Query(ctx, `
 			SELECT a.advance_id, a.state, a.face_value_minor, a.currency, COALESCE(fa.telco_reference,'')
@@ -223,7 +294,8 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 			LEFT JOIN fulfilment_attempts fa
 			  ON fa.advance_id = a.advance_id AND fa.state = 'CONFIRMED'
 			WHERE a.programme_id = $1
-			  AND a.state IN ('ACTIVE','PARTIALLY_RECOVERED','CLOSED')`, programmeID)
+			  AND a.state IN ('ACTIVE','PARTIALLY_RECOVERED','CLOSED')
+			  AND a.activated_at >= $2 AND a.activated_at < $3`, programmeID, periodStart, periodEnd)
 		if err != nil {
 			return err
 		}
@@ -254,7 +326,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 		}
 
 		seen := map[string]bool{}
-		for _, tr := range telcoRecords {
+		for _, tr := range windowed {
 			if tr.Status != "SUCCESS" {
 				continue // failed telco records carry no credit to reconcile
 			}
@@ -349,12 +421,15 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 		// a transient failed fetch wipes reconciliation state. Read the prior
 		// active count; if this run falls below the floor, record it as REJECTED
 		// (for audit) and leave the prior ACTIVE untouched.
+		// The prior baseline is the ACTIVE run FOR THE SAME PERIOD (a re-reconcile
+		// of this window), not a different period — so a low-volume next period is
+		// never compared against a busy prior one.
 		var priorCount int64
 		priorExists := true
 		if err := tx.QueryRow(ctx, `
 			SELECT source_record_count FROM recon_runs
-			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE'`,
-			telcoID, programmeID, layerFulfilment).Scan(&priorCount); err != nil {
+			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE' AND period_start=$4`,
+			telcoID, programmeID, layerFulfilment, periodStart).Scan(&priorCount); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				priorExists = false
 			} else {
@@ -371,9 +446,9 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 					  source_record_count, source_control_total_minor, source_hash,
 					  platform_record_count, platform_control_total_minor,
 					  matched_count, break_count, state, created_by)
-					VALUES ($1,$2,$3,$4, to_timestamp(0), now(),
-					  $5,$6,$7, $8,$9, 0,0, 'REJECTED', 'worker:recon')`,
-					runID, telcoID, programmeID, layerFulfilment,
+					VALUES ($1,$2,$3,$4, $5,$6,
+					  $7,$8,$9, $10,$11, 0,0, 'REJECTED', 'worker:recon')`,
+					runID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
 					srcCount, srcTotal, srcHash, int64(len(plat)), platTotal); err != nil {
 					return err
 				}
@@ -382,15 +457,16 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 			}
 		}
 
-		// Supersede the prior ACTIVE run for this scope, then write the immutable
-		// header. The partial unique index (one ACTIVE per telco/programme/layer)
-		// makes this fail-closed: if a rerun ever skipped the supersede, the
-		// header INSERT would violate the index and abort — two live
-		// reconciliations of the same scope can never exist.
+		// Supersede the prior ACTIVE run FOR THIS PERIOD (a re-reconcile of this
+		// window), then write the immutable header. The partial unique index (one
+		// ACTIVE per telco/programme/layer/period_start) makes this fail-closed:
+		// if a re-reconcile ever skipped the supersede, the header INSERT would
+		// violate the index and abort — two live reconciliations of the same
+		// period can never exist. Distinct periods coexist as separate ACTIVE runs.
 		if _, err := tx.Exec(ctx, `
 			UPDATE recon_runs SET state='SUPERSEDED', superseded_by=$1
-			WHERE telco_id=$2 AND programme_id=$3 AND layer=$4 AND state='ACTIVE'`,
-			runID, telcoID, programmeID, layerFulfilment); err != nil {
+			WHERE telco_id=$2 AND programme_id=$3 AND layer=$4 AND state='ACTIVE' AND period_start=$5`,
+			runID, telcoID, programmeID, layerFulfilment, periodStart); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `
@@ -399,9 +475,9 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 			  source_record_count, source_control_total_minor, source_hash,
 			  platform_record_count, platform_control_total_minor,
 			  matched_count, break_count, created_by)
-			VALUES ($1,$2,$3,$4, to_timestamp(0), now(),
-			  $5,$6,$7, $8,$9, $10,$11, 'worker:recon')`,
-			runID, telcoID, programmeID, layerFulfilment,
+			VALUES ($1,$2,$3,$4, $5,$6,
+			  $7,$8,$9, $10,$11, $12,$13, 'worker:recon')`,
+			runID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
 			srcCount, srcTotal, srcHash,
 			int64(len(plat)), platTotal,
 			int64(sum.Matched), int64(breaks)); err != nil {
@@ -427,11 +503,17 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 	if err != nil {
 		return sum, err
 	}
-	if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco; breaks > 0 {
-		s.Log.Error("reconciliation breaks found — operator attention required (V2-REC-012)",
-			"run_id", runID, "breaks", breaks, "matched", sum.Matched)
-	} else {
-		s.Log.Info("reconciliation clean", "run_id", runID, "matched", sum.Matched)
+	switch {
+	case sum.Rejected:
+		s.Log.Error("reconciliation re-reconcile REJECTED — source below completeness floor; prior run kept",
+			"run_id", runID, "source_records", srcCount)
+	default:
+		if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco; breaks > 0 {
+			s.Log.Error("reconciliation breaks found — operator attention required (V2-REC-012)",
+				"run_id", runID, "breaks", breaks, "matched", sum.Matched)
+		} else {
+			s.Log.Info("reconciliation clean", "run_id", runID, "matched", sum.Matched)
+		}
 	}
 	return sum, nil
 }

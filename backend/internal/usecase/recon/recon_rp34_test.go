@@ -97,9 +97,9 @@ func (f *reconFixture) seedConfirmedAdvance(t *testing.T, advID string, faceMino
 			[]any{advID, sub, faceMinor, currency}},
 		{`INSERT INTO advances (advance_id, telco_id, programme_id, subscriber_account_id, offer_id,
 		    funding_pool_id, idempotency_key, correlation_id, state, face_value_minor, fee_minor,
-		    disbursed_minor, outstanding_minor, currency)
+		    disbursed_minor, outstanding_minor, currency, activated_at)
 		  VALUES ($1,'SIM_NG','prg_sim_airtime01',$2,'ofr_'||$1,'pool_sim_01',$1,$1,'ACTIVE',
-		    $3,0,$3,$3,$4)`, []any{advID, sub, faceMinor, currency}},
+		    $3,0,$3,$3,$4, now() - interval '1 hour')`, []any{advID, sub, faceMinor, currency}},
 		{`INSERT INTO fulfilment_attempts (attempt_id, advance_id, attempt_no, telco_idempotency_key,
 		    state, telco_reference, request_evidence)
 		  VALUES ('att_'||$1,$1,1,'tik_'||$1,'CONFIRMED',$2,'{}'::jsonb)`, []any{advID, telcoRef}},
@@ -124,7 +124,7 @@ func (f *reconFixture) statusCount(t *testing.T, status string) int {
 // MATCHED.
 func TestRP03_CurrencyMismatch_NotMatched(t *testing.T) {
 	f := newReconFixture(t, "rp03_ccy", []telcoTransaction{
-		{PlatformRequestID: "adv_ccy", TelcoReference: "TR-1", FaceValueMinor: 5_000, Currency: "USD", Status: "SUCCESS"},
+		{PlatformRequestID: "adv_ccy", TelcoReference: "TR-1", FaceValueMinor: 5_000, Currency: "USD", Status: "SUCCESS", CreditedAt: reconPast()},
 	})
 	f.seedConfirmedAdvance(t, "adv_ccy", 5_000, "NGN", "TR-1")
 
@@ -144,9 +144,9 @@ func TestRP03_CurrencyMismatch_NotMatched(t *testing.T) {
 // never a panic, never fed to abs64(p-t).
 func TestRP04_OverflowAmounts_Malformed(t *testing.T) {
 	f := newReconFixture(t, "rp04_ovf", []telcoTransaction{
-		{PlatformRequestID: "adv_min", TelcoReference: "TR-min", FaceValueMinor: math.MinInt64, Currency: "NGN", Status: "SUCCESS"},
-		{PlatformRequestID: "adv_max", TelcoReference: "TR-max", FaceValueMinor: math.MaxInt64, Currency: "NGN", Status: "SUCCESS"},
-		{PlatformRequestID: "adv_neg", TelcoReference: "TR-neg", FaceValueMinor: -1, Currency: "NGN", Status: "SUCCESS"},
+		{PlatformRequestID: "adv_min", TelcoReference: "TR-min", FaceValueMinor: math.MinInt64, Currency: "NGN", Status: "SUCCESS", CreditedAt: reconPast()},
+		{PlatformRequestID: "adv_max", TelcoReference: "TR-max", FaceValueMinor: math.MaxInt64, Currency: "NGN", Status: "SUCCESS", CreditedAt: reconPast()},
+		{PlatformRequestID: "adv_neg", TelcoReference: "TR-neg", FaceValueMinor: -1, Currency: "NGN", Status: "SUCCESS", CreditedAt: reconPast()},
 	})
 	f.seedConfirmedAdvance(t, "adv_min", 5_000, "NGN", "TR-min")
 	f.seedConfirmedAdvance(t, "adv_max", 5_000, "NGN", "TR-max")
@@ -167,7 +167,7 @@ func TestRP04_OverflowAmounts_Malformed(t *testing.T) {
 // A malformed CURRENCY (not ISO alpha-3) is also a malformed break.
 func TestRP04_MalformedCurrency_Break(t *testing.T) {
 	f := newReconFixture(t, "rp04_ccy", []telcoTransaction{
-		{PlatformRequestID: "adv_bc", TelcoReference: "TR-bc", FaceValueMinor: 5_000, Currency: "ngn!", Status: "SUCCESS"},
+		{PlatformRequestID: "adv_bc", TelcoReference: "TR-bc", FaceValueMinor: 5_000, Currency: "ngn!", Status: "SUCCESS", CreditedAt: reconPast()},
 	})
 	f.seedConfirmedAdvance(t, "adv_bc", 5_000, "NGN", "TR-bc")
 	sum, err := f.svc.RunFulfilment(context.Background(), "SIM_NG", "prg_sim_airtime01")
@@ -182,7 +182,7 @@ func TestRP04_MalformedCurrency_Break(t *testing.T) {
 // The happy path still matches when currency and amount agree and are credible.
 func TestRP34_SameCurrencyAmount_Matches(t *testing.T) {
 	f := newReconFixture(t, "rp34_ok", []telcoTransaction{
-		{PlatformRequestID: "adv_ok", TelcoReference: "TR-ok", FaceValueMinor: 5_000, Currency: "NGN", Status: "SUCCESS"},
+		{PlatformRequestID: "adv_ok", TelcoReference: "TR-ok", FaceValueMinor: 5_000, Currency: "NGN", Status: "SUCCESS", CreditedAt: reconPast()},
 	})
 	f.seedConfirmedAdvance(t, "adv_ok", 5_000, "NGN", "TR-ok")
 	sum, err := f.svc.RunFulfilment(context.Background(), "SIM_NG", "prg_sim_airtime01")

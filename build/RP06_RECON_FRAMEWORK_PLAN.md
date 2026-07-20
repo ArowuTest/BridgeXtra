@@ -38,8 +38,20 @@ turns the skeleton into a production framework in verifiable slices.
   are never read as the same population.
 
 - **Slice C — Period / watermark / bounded scope.** Stop rescanning all history:
-  reconcile a governed period window with a durable watermark, so a run is a
-  bounded, repeatable statement of one period.
+  reconcile a governed window `[watermark, now − lag)` and record it on the run
+  header, so a run is a bounded statement and the watermark advances. Platform
+  side bounded by `advances.activated_at`, telco side by the feed's
+  `credited_at`; `recon_lag_seconds` (governed) keeps still-settling records out.
+  First run bootstraps from genesis (epoch) → one bounded full-history pass; then
+  incremental. One ACTIVE run per `(telco, programme, layer, period_start)` so
+  distinct periods coexist and a re-reconcile of one period supersedes only that
+  period. **← building now.**
+
+**Slice B verified clean (reviewer). Forward note captured:**
+- **(→ Slice C/D)** EDG-006 contradictory-status: a telco feed carrying BOTH a
+  FAILED and a SUCCESS record for the same key currently drops the FAILED and
+  reconciles the SUCCESS — a data-quality anomaly that should be *flagged*, not
+  silently resolved. Classify it in Slice C or D.
 
 - **Slice D — Multi-layer.** Extend the same header/manifest machinery to the
   RECOVERY, SETTLEMENT and BUREAU layers (fulfilment is the reference impl).

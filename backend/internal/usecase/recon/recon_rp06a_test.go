@@ -11,11 +11,28 @@ package recon
 import (
 	"context"
 	"testing"
+	"time"
 )
 
+// A fixed explicit window that spans all the backdated test data — used with
+// ReconcilePeriod to re-reconcile the SAME period (so supersession /
+// completeness behave as a same-period re-run, distinct from the incremental
+// next-period path of RunFulfilment).
+var (
+	winStart = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	winEnd   = time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// matchTxn builds a telco SUCCESS record credited an hour ago, so it sits
+// comfortably inside the reconciliation window [epoch, now-lag).
 func matchTxn(advID string, minor int64) telcoTransaction {
-	return telcoTransaction{PlatformRequestID: advID, TelcoReference: "TR-" + advID, FaceValueMinor: minor, Currency: "NGN", Status: "SUCCESS"}
+	return telcoTransaction{
+		PlatformRequestID: advID, TelcoReference: "TR-" + advID, FaceValueMinor: minor,
+		Currency: "NGN", Status: "SUCCESS", CreditedAt: reconPast(),
+	}
 }
+
+func reconPast() time.Time { return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC) }
 
 func TestRP06A_RunHeaderRecordsManifest(t *testing.T) {
 	f := newReconFixture(t, "rp06a_hdr", []telcoTransaction{matchTxn("adv_ok", 5_000)})
@@ -70,11 +87,12 @@ func TestRP06A_RerunSupersedesPriorRun(t *testing.T) {
 	f.seedConfirmedAdvance(t, "adv_ok", 5_000, "NGN", "TR-adv_ok")
 	ctx := context.Background()
 
-	sum1, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	// Two re-reconciles of the SAME period: the second supersedes the first.
+	sum1, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum2, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	sum2, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +104,7 @@ func TestRP06A_RerunSupersedesPriorRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	if active != 1 || total != 2 {
-		t.Fatalf("a rerun must supersede, not accumulate: active=%d total=%d", active, total)
+		t.Fatalf("a same-period re-reconcile must supersede, not accumulate: active=%d total=%d", active, total)
 	}
 
 	var state string
@@ -107,23 +125,24 @@ func TestRP06A_OneActivePerScope_FailClosed(t *testing.T) {
 	f.seedConfirmedAdvance(t, "adv_ok", 5_000, "NGN", "TR-adv_ok")
 	ctx := context.Background()
 
-	sum1, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+	sum1, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A second ACTIVE run for the same (telco, programme, layer) violates the
-	// partial unique index — two live reconciliations can never coexist.
+	// A second ACTIVE run for the same (telco, programme, layer, period_start)
+	// violates the partial unique index — two live reconciliations of one period
+	// can never coexist. (period_start must match sum1's = winStart.)
 	if _, err := f.db.Admin.Exec(ctx, `
 		INSERT INTO recon_runs (run_id, telco_id, programme_id, layer, period_start, period_end,
 		  source_record_count, source_control_total_minor, source_hash,
 		  platform_record_count, platform_control_total_minor, created_by)
-		VALUES ('run_dup','SIM_NG','prg_sim_airtime01','FULFILMENT', to_timestamp(0), now(),
+		VALUES ('run_dup','SIM_NG','prg_sim_airtime01','FULFILMENT', '2020-01-01T00:00:00Z'::timestamptz, now(),
 		  0,0,'h',0,0,'test')`); err == nil {
-		t.Fatal("a second ACTIVE run for the same scope must be rejected by the unique index")
+		t.Fatal("a second ACTIVE run for the same period must be rejected by the unique index")
 	}
 
-	// After a rerun supersedes sum1, sum1 is immutable — a further supersede is refused.
-	if _, err := f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01"); err != nil {
+	// After a same-period re-reconcile supersedes sum1, sum1 is immutable.
+	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.db.Admin.Exec(ctx, `

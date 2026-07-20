@@ -208,8 +208,11 @@ func (s *stack) assertClean(t *testing.T, wantMatched int) {
 	for _, v := range violations {
 		t.Errorf("INVARIANT VIOLATION: %s", v)
 	}
-	// Reconciliation: zero breaks.
-	sum, err := s.recon.RunFulfilment(context.Background(), "SIM_NG", "prg_sim_airtime01")
+	// Reconciliation: zero breaks. R-P0-6 Slice C bounds a run to settled
+	// activity (now - lag); this E2E just created its money moments ago, so
+	// reconcile an EXPLICIT window that spans it rather than waiting out the lag.
+	sum, err := s.recon.ReconcilePeriod(context.Background(), "SIM_NG", "prg_sim_airtime01",
+		time.Unix(0, 0).UTC(), time.Now().UTC().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

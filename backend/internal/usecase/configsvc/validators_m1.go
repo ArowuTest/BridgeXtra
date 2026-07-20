@@ -229,6 +229,7 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 		BreakAgingAlertHours *int     `json:"break_aging_alert_hours"`
 		MaxAmountMinor       *int64   `json:"max_amount_minor"`
 		MinCompletenessRatio *float64 `json:"min_completeness_ratio"`
+		ReconLagSeconds      *int     `json:"recon_lag_seconds"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -260,6 +261,12 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 	// tolerated, but zero/absent is refused (no protection).
 	if v.MinCompletenessRatio == nil || *v.MinCompletenessRatio <= 0 || *v.MinCompletenessRatio > 1 {
 		return fmt.Errorf("min_completeness_ratio must be in (0,1] (rerun-completeness protection)")
+	}
+	// R-P0-6 Slice C: the settling lag bounds the reconciliation window end
+	// (now - lag). Required and non-negative; a sane ceiling (7 days) stops a
+	// mis-set value from parking the window indefinitely in the past.
+	if v.ReconLagSeconds == nil || *v.ReconLagSeconds < 0 || *v.ReconLagSeconds > 604_800 {
+		return fmt.Errorf("recon_lag_seconds must be 0..604800 (the settling lag before a window is reconciled)")
 	}
 	return nil
 }
