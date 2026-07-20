@@ -260,6 +260,10 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		writeErr(w, http.StatusConflict, "OFFER_EXPIRED", "offer expired; request fresh offers")
 	case errors.Is(err, origination.ErrOfferNotAcceptable):
 		writeErr(w, http.StatusConflict, "OFFER_SNAPSHOT_MISMATCH", "offer no longer acceptable; request fresh offers")
+	case errors.Is(err, origination.ErrDivergentDuplicate):
+		// R-P0-1: same idempotency key, different request. Not a replay —
+		// the client must use a fresh key for a new command.
+		writeErr(w, http.StatusConflict, "DIVERGENT_DUPLICATE", "idempotency key already used for a different request; use a fresh key")
 	case errors.Is(err, origination.ErrSubscriberIneligible):
 		writeErr(w, http.StatusForbidden, "SUBSCRIBER_INACTIVE", "subscriber not eligible")
 	case errors.Is(err, repo.ErrConcurrentAdvanceBlocked):

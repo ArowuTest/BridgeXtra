@@ -51,7 +51,29 @@ var (
 	// ErrOverlayBlocked (M2e, V2-SCR-015): a real-time risk overlay blocks the
 	// subscriber at this moment. Which flag fired is logged, never disclosed.
 	ErrOverlayBlocked = errors.New("origination: risk overlay blocks this action")
+	// ErrDivergentDuplicate (R-P0-1, API-002/003): a confirm reused an
+	// idempotency key with a DIFFERENT request payload. An idempotent retry
+	// must be the SAME request; a different body under the same key is a
+	// client/security error, never a silent replay of the original advance.
+	ErrDivergentDuplicate = errors.New("origination: idempotency key reused with a divergent request")
 )
+
+// confirmRequestHash is the canonical equivalence fingerprint of a confirm
+// command (R-P0-1). Only the fields that DEFINE the command are hashed —
+// programme, offer, and the subscriber token presented. The offer fully pins
+// the money (amounts/fee/terms are immutable per 0023), so these three
+// determine the material effect. correlation_id is per-attempt tracing and is
+// deliberately excluded: a legitimate retry may carry a fresh one.
+func confirmRequestHash(cmd ConfirmCmd) string {
+	// Struct field order is fixed, so json.Marshal is deterministic.
+	b, _ := json.Marshal(struct {
+		Programme string `json:"programme_id"`
+		Offer     string `json:"offer_id"`
+		Token     string `json:"msisdn_token"`
+	}{cmd.ProgrammeID, cmd.OfferID, cmd.MSISDNToken})
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
 
 type Service struct {
 	Pool    *pgxpool.Pool // tcp_app
@@ -76,6 +98,8 @@ type Service struct {
 	flags       repo.SubscriberFlags
 	consents    repo.Consents
 	programmes  repo.Programmes
+	idem        repo.Idempotency
+	audit       repo.Audit
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, adapter mno.Client, log *slog.Logger) *Service {
@@ -316,12 +340,49 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		return ConfirmResult{}, fmt.Errorf("idempotency key and correlation id are required")
 	}
 
+	telcoID, err := platform.TenantFrom(ctx)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
+	reqHash := confirmRequestHash(cmd)
+
 	// ---- tx1: accept + reserve + record attempt ---------------------------
 	var adv entity.Advance
 	var attempt entity.FulfilmentAttempt
 	var offer entity.Offer
 	replayed := false
-	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+	divergent := false
+	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		// R-P0-1: claim the idempotency record FIRST, atomically, in this same
+		// durable tx. The DB PK (telco, operation, idem_key) arbitrates — not
+		// application memory. A duplicate is only a valid replay when its
+		// request hash MATCHES; a divergent body is refused (API-002/003).
+		// Claim and advance commit together, so a concurrent duplicate blocks
+		// here until we commit, then reads the record and replays the advance.
+		rec, stored, err := s.idem.PutIfAbsent(ctx, tx, entity.IdempotencyRecord{
+			TelcoID: telcoID, Operation: "advance.confirm", IdemKey: cmd.IdemKey,
+			RequestHash: reqHash, ResponseStatus: 0, ResponseBody: []byte(`{"kind":"advance.confirm"}`),
+		})
+		if err != nil {
+			return err
+		}
+		if !stored {
+			if rec.RequestHash != reqHash {
+				// Same key, different request — the money-command-integrity
+				// violation. Abort loudly; the audit is written out-of-band.
+				divergent = true
+				return ErrDivergentDuplicate
+			}
+			// Genuine replay: the original advance committed in the winner's
+			// tx alongside this record, so it is visible now.
+			existing, err := s.advances.GetByIdemKey(ctx, tx, cmd.IdemKey)
+			if err != nil {
+				return err
+			}
+			adv, replayed = existing, true
+			return nil
+		}
+
 		// M3d: suspended programme = lending stopped, fail closed.
 		if status, err := s.programmes.GetStatus(ctx, tx, cmd.ProgrammeID); err != nil {
 			return err
@@ -493,6 +554,13 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 	})
 	var breach *treasury.BreachError
 	switch {
+	case errors.Is(err, ErrDivergentDuplicate) && divergent:
+		// R-P0-1: idempotency key reused with a different request. The tx
+		// rolled back (no effect), so record the security-audit in a fresh tx
+		// — a reused key with a divergent body is either a client bug or an
+		// attempt to piggyback a changed command on a completed one.
+		s.recordDivergentDuplicate(ctx, telcoID, cmd, reqHash)
+		return ConfirmResult{}, ErrDivergentDuplicate
 	case errors.As(err, &breach):
 		// M3d: the confirm aborted on a guardrail breach. Record the trip +
 		// suspend the programme in a SEPARATE transaction (it must survive
@@ -547,6 +615,26 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 }
 
 var errReplayRace = errors.New("origination: idempotency replay race")
+
+// recordDivergentDuplicate writes the DIVERGENT_DUPLICATE security-audit
+// out-of-band (the confirm tx rolled back). No PII: the subscriber token is
+// not logged, only the operation and the mismatching hash.
+func (s *Service) recordDivergentDuplicate(ctx context.Context, telcoID string, cmd ConfirmCmd, reqHash string) {
+	tctx := platform.WithTenant(ctx, telcoID)
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		return s.audit.Insert(ctx, tx, entity.AuditEvent{
+			ID: platform.NewID("aud"), TelcoID: telcoID, Actor: "channel:telco",
+			Action: "advance.confirm.divergent_duplicate", TargetType: "idempotency_key", TargetID: cmd.IdemKey,
+			Reason: fmt.Sprintf("idempotency key reused with a divergent request (programme=%s offer=%s hash=%s)",
+				cmd.ProgrammeID, cmd.OfferID, reqHash),
+		})
+	})
+	if err != nil {
+		s.Log.Error("failed to record DIVERGENT_DUPLICATE audit", "idem_key", cmd.IdemKey, "err", err)
+	}
+	s.Log.Warn("DIVERGENT_DUPLICATE: idempotency key reused with a different request",
+		"idem_key", cmd.IdemKey, "programme", cmd.ProgrammeID, "offer", cmd.OfferID)
+}
 
 func cmdHasExistingAdvance(ctx context.Context, s *Service, cmd ConfirmCmd) bool {
 	found := false
