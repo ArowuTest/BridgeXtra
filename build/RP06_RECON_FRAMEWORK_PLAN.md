@@ -53,8 +53,23 @@ turns the skeleton into a production framework in verifiable slices.
   reconciles the SUCCESS — a data-quality anomaly that should be *flagged*, not
   silently resolved. Classify it in Slice C or D.
 
-- **Slice D — Multi-layer.** Extend the same header/manifest machinery to the
-  RECOVERY, SETTLEMENT and BUREAU layers (fulfilment is the reference impl).
+- **Slice D — Data-quality + coverage + multi-layer.** Reviewer-accumulated
+  scope (VR-48/49/50-F1), built as gated sub-slices:
+  - **D1 — EDG-006 contradictory status.** A key carrying BOTH a FAILED and a
+    SUCCESS telco record in the window is a data-quality anomaly — classify it
+    `BREAK_CONTRADICTORY_TELCO_STATUS`, never silently reconcile the SUCCESS as
+    clean. **← building now.**
+  - **D2 — VR-50-F1 late-arrival re-reconcile (REC-006).** The incremental
+    watermark advances past a window based on the data present at run time; a
+    telco record that arrives AFTER its window was reconciled is never picked up
+    by future incremental runs. Add (a) a re-reconcile trigger — scheduled
+    re-reconcile of the last N settled periods — and (b) an adversarial test:
+    land a late record, prove a re-reconcile recovers it.
+  - **D3 — completeness maker-checker override (VR-48).** A two-actor
+    accept-anyway for a legitimately low-volume window that the completeness
+    floor rejected, so a genuinely quiet period isn't stuck unreconciled.
+  - **D4 — multi-layer.** Extend the header/manifest machinery to the RECOVERY,
+    SETTLEMENT and BUREAU layers (fulfilment is the reference impl).
 
 - **Slice E — Maker-checker break resolution + signed evidence pack.** Wire the
   governed `auto_resolve=false` floor into an explicit two-actor break-resolution

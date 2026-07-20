@@ -147,6 +147,7 @@ type Summary struct {
 	CurrencyMismatch int // R-P0-3: same amount, different currency
 	Malformed        int // R-P0-4: telco record amount/currency out of credible range
 	DuplicateTelco   int // R-P0-6 Slice B: a telco success record repeated for one key
+	Contradictory    int // R-P0-6 Slice D1 (EDG-006): a key reported both FAILED and SUCCESS
 	TelcoRecords     int
 	PlatformRecords  int
 	// R-P0-6 run manifest (recorded on the immutable recon_runs header).
@@ -325,6 +326,16 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 			return nil
 		}
 
+		// R-P0-6 Slice D1 (EDG-006): a key reported BOTH FAILED and SUCCESS in
+		// the window is internally contradictory. Pre-scan the FAILED keys so the
+		// SUCCESS is flagged rather than reconciled as clean.
+		hasFailed := map[string]bool{}
+		for _, tr := range windowed {
+			if tr.Status == "FAILED" {
+				hasFailed[tr.PlatformRequestID] = true
+			}
+		}
+
 		seen := map[string]bool{}
 		for _, tr := range windowed {
 			if tr.Status != "SUCCESS" {
@@ -347,6 +358,23 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 				continue
 			}
 			seen[key] = true
+			// EDG-006: the same key was also reported FAILED — do NOT reconcile
+			// this SUCCESS as clean; it is a contradictory data-quality break.
+			if hasFailed[key] {
+				sum.Contradictory++
+				platformRef := key
+				if p, ok := plat[key]; ok {
+					platformRef = p.AdvanceID
+				}
+				if err := writeItem(key, "FULFILMENT", platformRef, tr.TelcoReference,
+					"BREAK_CONTRADICTORY_TELCO_STATUS", map[string]any{
+						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
+						"note": "same key reported both FAILED and SUCCESS in this window",
+					}); err != nil {
+					return err
+				}
+				continue
+			}
 			p, ok := plat[key]
 			switch {
 			case !ok:
@@ -413,7 +441,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 			}
 		}
 		sum.PlatformControlTotalMinor = platTotal
-		breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco
+		breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco + sum.Contradictory
 
 		// Completeness gate (R-P0-6): a rerun must carry at least
 		// min_completeness_ratio of the prior ACTIVE run's source record count.
@@ -508,7 +536,7 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 		s.Log.Error("reconciliation re-reconcile REJECTED — source below completeness floor; prior run kept",
 			"run_id", runID, "source_records", srcCount)
 	default:
-		if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco; breaks > 0 {
+		if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco + sum.Contradictory; breaks > 0 {
 			s.Log.Error("reconciliation breaks found — operator attention required (V2-REC-012)",
 				"run_id", runID, "breaks", breaks, "matched", sum.Matched)
 		} else {
