@@ -147,9 +147,12 @@ func TestRP06A_EmptyOrPartialRerunDoesNotSupersede(t *testing.T) {
 	}
 }
 
-// #4: concurrent reruns for the same scope — the DB must leave exactly ONE
-// ACTIVE run; the loser fails cleanly, never a second ACTIVE.
-func TestRP06A_ConcurrentReruns_ExactlyOneActive(t *testing.T) {
+// #4: concurrent re-reconciles of the SAME period — the DB must leave exactly
+// ONE ACTIVE run for that period; the losers fail cleanly, never a second
+// ACTIVE. (The one-active guarantee is per-period under Slice C: concurrent
+// runs of the same period_start contend on recon_runs_active_uq. Production
+// recon is single-writer, so this exercises the DB guard directly.)
+func TestRP06A_ConcurrentSamePeriod_ExactlyOneActive(t *testing.T) {
 	f := newReconFixture(t, "rp06a_conc", []telcoTransaction{matchTxn("adv_ok", 5_000)})
 	f.seedConfirmedAdvance(t, "adv_ok", 5_000, "NGN", "TR-adv_ok")
 	ctx := context.Background()
@@ -161,7 +164,7 @@ func TestRP06A_ConcurrentReruns_ExactlyOneActive(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = f.svc.RunFulfilment(ctx, "SIM_NG", "prg_sim_airtime01")
+			_, errs[i] = f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd)
 		}(i)
 	}
 	wg.Wait()
@@ -171,18 +174,20 @@ func TestRP06A_ConcurrentReruns_ExactlyOneActive(t *testing.T) {
 		if e == nil {
 			success++
 		} else if !strings.Contains(e.Error(), "recon_runs_active_uq") && !strings.Contains(e.Error(), "duplicate key") {
-			t.Fatalf("a losing concurrent rerun must fail on the active-run uniqueness, got: %v", e)
+			t.Fatalf("a losing concurrent re-reconcile must fail on the active-run uniqueness, got: %v", e)
 		}
 	}
 	if success < 1 {
-		t.Fatal("at least one concurrent rerun must succeed")
+		t.Fatal("at least one concurrent re-reconcile must succeed")
 	}
+	// Exactly one ACTIVE run for this period.
 	var active int
-	if err := f.db.Admin.QueryRow(ctx, `SELECT count(*) FROM recon_runs WHERE state='ACTIVE'`).Scan(&active); err != nil {
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT count(*) FROM recon_runs WHERE state='ACTIVE' AND period_start=$1`, winStart).Scan(&active); err != nil {
 		t.Fatal(err)
 	}
 	if active != 1 {
-		t.Fatalf("exactly one ACTIVE run must exist after a concurrent storm, got %d", active)
+		t.Fatalf("exactly one ACTIVE run for the period must exist after a concurrent storm, got %d", active)
 	}
 }
 
