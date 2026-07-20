@@ -1,8 +1,9 @@
 // Package egress is the shared SSRF control for every outbound surface that
 // dials a CONFIG-DRIVEN URL — the telco fulfilment adapter, the feature-file
-// fetcher, and the SMS sender (reviewer VR-32: the egress surface is three
-// doors, not one). All three build an *http.Client through SafeClient so a
-// single guard covers them.
+// fetcher, the SMS sender, and the reconciliation telco-records fetcher
+// (reviewer VR-32 closed three doors; the external audit found reconciliation
+// as the FOURTH — R-P0-5). All four build an *http.Client through SafeClient
+// so a single guard covers them.
 //
 // The guard runs at DIAL time on the RESOLVED IP and PINS the connection to
 // that IP, so a hostname that resolves to a blocked address is refused and DNS

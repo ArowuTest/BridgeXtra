@@ -216,12 +216,22 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 		AmountToleranceMinor *int64 `json:"amount_tolerance_minor"`
 		AutoResolve          *bool  `json:"auto_resolve"`
 		BreakAgingAlertHours *int   `json:"break_aging_alert_hours"`
+		MaxAmountMinor       *int64 `json:"max_amount_minor"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
 	}
 	if v.AmountToleranceMinor == nil || *v.AmountToleranceMinor < 0 {
 		return fmt.Errorf("amount_tolerance_minor must be >= 0")
+	}
+	// R-P0-4: a credible-amount ceiling is required — it is the overflow guard
+	// for comparing external telco amounts. Kept below 1e15 so the difference
+	// of two in-range amounts can never overflow int64 or trip abs64(MinInt64).
+	if v.MaxAmountMinor == nil || *v.MaxAmountMinor <= 0 || *v.MaxAmountMinor > 1_000_000_000_000_000 {
+		return fmt.Errorf("max_amount_minor must be in 1..1e15 (the credible-amount / overflow-guard ceiling)")
+	}
+	if v.AmountToleranceMinor != nil && *v.AmountToleranceMinor > *v.MaxAmountMinor {
+		return fmt.Errorf("amount_tolerance_minor cannot exceed max_amount_minor")
 	}
 	if v.AutoResolve == nil {
 		return fmt.Errorf("auto_resolve is required")

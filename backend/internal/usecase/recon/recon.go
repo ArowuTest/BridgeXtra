@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 )
@@ -32,7 +33,10 @@ type Service struct {
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service {
-	return &Service{Pool: pool, Config: cfg, Log: log, HTTPClient: &http.Client{Timeout: 10 * time.Second}}
+	// R-P0-5: the telco-records fetch is a config-driven outbound door — the
+	// FOURTH the VR-32 SSRF work did not cover. Route it through the shared
+	// egress guard (resolved-IP check + connection pinning) like the other three.
+	return &Service{Pool: pool, Config: cfg, Log: log, HTTPClient: egress.SafeClient(10 * time.Second)}
 }
 
 // telcoTransaction is the canonical telco-side record (simulator /sim/transactions).
@@ -49,23 +53,32 @@ type platformRecord struct {
 	AdvanceID      string
 	State          string
 	FaceValueMinor int64
+	Currency       string
 	TelcoReference string
 }
 
 // Summary reports one reconciliation run (V2-REC-007 control totals).
 type Summary struct {
-	RunID           string
-	Matched         int
-	MissingPlatform int // telco credited, platform has no money-bearing advance
-	MissingTelco    int // platform believes credited, telco has no record
-	AmountMismatch  int
-	TelcoRecords    int
-	PlatformRecords int
+	RunID            string
+	Matched          int
+	MissingPlatform  int // telco credited, platform has no money-bearing advance
+	MissingTelco     int // platform believes credited, telco has no record
+	AmountMismatch   int
+	CurrencyMismatch int // R-P0-3: same amount, different currency
+	Malformed        int // R-P0-4: telco record amount/currency out of credible range
+	TelcoRecords     int
+	PlatformRecords  int
 }
 
 type toleranceCfg struct {
 	AmountToleranceMinor int64 `json:"amount_tolerance_minor"`
 	AutoResolve          bool  `json:"auto_resolve"`
+	// MaxAmountMinor (R-P0-4) bounds a credible face value. It is BOTH a
+	// plausibility ceiling and the overflow guard: recon compares int64
+	// amounts from external telco JSON, and an unbounded value can overflow
+	// the difference. Kept well below MaxInt64 so any |p-t| within bound is
+	// representable and abs64 is always safe.
+	MaxAmountMinor int64 `json:"max_amount_minor"`
 }
 
 // RunFulfilment reconciles the fulfilment layer for one telco/programme.
@@ -82,6 +95,12 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 	if err := json.Unmarshal(cv.Content, &tol); err != nil {
 		return sum, err
 	}
+	// R-P0-4 fail-closed floor: without a credible-amount ceiling there is no
+	// safe way to compare external telco amounts. Refuse rather than risk an
+	// overflow or accept an absurd value.
+	if tol.MaxAmountMinor <= 0 {
+		return sum, fmt.Errorf("recon.tolerance has no max_amount_minor — refusing (unbounded external amounts are not reconcilable)")
+	}
 
 	telcoRecords, err := s.fetchTelcoRecords(ctx, telcoID)
 	if err != nil {
@@ -94,7 +113,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 		// Platform side: money-bearing advances + their confirmed references.
 		plat := map[string]platformRecord{}
 		rows, err := tx.Query(ctx, `
-			SELECT a.advance_id, a.state, a.face_value_minor, COALESCE(fa.telco_reference,'')
+			SELECT a.advance_id, a.state, a.face_value_minor, a.currency, COALESCE(fa.telco_reference,'')
 			FROM advances a
 			LEFT JOIN fulfilment_attempts fa
 			  ON fa.advance_id = a.advance_id AND fa.state = 'CONFIRMED'
@@ -105,7 +124,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 		}
 		for rows.Next() {
 			var p platformRecord
-			if err := rows.Scan(&p.AdvanceID, &p.State, &p.FaceValueMinor, &p.TelcoReference); err != nil {
+			if err := rows.Scan(&p.AdvanceID, &p.State, &p.FaceValueMinor, &p.Currency, &p.TelcoReference); err != nil {
 				rows.Close()
 				return err
 			}
@@ -143,21 +162,50 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 				// money-bearing advance. NEVER force-matched.
 				sum.MissingPlatform++
 				if err := writeItem("FULFILMENT", tr.PlatformRequestID, tr.TelcoReference,
-					"BREAK_MISSING_PLATFORM", map[string]any{"telco_amount_minor": tr.FaceValueMinor}); err != nil {
+					"BREAK_MISSING_PLATFORM", map[string]any{
+						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
+					}); err != nil {
+					return err
+				}
+			case !isISOCurrency(tr.Currency) || !credibleAmount(tr.FaceValueMinor, tol.MaxAmountMinor):
+				// R-P0-4: an out-of-range or malformed telco amount/currency is
+				// NEVER fed to the numeric compare (overflow-safe) — it is a
+				// data-integrity break for ops, both values recorded.
+				sum.Malformed++
+				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
+					"BREAK_MALFORMED_TELCO_RECORD", map[string]any{
+						"platform_minor": p.FaceValueMinor, "platform_currency": p.Currency,
+						"telco_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
+					}); err != nil {
+					return err
+				}
+			case p.Currency != tr.Currency:
+				// R-P0-3: currency BEFORE amount — NGN 1,000 and USD 1,000 are
+				// not a match. Compared as raw strings; no cross-rate is ever
+				// applied in reconciliation.
+				sum.CurrencyMismatch++
+				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
+					"BREAK_CURRENCY_MISMATCH", map[string]any{
+						"platform_currency": p.Currency, "telco_currency": tr.Currency,
+						"platform_minor": p.FaceValueMinor, "telco_minor": tr.FaceValueMinor,
+					}); err != nil {
 					return err
 				}
 			case abs64(p.FaceValueMinor-tr.FaceValueMinor) > tol.AmountToleranceMinor:
+				// Both amounts are now range-validated and same-currency, so
+				// the subtraction cannot overflow.
 				sum.AmountMismatch++
 				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
 					"BREAK_AMOUNT_MISMATCH", map[string]any{
 						"platform_minor": p.FaceValueMinor, "telco_minor": tr.FaceValueMinor,
+						"currency": p.Currency,
 					}); err != nil {
 					return err
 				}
 			default:
 				sum.Matched++
 				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
-					"MATCHED", map[string]any{"amount_minor": p.FaceValueMinor}); err != nil {
+					"MATCHED", map[string]any{"amount_minor": p.FaceValueMinor, "currency": p.Currency}); err != nil {
 					return err
 				}
 			}
@@ -177,7 +225,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 	if err != nil {
 		return sum, err
 	}
-	if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch; breaks > 0 {
+	if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed; breaks > 0 {
 		s.Log.Error("reconciliation breaks found — operator attention required (V2-REC-012)",
 			"run_id", runID, "breaks", breaks, "matched", sum.Matched)
 	} else {
@@ -228,4 +276,26 @@ func abs64(v int64) int64 {
 		return -v
 	}
 	return v
+}
+
+// credibleAmount guards the numeric compare against external telco JSON
+// (R-P0-4): a face value must be non-negative and within the governed
+// ceiling. The ceiling is far below MaxInt64, so any difference between two
+// credible amounts is representable and abs64 never hits the MinInt64 trap.
+func credibleAmount(minor, ceiling int64) bool {
+	return minor >= 0 && minor <= ceiling
+}
+
+// isISOCurrency accepts a plausible ISO-4217 alpha-3 code (three A–Z letters).
+// Reconciliation compares currencies as opaque codes; it never converts.
+func isISOCurrency(c string) bool {
+	if len(c) != 3 {
+		return false
+	}
+	for i := 0; i < 3; i++ {
+		if c[i] < 'A' || c[i] > 'Z' {
+			return false
+		}
+	}
+	return true
 }
