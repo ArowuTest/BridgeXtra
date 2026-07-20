@@ -25,7 +25,17 @@ turns the skeleton into a production framework in verifiable slices.
   duplicate-source classification (R-P2-5=AUD-P2-010).** A stable `match_key`
   per source record; a duplicate telco success record for the same key is
   classified (`BREAK_DUPLICATE_TELCO_RECORD`), never silently double-counted;
-  exactly one canonical `recon_item` per (run, match_key).
+  exactly one canonical `recon_item` per (run, match_key). **← building now.**
+
+**Slice A verified clean (reviewer, 8f6e7c6). Two forward notes captured:**
+- **(→ Slice D)** the completeness floor correctly rejects an empty/truncated
+  feed but will also reject a *legitimately* low-volume day — needs a
+  **maker-checker accept-anyway override** so a genuinely quiet day is not stuck
+  unreconciled. Fold into the Slice E/D break/exception-resolution path.
+- **(→ evidence pack, Slice E)** `source_record_count` is over ALL records but
+  `source_control_total_minor` is SUCCESS-only — a defensible but *different*
+  population. Surface this explicitly in the statement/evidence pack so the two
+  are never read as the same population.
 
 - **Slice C — Period / watermark / bounded scope.** Stop rescanning all history:
   reconcile a governed period window with a durable watermark, so a run is a

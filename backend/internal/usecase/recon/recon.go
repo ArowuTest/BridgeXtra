@@ -38,6 +38,7 @@ const layerFulfilment = "FULFILMENT"
 // final control totals and outcome counts BEFORE its items, satisfying the
 // header FK and keeping the header a write-once summary.
 type reconItem struct {
+	matchKey    string // R-P0-6 Slice B: the logical thing being reconciled
 	itemType    string
 	platformRef string
 	telcoRef    string
@@ -144,6 +145,7 @@ type Summary struct {
 	AmountMismatch   int
 	CurrencyMismatch int // R-P0-3: same amount, different currency
 	Malformed        int // R-P0-4: telco record amount/currency out of credible range
+	DuplicateTelco   int // R-P0-6 Slice B: a telco success record repeated for one key
 	TelcoRecords     int
 	PlatformRecords  int
 	// R-P0-6 run manifest (recorded on the immutable recon_runs header).
@@ -246,8 +248,8 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 		// Classification is buffered (pure) so the immutable run header can be
 		// inserted with final control totals + outcome counts BEFORE its items.
 		var items []reconItem
-		writeItem := func(itemType, platformRef, telcoRef, status string, detail map[string]any) error {
-			items = append(items, reconItem{itemType, platformRef, telcoRef, status, detail})
+		writeItem := func(matchKey, itemType, platformRef, telcoRef, status string, detail map[string]any) error {
+			items = append(items, reconItem{matchKey, itemType, platformRef, telcoRef, status, detail})
 			return nil
 		}
 
@@ -256,14 +258,30 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 			if tr.Status != "SUCCESS" {
 				continue // failed telco records carry no credit to reconcile
 			}
-			seen[tr.PlatformRequestID] = true
-			p, ok := plat[tr.PlatformRequestID]
+			// R-P0-6 Slice B: match_key is the logical fulfilment being
+			// reconciled. A telco success record for a key ALREADY seen this run
+			// is a duplicate source record (R-P2-5) — classified as such, never
+			// silently double-counted into a second MATCHED. The first record for
+			// a key is the canonical classification below.
+			key := tr.PlatformRequestID
+			if seen[key] {
+				sum.DuplicateTelco++
+				if err := writeItem(key, "FULFILMENT", key, tr.TelcoReference,
+					"BREAK_DUPLICATE_TELCO_RECORD", map[string]any{
+						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
+					}); err != nil {
+					return err
+				}
+				continue
+			}
+			seen[key] = true
+			p, ok := plat[key]
 			switch {
 			case !ok:
 				// EDG-027 class: telco says credited, platform has no
 				// money-bearing advance. NEVER force-matched.
 				sum.MissingPlatform++
-				if err := writeItem("FULFILMENT", tr.PlatformRequestID, tr.TelcoReference,
+				if err := writeItem(key, "FULFILMENT", key, tr.TelcoReference,
 					"BREAK_MISSING_PLATFORM", map[string]any{
 						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
 					}); err != nil {
@@ -274,7 +292,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 				// NEVER fed to the numeric compare (overflow-safe) — it is a
 				// data-integrity break for ops, both values recorded.
 				sum.Malformed++
-				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
 					"BREAK_MALFORMED_TELCO_RECORD", map[string]any{
 						"platform_minor": p.FaceValueMinor, "platform_currency": p.Currency,
 						"telco_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
@@ -286,7 +304,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 				// not a match. Compared as raw strings; no cross-rate is ever
 				// applied in reconciliation.
 				sum.CurrencyMismatch++
-				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
 					"BREAK_CURRENCY_MISMATCH", map[string]any{
 						"platform_currency": p.Currency, "telco_currency": tr.Currency,
 						"platform_minor": p.FaceValueMinor, "telco_minor": tr.FaceValueMinor,
@@ -297,7 +315,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 				// Both amounts are now range-validated and same-currency, so
 				// the subtraction cannot overflow.
 				sum.AmountMismatch++
-				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
 					"BREAK_AMOUNT_MISMATCH", map[string]any{
 						"platform_minor": p.FaceValueMinor, "telco_minor": tr.FaceValueMinor,
 						"currency": p.Currency,
@@ -306,7 +324,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 				}
 			default:
 				sum.Matched++
-				if err := writeItem("FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
 					"MATCHED", map[string]any{"amount_minor": p.FaceValueMinor, "currency": p.Currency}); err != nil {
 					return err
 				}
@@ -316,14 +334,14 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 		for id, p := range plat {
 			if !seen[id] {
 				sum.MissingTelco++
-				if err := writeItem("FULFILMENT", p.AdvanceID, p.TelcoReference,
+				if err := writeItem(id, "FULFILMENT", p.AdvanceID, p.TelcoReference,
 					"BREAK_MISSING_TELCO", map[string]any{"platform_minor": p.FaceValueMinor}); err != nil {
 					return err
 				}
 			}
 		}
 		sum.PlatformControlTotalMinor = platTotal
-		breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed
+		breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco
 
 		// Completeness gate (R-P0-6): a rerun must carry at least
 		// min_completeness_ratio of the prior ACTIVE run's source record count.
@@ -398,9 +416,9 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 			}
 			if _, err := tx.Exec(ctx, `
 				INSERT INTO recon_items (recon_item_id, run_id, telco_id, item_type,
-				  platform_ref, telco_ref, status, detail)
-				VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8)`,
-				platform.NewID("rci"), runID, telcoID, it.itemType, it.platformRef, it.telcoRef, it.status, dj); err != nil {
+				  platform_ref, telco_ref, status, detail, match_key)
+				VALUES ($1,$2,$3,$4,NULLIF($5,''),NULLIF($6,''),$7,$8,$9)`,
+				platform.NewID("rci"), runID, telcoID, it.itemType, it.platformRef, it.telcoRef, it.status, dj, it.matchKey); err != nil {
 				return err
 			}
 		}
@@ -409,7 +427,7 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 	if err != nil {
 		return sum, err
 	}
-	if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed; breaks > 0 {
+	if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco; breaks > 0 {
 		s.Log.Error("reconciliation breaks found — operator attention required (V2-REC-012)",
 			"run_id", runID, "breaks", breaks, "matched", sum.Matched)
 	} else {
