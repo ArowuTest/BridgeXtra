@@ -160,7 +160,8 @@ func (s *stack) http(t *testing.T, method, path, idemKey string, body any) (int,
 }
 
 func (s *stack) offersFor(t *testing.T, token string) []struct {
-	OfferID string `json:"offer_id"`
+	OfferID       string `json:"offer_id"`
+	DisclosureRef string `json:"disclosure_ref"`
 } {
 	t.Helper()
 	code, body := s.http(t, http.MethodGet,
@@ -169,12 +170,23 @@ func (s *stack) offersFor(t *testing.T, token string) []struct {
 		t.Fatalf("offers %s: %d %s", token, code, body)
 	}
 	var offers []struct {
-		OfferID string `json:"offer_id"`
+		OfferID       string `json:"offer_id"`
+		DisclosureRef string `json:"disclosure_ref"`
 	}
 	if err := json.Unmarshal(body, &offers); err != nil {
 		t.Fatal(err)
 	}
 	return offers
+}
+
+// confirmBody builds a confirm request carrying the R-P0-7 disclosure/channel
+// acceptance evidence for a presented offer — exactly as the real channel does.
+func confirmBody(offerID, disclosureRef, token, session string) map[string]any {
+	return map[string]any{
+		"programme_id": "prg_sim_airtime01", "offer_id": offerID, "msisdn_token": token,
+		"disclosure_ref": disclosureRef, "channel": "USSD",
+		"session_id": session, "accepted_at": time.Now().UTC().Format(time.RFC3339),
+	}
 }
 
 func (s *stack) makeEnquiriesDue(t *testing.T) {
@@ -220,18 +232,16 @@ func TestWalkingSkeleton_E2E(t *testing.T) {
 	// 1. Happy subscriber: confirm -> 201 ACTIVE... but adapter timeout is
 	// 300ms and the sim answers instantly for normal tokens.
 	okOffers := s.offersFor(t, "tok_e2e_ok")
-	code, body := s.http(t, http.MethodPost, "/v1/advances", "e2e-ok-1", map[string]string{
-		"programme_id": "prg_sim_airtime01", "offer_id": okOffers[0].OfferID, "msisdn_token": "tok_e2e_ok",
-	})
+	code, body := s.http(t, http.MethodPost, "/v1/advances", "e2e-ok-1",
+		confirmBody(okOffers[0].OfferID, okOffers[0].DisclosureRef, "tok_e2e_ok", "sess-e2e-ok"))
 	if code != http.StatusCreated {
 		t.Fatalf("happy confirm: %d %s", code, body)
 	}
 
 	// 2. Timeout subscriber: 202 PROCESSING (credit happened telco-side).
 	toOffers := s.offersFor(t, "tok_TIMEOUT_e2e")
-	code, body = s.http(t, http.MethodPost, "/v1/advances", "e2e-to-1", map[string]string{
-		"programme_id": "prg_sim_airtime01", "offer_id": toOffers[0].OfferID, "msisdn_token": "tok_TIMEOUT_e2e",
-	})
+	code, body = s.http(t, http.MethodPost, "/v1/advances", "e2e-to-1",
+		confirmBody(toOffers[0].OfferID, toOffers[0].DisclosureRef, "tok_TIMEOUT_e2e", "sess-e2e-to"))
 	if code != http.StatusAccepted {
 		t.Fatalf("timeout confirm must be 202: %d %s", code, body)
 	}
@@ -319,11 +329,9 @@ func TestBC3_RandomizedHistories_InvariantsAlwaysHold(t *testing.T) {
 		key := fmt.Sprintf("p-key-%02d", i)
 		reps := 1 + rng.Intn(3) // duplicates exercise EDG-001 constantly
 		for r := 0; r < reps; r++ {
-			s.http(t, http.MethodPost, "/v1/advances", key, map[string]string{
-				"programme_id": "prg_sim_airtime01",
-				"offer_id":     offers[rng.Intn(len(offers))].OfferID,
-				"msisdn_token": tok,
-			})
+			off := offers[rng.Intn(len(offers))]
+			s.http(t, http.MethodPost, "/v1/advances", key,
+				confirmBody(off.OfferID, off.DisclosureRef, tok, "sess-"+key))
 		}
 		if i%5 == 0 {
 			s.makeEnquiriesDue(t)
