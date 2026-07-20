@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
@@ -32,6 +33,18 @@ import (
 // reconLayer is the layer a run reconciles. Slice A ships FULFILMENT; the same
 // header/manifest machinery extends to the others in Slice D.
 const layerFulfilment = "FULFILMENT"
+
+// R-P0-6 Slice D3 (completeness override) errors.
+var (
+	// ErrSelfApproveOverride: the schema four-eyes CHECK fired — the override
+	// approver equals its proposer.
+	ErrSelfApproveOverride = errors.New("recon: completeness override approver must differ from proposer (two-person decision)")
+	// ErrNoRejectedRun: an override can only be proposed for a window that the
+	// completeness floor actually rejected — there is no such REJECTED run.
+	ErrNoRejectedRun = errors.New("recon: no REJECTED run for this window — nothing to override")
+	// ErrOverrideNotPending: approve targeted an override not in PENDING.
+	ErrOverrideNotPending = errors.New("recon: completeness override is not pending approval")
+)
 
 // reconItem buffers one classified comparison before it is written — the
 // classification is pure (no DB writes) so the run header can be inserted with
@@ -157,6 +170,11 @@ type Summary struct {
 	// Rejected is true when the run failed the completeness floor and was
 	// recorded as REJECTED without superseding the prior ACTIVE run.
 	Rejected bool
+	// CompletenessOverridden is true when the run WOULD have been rejected by the
+	// completeness floor but an approved two-actor override (R-P0-6 Slice D3)
+	// authorized it to supersede — a legitimately low-volume window accepted by
+	// maker+checker.
+	CompletenessOverridden bool
 	// R-P0-6 Slice C: the bounded window this run reconciled. NothingToReconcile
 	// is true when the window was empty (no settled time since the watermark) —
 	// no run is written.
@@ -327,6 +345,96 @@ func (s *Service) ReconcileRecentPeriods(ctx context.Context, telcoID, programme
 			"horizon", horizon.Format(time.RFC3339))
 	}
 	return out, nil
+}
+
+// ProposeCompletenessOverride is the MAKER step of the two-actor completeness
+// override (R-P0-6 Slice D3, VR-48): an operator proposes that a legitimately
+// low-volume window — one the completeness floor REJECTED — be accepted anyway
+// on the next re-reconcile. The override is scoped to exactly the rejected
+// window: it records the low source count the maker reviewed
+// (authorized_source_count) and the ACTIVE run to be superseded
+// (baseline_active_run_id), so an approval can never authorize a worse shrink or
+// a different transition. It refuses if no REJECTED run exists for the window
+// (nothing to override) or no ACTIVE run exists (nothing to supersede). Returns
+// the override id for the checker.
+func (s *Service) ProposeCompletenessOverride(ctx context.Context, telcoID, programmeID string, periodStart time.Time, proposedBy, reason string) (string, error) {
+	if reason == "" {
+		return "", fmt.Errorf("completeness override requires a reason")
+	}
+	overrideID := platform.NewID("rco")
+	tctx := platform.WithTenant(ctx, telcoID)
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		// The ACTIVE run for the window (what an authorized re-reconcile supersedes).
+		var activeRunID string
+		var periodEnd time.Time
+		if err := tx.QueryRow(ctx, `
+			SELECT run_id, period_end FROM recon_runs
+			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE' AND period_start=$4`,
+			telcoID, programmeID, layerFulfilment, periodStart).Scan(&activeRunID, &periodEnd); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return fmt.Errorf("no ACTIVE run for this window — nothing to supersede")
+			}
+			return err
+		}
+		// The most recent REJECTED run for the window — the low volume the actors
+		// review, and the count the override authorizes.
+		var rejectedRunID string
+		var authorizedCount int64
+		if err := tx.QueryRow(ctx, `
+			SELECT run_id, source_record_count FROM recon_runs
+			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='REJECTED' AND period_start=$4
+			ORDER BY created_at DESC LIMIT 1`,
+			telcoID, programmeID, layerFulfilment, periodStart).Scan(&rejectedRunID, &authorizedCount); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrNoRejectedRun
+			}
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO recon_completeness_overrides
+			  (override_id, telco_id, programme_id, layer, period_start, period_end,
+			   rejected_run_id, baseline_active_run_id, authorized_source_count,
+			   proposed_by, reason)
+			VALUES ($1,$2,$3,$4,$5,$6, $7,$8,$9, $10,$11)`,
+			overrideID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
+			rejectedRunID, activeRunID, authorizedCount, proposedBy, reason); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	s.Log.Info("completeness override proposed (maker)",
+		"override", overrideID, "telco", telcoID, "programme", programmeID, "by", proposedBy)
+	return overrideID, nil
+}
+
+// ApproveCompletenessOverride is the CHECKER step: a DISTINCT operator approves
+// a pending override. The schema four-eyes CHECK (approved_by <> proposed_by)
+// arbitrates the two-person rule — a same-actor approval maps to
+// ErrSelfApproveOverride. Only a PENDING override can be approved.
+func (s *Service) ApproveCompletenessOverride(ctx context.Context, telcoID, overrideID, approvedBy string) error {
+	tctx := platform.WithTenant(ctx, telcoID)
+	return repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		ct, err := tx.Exec(ctx, `
+			UPDATE recon_completeness_overrides
+			SET state='APPROVED', approved_by=$2, approved_at=now()
+			WHERE override_id=$1 AND state='PENDING'`, overrideID, approvedBy)
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23514" {
+				return ErrSelfApproveOverride
+			}
+			return err
+		}
+		if ct.RowsAffected() != 1 {
+			return ErrOverrideNotPending
+		}
+		s.Log.Info("completeness override approved (checker)",
+			"override", overrideID, "telco", telcoID, "by", approvedBy)
+		return nil
+	})
 }
 
 // loadForRecon reads the governed tolerance (all fail-closed floors enforced)
@@ -558,35 +666,57 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 		// of this window), not a different period — so a low-volume next period is
 		// never compared against a busy prior one.
 		var priorCount int64
+		var priorActiveRunID string
 		priorExists := true
 		if err := tx.QueryRow(ctx, `
-			SELECT source_record_count FROM recon_runs
+			SELECT run_id, source_record_count FROM recon_runs
 			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE' AND period_start=$4`,
-			telcoID, programmeID, layerFulfilment, periodStart).Scan(&priorCount); err != nil {
+			telcoID, programmeID, layerFulfilment, periodStart).Scan(&priorActiveRunID, &priorCount); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				priorExists = false
 			} else {
 				return err
 			}
 		}
+		// overrideToConsume is set when the completeness floor would reject this
+		// re-reconcile but an approved two-actor override authorizes it (Slice D3).
+		// The override is consumed AFTER the header is written (FK order) so it can
+		// name the run that used it.
+		var overrideToConsume string
 		if priorExists {
 			floor := int64(math.Ceil(float64(priorCount) * tol.MinCompletenessRatio))
 			if srcCount < floor {
-				sum.Rejected = true
-				if _, err := tx.Exec(ctx, `
-					INSERT INTO recon_runs (run_id, telco_id, programme_id, layer,
-					  period_start, period_end,
-					  source_record_count, source_control_total_minor, source_hash,
-					  platform_record_count, platform_control_total_minor,
-					  matched_count, break_count, state, created_by)
-					VALUES ($1,$2,$3,$4, $5,$6,
-					  $7,$8,$9, $10,$11, 0,0, 'REJECTED', 'worker:recon')`,
-					runID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
-					srcCount, srcTotal, srcHash, int64(len(plat)), platTotal); err != nil {
+				// A legitimately low-volume window can be accepted by an approved
+				// override scoped to EXACTLY this transition: the same ACTIVE run the
+				// two actors reviewed (baseline_active_run_id) and a source count no
+				// worse than the one they accepted (authorized_source_count). If none
+				// authorizes it, the floor rejects as before.
+				err := tx.QueryRow(ctx, `
+					SELECT override_id FROM recon_completeness_overrides
+					WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND period_start=$4
+					  AND state='APPROVED' AND baseline_active_run_id=$5
+					  AND authorized_source_count <= $6`,
+					telcoID, programmeID, layerFulfilment, periodStart, priorActiveRunID, srcCount).Scan(&overrideToConsume)
+				if errors.Is(err, pgx.ErrNoRows) {
+					sum.Rejected = true
+					if _, err := tx.Exec(ctx, `
+						INSERT INTO recon_runs (run_id, telco_id, programme_id, layer,
+						  period_start, period_end,
+						  source_record_count, source_control_total_minor, source_hash,
+						  platform_record_count, platform_control_total_minor,
+						  matched_count, break_count, state, created_by)
+						VALUES ($1,$2,$3,$4, $5,$6,
+						  $7,$8,$9, $10,$11, 0,0, 'REJECTED', 'worker:recon')`,
+						runID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
+						srcCount, srcTotal, srcHash, int64(len(plat)), platTotal); err != nil {
+						return err
+					}
+					// REJECTED: no items, no supersession — the prior run stays live.
+					return nil
+				} else if err != nil {
 					return err
 				}
-				// REJECTED: no items, no supersession — the prior run stays live.
-				return nil
+				sum.CompletenessOverridden = true
 			}
 		}
 
@@ -615,6 +745,22 @@ func (s *Service) reconcile(ctx context.Context, telcoID, programmeID string, pe
 			int64(len(plat)), platTotal,
 			int64(sum.Matched), int64(breaks)); err != nil {
 			return err
+		}
+
+		// Consume the completeness override (Slice D3): single-use, guarded on
+		// state='APPROVED' so a concurrent consume of the same override loses. The
+		// header now exists, so consumed_by_run_id's FK is satisfied.
+		if overrideToConsume != "" {
+			ct, err := tx.Exec(ctx, `
+				UPDATE recon_completeness_overrides
+				SET state='CONSUMED', consumed_by_run_id=$2, consumed_at=now()
+				WHERE override_id=$1 AND state='APPROVED'`, overrideToConsume, runID)
+			if err != nil {
+				return err
+			}
+			if ct.RowsAffected() != 1 {
+				return fmt.Errorf("completeness override %s was consumed concurrently", overrideToConsume)
+			}
 		}
 
 		// Items are FK-linked to the header just written (recon_items_run_fk).

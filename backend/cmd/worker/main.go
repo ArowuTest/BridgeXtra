@@ -68,6 +68,12 @@ func main() {
 		"run delinquency classification once for every active telco/programme and exit (V2 §15 daily job)")
 	breaksOnce := flag.Bool("breaks", false,
 		"report unresolved reconciliation breaks older than the governed aging threshold and exit 1 if any (V2-REC-012)")
+	overridePropose := flag.String("recon-override-propose", "",
+		"R-P0-6 D3 MAKER: propose a completeness override for the window of the given REJECTED recon run id; requires -actor and -reason")
+	overrideApprove := flag.String("recon-override-approve", "",
+		"R-P0-6 D3 CHECKER: approve the given completeness override id (must be a DIFFERENT -actor than the proposer)")
+	overrideActor := flag.String("actor", "", "operator id for -recon-override-* (maker or checker)")
+	overrideReason := flag.String("reason", "", "reason for -recon-override-propose")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -113,6 +119,24 @@ func main() {
 
 	if *reconOnce {
 		runRecon(ctx, log, appPool, appCfg, telcos)
+		return
+	}
+
+	if *overridePropose != "" {
+		if *overrideActor == "" || *overrideReason == "" {
+			log.Error("recon-override-propose requires -actor and -reason")
+			os.Exit(1)
+		}
+		runOverridePropose(ctx, log, appPool, workerPool, appCfg, *overridePropose, *overrideActor, *overrideReason)
+		return
+	}
+
+	if *overrideApprove != "" {
+		if *overrideActor == "" {
+			log.Error("recon-override-approve requires -actor")
+			os.Exit(1)
+		}
+		runOverrideApprove(ctx, log, appPool, workerPool, appCfg, *overrideApprove, *overrideActor)
 		return
 	}
 
@@ -273,6 +297,49 @@ func main() {
 		log.Error("worker stopped", "err", err)
 		os.Exit(1)
 	}
+}
+
+// runOverridePropose is the MAKER operator job (R-P0-6 Slice D3): propose a
+// completeness override for the window of a REJECTED recon run. The run's scope
+// is read via the worker pool (cross-tenant); the override itself is created
+// tenant-scoped through the recon service.
+func runOverridePropose(ctx context.Context, log *slog.Logger, appPool, workerPool *pgxpool.Pool, appCfg *configsvc.Service, rejectedRunID, actor, reason string) {
+	var telco, programme, state string
+	var periodStart time.Time
+	if err := workerPool.QueryRow(ctx, `
+		SELECT telco_id, programme_id, period_start, state FROM recon_runs WHERE run_id=$1`,
+		rejectedRunID).Scan(&telco, &programme, &periodStart, &state); err != nil {
+		log.Error("recon-override-propose: recon run not found", "run", rejectedRunID, "err", err)
+		os.Exit(1)
+	}
+	if state != "REJECTED" {
+		log.Error("recon-override-propose: target run is not REJECTED", "run", rejectedRunID, "state", state)
+		os.Exit(1)
+	}
+	svc := recon.New(appPool, appCfg, log)
+	id, err := svc.ProposeCompletenessOverride(ctx, telco, programme, periodStart, actor, reason)
+	if err != nil {
+		log.Error("recon-override-propose failed", "err", err)
+		os.Exit(1)
+	}
+	fmt.Printf("completeness override proposed: %s (window of rejected run %s) — needs a DIFFERENT actor to approve\n", id, rejectedRunID)
+}
+
+// runOverrideApprove is the CHECKER operator job: approve a pending completeness
+// override. The four-eyes rule (approver != proposer) is schema-enforced.
+func runOverrideApprove(ctx context.Context, log *slog.Logger, appPool, workerPool *pgxpool.Pool, appCfg *configsvc.Service, overrideID, actor string) {
+	var telco string
+	if err := workerPool.QueryRow(ctx,
+		`SELECT telco_id FROM recon_completeness_overrides WHERE override_id=$1`, overrideID).Scan(&telco); err != nil {
+		log.Error("recon-override-approve: override not found", "override", overrideID, "err", err)
+		os.Exit(1)
+	}
+	svc := recon.New(appPool, appCfg, log)
+	if err := svc.ApproveCompletenessOverride(ctx, telco, overrideID, actor); err != nil {
+		log.Error("recon-override-approve failed", "err", err)
+		os.Exit(1)
+	}
+	fmt.Printf("completeness override approved: %s — the next re-reconcile of that window will supersede despite the completeness floor\n", overrideID)
 }
 
 // runRecon executes fulfilment reconciliation for every active telco and each

@@ -71,9 +71,14 @@ turns the skeleton into a production framework in verifiable slices.
     recon_rp06d2_test.go proves incremental does NOT recover but the re-sweep does,
     with the original break preserved in the superseded run; plus no-op-idempotence
     and lookback-bound tests.
-  - **D3 — completeness maker-checker override (VR-48).** A two-actor
-    accept-anyway for a legitimately low-volume window that the completeness
-    floor rejected, so a genuinely quiet period isn't stuck unreconciled.
+  - **D3 — completeness maker-checker override (VR-48). DONE.** A two-actor
+    accept-anyway for a legitimately low-volume window the completeness floor
+    rejected. mig 0040 `recon_completeness_overrides` (four-eyes CHECK, one-live
+    per window, column-scoped UPDATE); `reconcile()`'s REJECT branch consults an
+    APPROVED override scoped to the reviewed source count AND the reviewed ACTIVE
+    run, single-use. Worker jobs `-recon-override-propose/-approve` (armed).
+    5 adversarial tests: happy, approval-required, four-eyes self-approve,
+    single-use, count-bound, baseline-staleness.
   - **D4 — multi-layer.** Extend the header/manifest machinery to the RECOVERY,
     SETTLEMENT and BUREAU layers (fulfilment is the reference impl).
 
