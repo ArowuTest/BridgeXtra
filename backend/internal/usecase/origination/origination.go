@@ -46,6 +46,10 @@ var (
 	ErrOfferExpired         = errors.New("origination: offer expired") // EDG-011
 	ErrOfferNotAcceptable   = errors.New("origination: offer no longer acceptable")
 	ErrSubscriberIneligible = errors.New("origination: subscriber not eligible") // barred/self-excluded/closed
+	// Self-exclusion (R1-MUST) errors.
+	ErrSelfExclusionChannelNotAllowed = errors.New("origination: self-exclusion channel not permitted")
+	ErrNotSelfExcluded                = errors.New("origination: subscriber has no active self-exclusion")
+	ErrCoolOffNotElapsed              = errors.New("origination: self-exclusion cool-off has not elapsed")
 	// ErrDecisionUnavailable (M2e): the credit decision is expired, ineligible
 	// or absent — customer-safe NO_OFFER, never a stale lend (EDG-014).
 	ErrDecisionUnavailable = errors.New("origination: no valid credit decision")
@@ -102,19 +106,20 @@ type Service struct {
 	// arm-or-refuse; reachability invariant).
 	treasury *treasury.Service
 
-	subscribers repo.Subscribers
-	decisions   repo.Decisions
-	offers      repo.Offers
-	disclosures repo.DisclosureSnapshots
-	pools       repo.FundingPools
-	advances    repo.Advances
-	attempts    repo.Attempts
-	outbox      repo.Outbox
-	flags       repo.SubscriberFlags
-	consents    repo.Consents
-	programmes  repo.Programmes
-	idem        repo.Idempotency
-	audit       repo.Audit
+	subscribers    repo.Subscribers
+	selfExclusions repo.SelfExclusions
+	decisions      repo.Decisions
+	offers         repo.Offers
+	disclosures    repo.DisclosureSnapshots
+	pools          repo.FundingPools
+	advances       repo.Advances
+	attempts       repo.Attempts
+	outbox         repo.Outbox
+	flags          repo.SubscriberFlags
+	consents       repo.Consents
+	programmes     repo.Programmes
+	idem           repo.Idempotency
+	audit          repo.Audit
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, led *ledger.Service, adapter mno.Client, log *slog.Logger) *Service {
@@ -339,6 +344,12 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 		}
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
+		}
+		// Register-authoritative self-exclusion check (R1-MUST): refuse on an ACTIVE
+		// self-exclusion directly, so the control never depends on the status mirror
+		// being in sync (safety-floor discipline).
+		if err := s.assertNotSelfExcluded(ctx, tx, sub.SubscriberAccountID); err != nil {
+			return err
 		}
 		if err := s.checkOverlays(ctx, tx, sub.TelcoID, sub.SubscriberAccountID, "OFFER", now); err != nil {
 			return err
@@ -566,6 +577,12 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		}
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
+		}
+		// Register-authoritative self-exclusion check (R1-MUST): refuse on an ACTIVE
+		// self-exclusion directly, so the control never depends on the status mirror
+		// being in sync (safety-floor discipline).
+		if err := s.assertNotSelfExcluded(ctx, tx, sub.SubscriberAccountID); err != nil {
+			return err
 		}
 		// Real-time overlays at the money-moving moment (V2-SCR-015). The
 		// validator guarantees CONFIRM cannot be configured off.

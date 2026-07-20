@@ -23,6 +23,37 @@ func init() {
 	validators["telco.adapter"] = validateTelcoAdapter
 	validators["recon.tolerance"] = validateReconTolerance
 	validators["ledger.accounts"] = validateLedgerAccounts
+	validators["origination.self_exclusion"] = validateSelfExclusion
+}
+
+// validateSelfExclusion governs the self-exclusion terms (R1-MUST): the cool-off
+// minimum before a self-exclusion can be reinstated, and the channels a
+// subscriber may self-exclude through. A positive cool-off is REQUIRED — a zero
+// or absent minimum would make self-exclusion instantly reversible, i.e. not a
+// control at all (armed-but-dead). The channel list must be non-empty so a
+// request can never be accepted through an ungoverned channel.
+func validateSelfExclusion(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
+	var v struct {
+		MinExclusionDays *int     `json:"min_exclusion_days"`
+		AllowedChannels  []string `json:"allowed_channels"`
+	}
+	if err := strictUnmarshal(content, &v); err != nil {
+		return fmt.Errorf("parse: %w", err)
+	}
+	// 1..3650 days: at least a day of cool-off, at most ten years (a mis-set
+	// value cannot park a subscriber out effectively forever by accident).
+	if v.MinExclusionDays == nil || *v.MinExclusionDays < 1 || *v.MinExclusionDays > 3650 {
+		return fmt.Errorf("min_exclusion_days must be in 1..3650 (the cool-off before reinstatement; zero would make self-exclusion instantly reversible)")
+	}
+	if len(v.AllowedChannels) == 0 {
+		return fmt.Errorf("allowed_channels must be non-empty (a self-exclusion request must arrive through a governed channel)")
+	}
+	for i, c := range v.AllowedChannels {
+		if c == "" {
+			return fmt.Errorf("allowed_channels[%d] is empty", i)
+		}
+	}
+	return nil
 }
 
 // validateLedgerAccounts (M1B2-F1): an empty or malformed chart fails closed

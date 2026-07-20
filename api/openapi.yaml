@@ -1357,6 +1357,82 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/self-exclusions:
+    post:
+      operationId: requestSelfExclusion
+      summary: Self-exclude a subscriber from credit (R1-MUST, responsible lending)
+      description: >
+        Records a subscriber's opt-out from being offered/receiving credit and
+        enforces it at the offer/confirm gate. Idempotent — a repeat request
+        returns the existing exclusion. The exclusion cannot be reinstated before
+        the governed cool-off (origination.self_exclusion.min_exclusion_days) has
+        elapsed.
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [programme_id, msisdn_token, channel]
+              properties:
+                programme_id: { type: string }
+                msisdn_token: { type: string }
+                channel: { type: string, description: Must be a governed allowed_channel }
+                reason: { type: string }
+      responses:
+        "200":
+          description: Exclusion recorded (or the existing one, if already excluded)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  exclusion_id: { type: string }
+                  min_until: { type: string, format: date-time, description: Earliest reinstatement (cool-off end) }
+                  already_excluded: { type: boolean }
+        "400":
+          description: Malformed request or ungoverned channel (SELF_EXCLUSION_BAD_REQUEST / CHANNEL_NOT_ALLOWED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/self-exclusions/reinstate:
+    post:
+      operationId: reinstateSelfExclusion
+      summary: Reinstate a self-excluded subscriber after the cool-off
+      description: >
+        Lifts a self-exclusion once the governed cool-off has elapsed. A
+        reinstatement before the cool-off is refused (COOL_OFF_NOT_ELAPSED).
+      parameters:
+        - $ref: "#/components/parameters/CorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [msisdn_token, channel]
+              properties:
+                msisdn_token: { type: string }
+                channel: { type: string }
+      responses:
+        "200":
+          description: Subscriber reinstated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  msisdn_token: { type: string }
+                  state: { type: string, enum: [REINSTATED] }
+        "409":
+          description: No active exclusion, or cool-off not elapsed (NOT_SELF_EXCLUDED / COOL_OFF_NOT_ELAPSED)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     ApiKeyAuth:

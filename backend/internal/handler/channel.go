@@ -86,6 +86,10 @@ func (h *Channel) Mount(mux *http.ServeMux, auth *TenantAuth) {
 	mux.Handle("POST /v1/advances", wrap(h.confirm))
 	mux.Handle("GET /v1/advances/{id}", wrap(h.advanceStatus))
 	mux.Handle("POST /v1/recovery/events", wrap(h.recoveryEvent))
+	// Self-exclusion (R1-MUST): a subscriber opts out of credit; reinstatement is
+	// governed by a cool-off enforced in the usecase.
+	mux.Handle("POST /v1/self-exclusions", wrap(h.selfExclude))
+	mux.Handle("POST /v1/self-exclusions/reinstate", wrap(h.reinstateSelfExclusion))
 }
 
 // --- wire shapes -----------------------------------------------------------
@@ -332,6 +336,12 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		writeErr(w, http.StatusConflict, "DISCLOSURE_MISMATCH", "disclosure no longer valid for this offer; request fresh offers")
 	case errors.Is(err, origination.ErrChannelNotAllowed):
 		writeErr(w, http.StatusBadRequest, "CHANNEL_NOT_ALLOWED", "this channel is not permitted for this programme")
+	case errors.Is(err, origination.ErrSelfExclusionChannelNotAllowed):
+		writeErr(w, http.StatusBadRequest, "CHANNEL_NOT_ALLOWED", "this channel is not permitted for self-exclusion")
+	case errors.Is(err, origination.ErrNotSelfExcluded):
+		writeErr(w, http.StatusConflict, "NOT_SELF_EXCLUDED", "no active self-exclusion to reinstate")
+	case errors.Is(err, origination.ErrCoolOffNotElapsed):
+		writeErr(w, http.StatusConflict, "COOL_OFF_NOT_ELAPSED", "the self-exclusion cool-off period has not elapsed")
 	case errors.Is(err, origination.ErrDisclosureUnavailable):
 		// Fail-closed: no active disclosure policy — cannot disclose, cannot serve.
 		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
@@ -347,4 +357,60 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		h.Log.Error("unmapped domain error", "err", err, "path", r.URL.Path)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 	}
+}
+
+// --- self-exclusion (R1-MUST) ----------------------------------------------
+
+type selfExclusionRequest struct {
+	ProgrammeID string `json:"programme_id"`
+	MSISDNToken string `json:"msisdn_token"`
+	Channel     string `json:"channel"`
+	Reason      string `json:"reason"`
+}
+
+type selfExclusionResponse struct {
+	ExclusionID     string    `json:"exclusion_id"`
+	MinUntil        time.Time `json:"min_until"`
+	AlreadyExcluded bool      `json:"already_excluded"`
+}
+
+// selfExclude records a subscriber's opt-out from credit. The tenant is resolved
+// by auth into the context; enforcement is at the offer/confirm gate.
+func (h *Channel) selfExclude(w http.ResponseWriter, r *http.Request) {
+	var req selfExclusionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "malformed JSON body")
+		return
+	}
+	if req.ProgrammeID == "" || req.MSISDNToken == "" || req.Channel == "" {
+		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "programme_id, msisdn_token and channel are required")
+		return
+	}
+	res, err := h.Origination.RequestSelfExclusion(r.Context(), req.ProgrammeID, req.MSISDNToken, req.Channel, req.Reason)
+	if err != nil {
+		h.writeDomainErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, selfExclusionResponse{
+		ExclusionID: res.ExclusionID, MinUntil: res.MinUntil, AlreadyExcluded: res.AlreadyExcluded,
+	})
+}
+
+// reinstateSelfExclusion lifts a self-exclusion once the governed cool-off has
+// elapsed (the usecase refuses an early reinstatement).
+func (h *Channel) reinstateSelfExclusion(w http.ResponseWriter, r *http.Request) {
+	var req selfExclusionRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<14)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "malformed JSON body")
+		return
+	}
+	if req.MSISDNToken == "" || req.Channel == "" {
+		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "msisdn_token and channel are required")
+		return
+	}
+	if err := h.Origination.ReinstateSelfExclusion(r.Context(), req.MSISDNToken, req.Channel); err != nil {
+		h.writeDomainErr(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"msisdn_token": req.MSISDNToken, "state": "REINSTATED"})
 }

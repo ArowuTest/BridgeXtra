@@ -410,3 +410,35 @@ func TestChannel_RP07_DisclosureEvidence_Refusals(t *testing.T) {
 		t.Fatalf("refused confirms must create no advance, got %d", advances)
 	}
 }
+
+// Self-exclusion over HTTP (R1-MUST): opting out blocks offers, and a
+// reinstatement before the cool-off is refused.
+func TestChannel_SelfExclusion_BlocksOffersAndCoolOff(t *testing.T) {
+	f := newChannelFixture(t, "chan_selfexcl", 0, 2_000)
+
+	resp, _ := f.do(t, http.MethodGet,
+		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("baseline offers: %d", resp.StatusCode)
+	}
+
+	resp, body := f.do(t, http.MethodPost, "/v1/self-exclusions", nil, map[string]string{
+		"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001", "channel": "USSD", "reason": "opting out",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("self-exclude: %d %s", resp.StatusCode, body)
+	}
+
+	resp, _ = f.do(t, http.MethodGet,
+		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("a self-excluded subscriber must be refused offers (403), got %d", resp.StatusCode)
+	}
+
+	resp, _ = f.do(t, http.MethodPost, "/v1/self-exclusions/reinstate", nil, map[string]string{
+		"msisdn_token": "tok_sim_0001", "channel": "USSD",
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a reinstatement before the cool-off must be 409, got %d", resp.StatusCode)
+	}
+}

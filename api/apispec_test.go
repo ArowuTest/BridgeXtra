@@ -36,6 +36,9 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/advances":        true,
 		"/v1/advances/{id}":   true,
 		"/v1/recovery/events": true,
+
+		"/v1/self-exclusions":           true,
+		"/v1/self-exclusions/reinstate": true,
 		// M4a portal (session-authenticated, deny-by-default RBAC)
 		"/v1/portal/login":                true,
 		"/v1/portal/logout":               true,
