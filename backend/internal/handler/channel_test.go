@@ -354,3 +354,59 @@ func TestChannel_ExpiredOffer_409StableCode(t *testing.T) {
 		t.Fatalf("expired offer must be 409 OFFER_EXPIRED: %d %s", resp.StatusCode, body)
 	}
 }
+
+// R-P0-7 over the wire: a confirm that fails to prove consent — no disclosure
+// reference, a disallowed channel, or a disclosure reference that doesn't match
+// the offer — is refused with the documented envelope, never a silent advance.
+func TestChannel_RP07_DisclosureEvidence_Refusals(t *testing.T) {
+	f := newChannelFixture(t, "chan_rp07", 0, 2_000)
+	_, body := f.do(t, http.MethodGet,
+		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	var offers []struct {
+		OfferID       string `json:"offer_id"`
+		DisclosureRef string `json:"disclosure_ref"`
+	}
+	if err := json.Unmarshal(body, &offers); err != nil || len(offers) < 2 {
+		t.Fatalf("need >=2 offers with disclosure: %v %s", err, body)
+	}
+	base := func() map[string]any {
+		return map[string]any{
+			"programme_id": "prg_sim_airtime01", "offer_id": offers[0].OfferID, "msisdn_token": "tok_sim_0001",
+			"disclosure_ref": offers[0].DisclosureRef, "channel": "USSD",
+			"session_id": "wire-sess-rp07", "accepted_at": time.Now().UTC().Format(time.RFC3339),
+		}
+	}
+
+	// (a) missing disclosure_ref → 400 DISCLOSURE_EVIDENCE_REQUIRED.
+	b := base()
+	delete(b, "disclosure_ref")
+	resp, body := f.do(t, http.MethodPost, "/v1/advances", map[string]string{"Idempotency-Key": "rp07-http-noref"}, b)
+	if resp.StatusCode != http.StatusBadRequest || !bytes.Contains(body, []byte("DISCLOSURE_EVIDENCE_REQUIRED")) {
+		t.Fatalf("missing disclosure must be 400 DISCLOSURE_EVIDENCE_REQUIRED: %d %s", resp.StatusCode, body)
+	}
+
+	// (b) disallowed channel → 400 CHANNEL_NOT_ALLOWED.
+	b = base()
+	b["channel"] = "IVR"
+	resp, body = f.do(t, http.MethodPost, "/v1/advances", map[string]string{"Idempotency-Key": "rp07-http-chan"}, b)
+	if resp.StatusCode != http.StatusBadRequest || !bytes.Contains(body, []byte("CHANNEL_NOT_ALLOWED")) {
+		t.Fatalf("disallowed channel must be 400 CHANNEL_NOT_ALLOWED: %d %s", resp.StatusCode, body)
+	}
+
+	// (c) foreign disclosure reference (another offer's) → 409 DISCLOSURE_MISMATCH.
+	b = base()
+	b["disclosure_ref"] = offers[1].DisclosureRef
+	resp, body = f.do(t, http.MethodPost, "/v1/advances", map[string]string{"Idempotency-Key": "rp07-http-mism"}, b)
+	if resp.StatusCode != http.StatusConflict || !bytes.Contains(body, []byte("DISCLOSURE_MISMATCH")) {
+		t.Fatalf("foreign disclosure must be 409 DISCLOSURE_MISMATCH: %d %s", resp.StatusCode, body)
+	}
+
+	// No advance was created by any refused confirm.
+	var advances int
+	if err := f.db.Admin.QueryRow(context.Background(), `SELECT count(*) FROM advances`).Scan(&advances); err != nil {
+		t.Fatal(err)
+	}
+	if advances != 0 {
+		t.Fatalf("refused confirms must create no advance, got %d", advances)
+	}
+}
