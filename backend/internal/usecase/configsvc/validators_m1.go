@@ -224,10 +224,11 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 
 func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
 	var v struct {
-		AmountToleranceMinor *int64 `json:"amount_tolerance_minor"`
-		AutoResolve          *bool  `json:"auto_resolve"`
-		BreakAgingAlertHours *int   `json:"break_aging_alert_hours"`
-		MaxAmountMinor       *int64 `json:"max_amount_minor"`
+		AmountToleranceMinor *int64   `json:"amount_tolerance_minor"`
+		AutoResolve          *bool    `json:"auto_resolve"`
+		BreakAgingAlertHours *int     `json:"break_aging_alert_hours"`
+		MaxAmountMinor       *int64   `json:"max_amount_minor"`
+		MinCompletenessRatio *float64 `json:"min_completeness_ratio"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -252,6 +253,13 @@ func validateReconTolerance(ctx context.Context, tx pgx.Tx, content json.RawMess
 	}
 	if v.BreakAgingAlertHours == nil || *v.BreakAgingAlertHours < 1 {
 		return fmt.Errorf("break_aging_alert_hours must be >= 1")
+	}
+	// R-P0-6: a completeness floor in (0,1] is required so an empty or truncated
+	// rerun cannot supersede (wipe) a good reconciliation. A value of 1 demands
+	// a rerun be at least as large as the prior; below that some shrinkage is
+	// tolerated, but zero/absent is refused (no protection).
+	if v.MinCompletenessRatio == nil || *v.MinCompletenessRatio <= 0 || *v.MinCompletenessRatio > 1 {
+		return fmt.Errorf("min_completeness_ratio must be in (0,1] (rerun-completeness protection)")
 	}
 	return nil
 }

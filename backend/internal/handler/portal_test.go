@@ -423,9 +423,19 @@ func TestM4D_LedgerBrowser_ScopeAndTapThrough(t *testing.T) {
 // seedBreak inserts an open reconciliation break for a telco via the admin pool.
 func seedBreak(t *testing.T, f *portalFixture, id, telcoID string) {
 	t.Helper()
+	// R-P0-6: recon_items are FK-linked to a run header; seed a per-telco one.
+	runID := "run_test_" + telcoID
+	if _, err := f.db.Admin.Exec(context.Background(), `
+		INSERT INTO recon_runs (run_id, telco_id, programme_id, layer, period_start, period_end,
+		  source_record_count, source_control_total_minor, source_hash,
+		  platform_record_count, platform_control_total_minor, created_by)
+		VALUES ($1, $2, 'prg_sim_airtime01', 'FULFILMENT', to_timestamp(0), now(), 0,0,'seed',0,0,'test')
+		ON CONFLICT (run_id) DO NOTHING`, runID, telcoID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.db.Admin.Exec(context.Background(), `
 		INSERT INTO recon_items (recon_item_id, run_id, telco_id, item_type, status, platform_ref)
-		VALUES ($1, 'run_test', $2, 'FULFILMENT', 'BREAK_MISSING_TELCO', 'plat_'||$1)`, id, telcoID); err != nil {
+		VALUES ($1, $2, $3, 'FULFILMENT', 'BREAK_MISSING_TELCO', 'plat_'||$1)`, id, runID, telcoID); err != nil {
 		t.Fatal(err)
 	}
 }
