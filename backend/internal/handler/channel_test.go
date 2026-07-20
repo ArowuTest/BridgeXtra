@@ -436,7 +436,7 @@ func TestChannel_SelfExclusion_BlocksOffersAndCoolOff(t *testing.T) {
 	}
 
 	resp, _ = f.do(t, http.MethodPost, "/v1/self-exclusions/reinstate", nil, map[string]string{
-		"msisdn_token": "tok_sim_0001", "channel": "USSD",
+		"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001", "channel": "USSD",
 	})
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("a reinstatement before the cool-off must be 409, got %d", resp.StatusCode)

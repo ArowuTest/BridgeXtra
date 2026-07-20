@@ -34,11 +34,18 @@ func init() {
 // request can never be accepted through an ungoverned channel.
 func validateSelfExclusion(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
 	var v struct {
-		MinExclusionDays *int     `json:"min_exclusion_days"`
-		AllowedChannels  []string `json:"allowed_channels"`
+		MinExclusionDays             *int     `json:"min_exclusion_days"`
+		AllowedChannels              []string `json:"allowed_channels"`
+		RequireOperatorReinstatement *bool    `json:"require_operator_reinstatement"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
+	}
+	// require_operator_reinstatement is a governed toggle (default false =
+	// self-service after the cool-off). Required present so the policy is explicit,
+	// never an implicit default.
+	if v.RequireOperatorReinstatement == nil {
+		return fmt.Errorf("require_operator_reinstatement is required (bool: true = operator must lift the exclusion, false = self-service after the cool-off)")
 	}
 	// 1..3650 days: at least a day of cool-off, at most ten years (a mis-set
 	// value cannot park a subscriber out effectively forever by accident).

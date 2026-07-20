@@ -50,6 +50,10 @@ var (
 	ErrSelfExclusionChannelNotAllowed = errors.New("origination: self-exclusion channel not permitted")
 	ErrNotSelfExcluded                = errors.New("origination: subscriber has no active self-exclusion")
 	ErrCoolOffNotElapsed              = errors.New("origination: self-exclusion cool-off has not elapsed")
+	// ErrOperatorReinstatementRequired: policy requires an operator to lift a
+	// self-exclusion (require_operator_reinstatement=true) — self-service is
+	// refused (fail-closed until the operator maker-checker path exists).
+	ErrOperatorReinstatementRequired = errors.New("origination: self-exclusion reinstatement requires operator approval")
 	// ErrDecisionUnavailable (M2e): the credit decision is expired, ineligible
 	// or absent — customer-safe NO_OFFER, never a stale lend (EDG-014).
 	ErrDecisionUnavailable = errors.New("origination: no valid credit decision")

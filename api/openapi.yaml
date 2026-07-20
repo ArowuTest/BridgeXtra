@@ -1413,8 +1413,9 @@ paths:
           application/json:
             schema:
               type: object
-              required: [msisdn_token, channel]
+              required: [programme_id, msisdn_token, channel]
               properties:
+                programme_id: { type: string }
                 msisdn_token: { type: string }
                 channel: { type: string }
       responses:
@@ -1428,7 +1429,7 @@ paths:
                   msisdn_token: { type: string }
                   state: { type: string, enum: [REINSTATED] }
         "409":
-          description: No active exclusion, or cool-off not elapsed (NOT_SELF_EXCLUDED / COOL_OFF_NOT_ELAPSED)
+          description: No active exclusion, cool-off not elapsed, or operator reinstatement required (NOT_SELF_EXCLUDED / COOL_OFF_NOT_ELAPSED / OPERATOR_REINSTATEMENT_REQUIRED)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }

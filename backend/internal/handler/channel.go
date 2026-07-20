@@ -342,6 +342,8 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		writeErr(w, http.StatusConflict, "NOT_SELF_EXCLUDED", "no active self-exclusion to reinstate")
 	case errors.Is(err, origination.ErrCoolOffNotElapsed):
 		writeErr(w, http.StatusConflict, "COOL_OFF_NOT_ELAPSED", "the self-exclusion cool-off period has not elapsed")
+	case errors.Is(err, origination.ErrOperatorReinstatementRequired):
+		writeErr(w, http.StatusConflict, "OPERATOR_REINSTATEMENT_REQUIRED", "reinstatement requires operator approval; self-service is not available")
 	case errors.Is(err, origination.ErrDisclosureUnavailable):
 		// Fail-closed: no active disclosure policy — cannot disclose, cannot serve.
 		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
@@ -404,11 +406,11 @@ func (h *Channel) reinstateSelfExclusion(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "malformed JSON body")
 		return
 	}
-	if req.MSISDNToken == "" || req.Channel == "" {
-		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "msisdn_token and channel are required")
+	if req.ProgrammeID == "" || req.MSISDNToken == "" || req.Channel == "" {
+		writeErr(w, http.StatusBadRequest, "SELF_EXCLUSION_BAD_REQUEST", "programme_id, msisdn_token and channel are required")
 		return
 	}
-	if err := h.Origination.ReinstateSelfExclusion(r.Context(), req.MSISDNToken, req.Channel); err != nil {
+	if err := h.Origination.ReinstateSelfExclusion(r.Context(), req.ProgrammeID, req.MSISDNToken, req.Channel); err != nil {
 		h.writeDomainErr(w, r, err)
 		return
 	}

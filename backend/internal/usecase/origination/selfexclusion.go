@@ -30,6 +30,13 @@ type SelfExclusionResult struct {
 type selfExclusionCfg struct {
 	MinExclusionDays int      `json:"min_exclusion_days"`
 	AllowedChannels  []string `json:"allowed_channels"`
+	// RequireOperatorReinstatement (default false): when true, a subscriber may
+	// NOT reinstate themselves — an operator must lift the exclusion. Kept a
+	// governed toggle (no hardcoding) so a jurisdiction that requires operator
+	// sign-off is a config flip, not a rebuild. Live and fail-closed: while true,
+	// self-service reinstatement is refused (the operator maker-checker path is a
+	// future build gated by this flag).
+	RequireOperatorReinstatement bool `json:"require_operator_reinstatement"`
 }
 
 // loadSelfExclusionCfg reads the governed terms, fail-closed: without a positive
@@ -127,7 +134,16 @@ func (s *Service) RequestSelfExclusion(ctx context.Context, programmeID, msisdnT
 // cool-off has elapsed. The cool-off is enforced both here (for a clear error)
 // and structurally in MarkReinstated (min_until <= now in the UPDATE), so a race
 // cannot slip a reinstatement through early.
-func (s *Service) ReinstateSelfExclusion(ctx context.Context, msisdnToken, channel string) error {
+func (s *Service) ReinstateSelfExclusion(ctx context.Context, programmeID, msisdnToken, channel string) error {
+	cfg, err := s.loadSelfExclusionCfg(ctx, programmeID)
+	if err != nil {
+		return err
+	}
+	// Governed policy: if operator reinstatement is required, self-service is
+	// refused (fail-closed). The operator maker-checker path is a future build.
+	if cfg.RequireOperatorReinstatement {
+		return ErrOperatorReinstatementRequired
+	}
 	return repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		sub, err := s.subscribers.GetLiveByToken(ctx, tx, msisdnToken)
 		if err != nil {

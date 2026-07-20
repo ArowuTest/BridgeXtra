@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 )
@@ -50,7 +51,7 @@ func TestSelfExclusion_BlocksOffersAndConfirm_ThenReinstatesAfterCoolOff(t *test
 	}
 
 	// Reinstatement before the cool-off has elapsed is refused.
-	if err := f.svc.ReinstateSelfExclusion(ctx, sxToken, "USSD"); !errors.Is(err, origination.ErrCoolOffNotElapsed) {
+	if err := f.svc.ReinstateSelfExclusion(ctx, sxProg, sxToken, "USSD"); !errors.Is(err, origination.ErrCoolOffNotElapsed) {
 		t.Fatalf("reinstatement before the cool-off must be refused, got %v", err)
 	}
 	// Still excluded.
@@ -60,7 +61,7 @@ func TestSelfExclusion_BlocksOffersAndConfirm_ThenReinstatesAfterCoolOff(t *test
 
 	// After the cool-off elapses, reinstatement succeeds and offers resume.
 	f.activeExclusionMinUntilBackdate(t)
-	if err := f.svc.ReinstateSelfExclusion(ctx, sxToken, "USSD"); err != nil {
+	if err := f.svc.ReinstateSelfExclusion(ctx, sxProg, sxToken, "USSD"); err != nil {
 		t.Fatalf("reinstatement after the cool-off must succeed, got %v", err)
 	}
 	if offers := f.offersFor(t, sxToken); len(offers) == 0 {
@@ -115,7 +116,56 @@ func TestSelfExclusion_UngovernedChannelRefused(t *testing.T) {
 
 func TestSelfExclusion_ReinstateWithoutExclusionRefused(t *testing.T) {
 	f := newFixture(t, "sx_none", 0, 2_000)
-	if err := f.svc.ReinstateSelfExclusion(tenantCtx(), sxToken, "USSD"); !errors.Is(err, origination.ErrNotSelfExcluded) {
+	if err := f.svc.ReinstateSelfExclusion(tenantCtx(), sxProg, sxToken, "USSD"); !errors.Is(err, origination.ErrNotSelfExcluded) {
 		t.Fatalf("reinstating a subscriber who is not excluded must be refused, got %v", err)
+	}
+}
+
+// Explicit standalone assertion (reviewer completeness note): reinstatement
+// before the cool-off is refused.
+func TestSelfExclusion_ReinstateBeforeCoolOff_Refused(t *testing.T) {
+	f := newFixture(t, "sx_cooloff", 0, 2_000)
+	ctx := tenantCtx()
+	if _, err := f.svc.RequestSelfExclusion(ctx, sxProg, sxToken, "USSD", "r"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.ReinstateSelfExclusion(ctx, sxProg, sxToken, "USSD"); !errors.Is(err, origination.ErrCoolOffNotElapsed) {
+		t.Fatalf("reinstatement before the cool-off must be refused, got %v", err)
+	}
+}
+
+// setSelfExclusionCfg activates a self-exclusion config through the governed
+// maker-checker path (superseding the seed).
+func (f *fixture) setSelfExclusionCfg(t *testing.T, content string) {
+	t.Helper()
+	ctx := context.Background()
+	c, err := f.cfg.CreateDraft(ctx, "origination.self_exclusion", "programme:prg_sim_airtime01", "alice", "test", []byte(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.cfg.Submit(ctx, c.ConfigVersionID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.cfg.Approve(ctx, c.ConfigVersionID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.cfg.Activate(ctx, c.ConfigVersionID, "bob", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The governed require_operator_reinstatement toggle is live and fail-closed:
+// while true, self-service reinstatement is refused even AFTER the cool-off.
+func TestSelfExclusion_OperatorReinstatementToggle_RefusesSelfService(t *testing.T) {
+	f := newFixture(t, "sx_optgate", 0, 2_000)
+	ctx := tenantCtx()
+	f.setSelfExclusionCfg(t, `{"min_exclusion_days":30,"allowed_channels":["USSD"],"require_operator_reinstatement":true}`)
+
+	if _, err := f.svc.RequestSelfExclusion(ctx, sxProg, sxToken, "USSD", "r"); err != nil {
+		t.Fatal(err)
+	}
+	f.activeExclusionMinUntilBackdate(t) // even past the cool-off
+	if err := f.svc.ReinstateSelfExclusion(ctx, sxProg, sxToken, "USSD"); !errors.Is(err, origination.ErrOperatorReinstatementRequired) {
+		t.Fatalf("with operator reinstatement required, self-service must be refused, got %v", err)
 	}
 }
