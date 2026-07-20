@@ -105,6 +105,14 @@ func main() {
 	orig := origination.New(appPool, appCfg, led, mno.NewHTTPAdapter(appCfg), log)
 	rec := recovery.New(appPool, appCfg, led, log)
 
+	// R-P0-8: inbound rate limiter from governed config — fail-closed: the API
+	// refuses to boot without it, so no surface ever runs unlimited.
+	limiter, err := handler.LoadRateLimiter(ctx, configsvc.New(workerPool))
+	if err != nil {
+		log.Error("rate limiter (required at boot)", "err", err)
+		os.Exit(1)
+	}
+
 	// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC.
 	portal := &handler.Portal{
 		Admins:   &repo.Admins{Pool: appPool},
@@ -118,10 +126,11 @@ func main() {
 		Recovery:   rec,
 		Demo:       ops.NewDemo(appPool, appCfg, orig, log),
 		ReadPool:   workerPool,
+		Limiter:    limiter,
 		Log:        log,
 	}
 	portal.Mount(mux)
-	channel := &handler.Channel{Origination: orig, Recovery: rec, Log: log}
+	channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, Log: log}
 	channel.Mount(mux, auth)
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()

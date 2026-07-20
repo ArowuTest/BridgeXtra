@@ -28,6 +28,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/invariants"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/ledger"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -88,7 +89,9 @@ func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeout
 	telcos := &repo.Telcos{Pool: db.App}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: db.App, Log: slog.Default()}
 	mux := http.NewServeMux()
-	(&handler.Channel{Origination: orig, Recovery: rec, Log: slog.Default()}).Mount(mux, auth)
+	(&handler.Channel{Origination: orig, Recovery: rec, Limiter: ratelimit.New(map[string]ratelimit.Limit{
+		"channel": {RatePerMinute: 1e9, Burst: 1e9},
+	}), Log: slog.Default()}).Mount(mux, auth)
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
 

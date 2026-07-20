@@ -67,7 +67,7 @@ func newChannelFixture(t *testing.T, suffix string, simHold time.Duration, adapt
 	telcos := &repo.Telcos{Pool: db.App}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: db.App, Log: slog.Default()}
 	mux := http.NewServeMux()
-	(&handler.Channel{Origination: orig, Recovery: rec, Log: slog.Default()}).Mount(mux, auth)
+	(&handler.Channel{Origination: orig, Recovery: rec, Limiter: testLimiter(), Log: slog.Default()}).Mount(mux, auth)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &channelFixture{db: db, srv: srv}

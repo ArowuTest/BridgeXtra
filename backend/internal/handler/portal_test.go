@@ -75,6 +75,7 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Recovery:   recovery.New(db.App, appCfg, led, slog.Default()),
 		Demo:       ops.NewDemo(db.App, appCfg, orig, slog.Default()),
 		ReadPool:   db.Worker,
+		Limiter:    testLimiter(),
 		Log:        slog.Default(),
 	}
 	mux := http.NewServeMux()

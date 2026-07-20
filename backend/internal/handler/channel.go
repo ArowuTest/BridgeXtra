@@ -16,6 +16,7 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
@@ -62,12 +63,20 @@ func validCorrelationID(s string) bool {
 type Channel struct {
 	Origination *origination.Service
 	Recovery    *recovery.Service
+	Limiter     *ratelimit.Limiter // R-P0-8 inbound rate limit (channel API)
 	Log         *slog.Logger
 }
 
 // Mount registers routes; auth resolves the tenant, Correlation the lineage.
+// R-P0-8: every route is rate-limited (by telco credential, else IP) OUTSIDE
+// auth, so hammering with a bad credential is throttled before any DB lookup.
 func (h *Channel) Mount(mux *http.ServeMux, auth *TenantAuth) {
-	wrap := func(fn http.HandlerFunc) http.Handler { return auth.Wrap(Correlation(fn)) }
+	if h.Limiter == nil {
+		panic("channel: rate limiter is required (R-P0-8 fail-closed)")
+	}
+	wrap := func(fn http.HandlerFunc) http.Handler {
+		return rateLimited(h.Limiter, "channel", channelRateKey, auth.Wrap(Correlation(fn)))
+	}
 	mux.Handle("GET /v1/offers", wrap(h.getOffers))
 	mux.Handle("POST /v1/advances", wrap(h.confirm))
 	mux.Handle("GET /v1/advances/{id}", wrap(h.advanceStatus))
