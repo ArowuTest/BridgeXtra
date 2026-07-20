@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -74,6 +75,8 @@ func main() {
 		"R-P0-6 D3 CHECKER: approve the given completeness override id (must be a DIFFERENT -actor than the proposer)")
 	overrideActor := flag.String("actor", "", "operator id for -recon-override-* (maker or checker)")
 	overrideReason := flag.String("reason", "", "reason for -recon-override-propose")
+	evidenceRun := flag.String("recon-evidence", "",
+		"R-P0-6 E2: print the signed, reproducible evidence pack (JSON + pack_hash) for the given recon run id and exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -137,6 +140,11 @@ func main() {
 			os.Exit(1)
 		}
 		runOverrideApprove(ctx, log, appPool, workerPool, appCfg, *overrideApprove, *overrideActor)
+		return
+	}
+
+	if *evidenceRun != "" {
+		runEvidencePack(ctx, log, appPool, workerPool, appCfg, *evidenceRun)
 		return
 	}
 
@@ -342,6 +350,29 @@ func runOverrideApprove(ctx context.Context, log *slog.Logger, appPool, workerPo
 	fmt.Printf("completeness override approved: %s — the next re-reconcile of that window will supersede despite the completeness floor\n", overrideID)
 }
 
+// runEvidencePack prints the signed, reproducible evidence pack for one recon
+// run (R-P0-6 Slice E2). The run's telco is read cross-tenant via the worker
+// pool; the pack is built tenant-scoped via the recon service.
+func runEvidencePack(ctx context.Context, log *slog.Logger, appPool, workerPool *pgxpool.Pool, appCfg *configsvc.Service, runID string) {
+	var telco string
+	if err := workerPool.QueryRow(ctx,
+		`SELECT telco_id FROM recon_runs WHERE run_id=$1`, runID).Scan(&telco); err != nil {
+		log.Error("recon-evidence: run not found", "run", runID, "err", err)
+		os.Exit(1)
+	}
+	pack, err := recon.New(appPool, appCfg, log).EvidencePack(ctx, telco, runID)
+	if err != nil {
+		log.Error("recon-evidence: build pack", "run", runID, "err", err)
+		os.Exit(1)
+	}
+	out, err := json.MarshalIndent(pack, "", "  ")
+	if err != nil {
+		log.Error("recon-evidence: encode", "err", err)
+		os.Exit(1)
+	}
+	fmt.Println(string(out))
+}
+
 // runRecon executes fulfilment reconciliation for every active telco and each
 // of its ACTIVE programmes; any break exits non-zero so operators can alert
 // on the exit code (V2-REC-012: breaks demand attention, never auto-resolve).
@@ -403,6 +434,24 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 					rs.PeriodStart.UTC().Format(time.RFC3339), rs.PeriodEnd.UTC().Format(time.RFC3339),
 					rs.Matched, rs.MissingPlatform, rs.MissingTelco, rs.AmountMismatch)
 			}
+
+			// R-P0-6 E2 (D2 metric-nit): the per-run break tallies above reflect
+			// only what each run wrote. The authoritative CURRENT picture is the
+			// count of unresolved breaks across the ACTIVE runs — this excludes
+			// breaks recovered by a re-sweep (now in a superseded run) and breaks
+			// cleared by two-actor resolution. Report it so the operator metric is
+			// the live open-break count, not a stale per-run sum.
+			var openBreaks int
+			if err := repo.WithTenantTx(tctx, appPool, func(tx pgx.Tx) error {
+				return tx.QueryRow(ctx, `
+					SELECT count(*) FROM recon_items i JOIN recon_runs r ON r.run_id = i.run_id
+					WHERE r.programme_id = $1 AND r.state = 'ACTIVE'
+					  AND i.status LIKE 'BREAK_%' AND i.resolved_at IS NULL`, p.ProgrammeID).Scan(&openBreaks)
+			}); err != nil {
+				log.Error("recon: open-break count", "telco", tc.TelcoID, "programme", p.ProgrammeID, "err", err)
+				os.Exit(1)
+			}
+			fmt.Printf("recon-open-breaks %s/%s open=%d\n", tc.TelcoID, p.ProgrammeID, openBreaks)
 		}
 	}
 	if totalBreaks > 0 {

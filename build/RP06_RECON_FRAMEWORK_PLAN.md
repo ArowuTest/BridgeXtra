@@ -88,10 +88,19 @@ turns the skeleton into a production framework in verifiable slices.
     BUREAU dormant. Genericity proven by recon_rp06d4_test.go (a 2nd layer driven
     end-to-end through the shared engine; layer-scoped coexistence + supersession).
 
-- **Slice E — Maker-checker break resolution + signed evidence pack.** Wire the
-  governed `auto_resolve=false` floor into an explicit two-actor break-resolution
-  path (building on `recon_break_actions`), and emit a signed, reproducible
-  evidence pack per run (manifest + hashes + outcome + resolutions).
+- **Slice E — Maker-checker break resolution + signed evidence pack. DONE.**
+  - **E1:** auto_resolve=false is now a hard validated floor; break resolution is
+    a two-actor maker-checker decision, schema-enforced (mig 0041 CHECK + repo
+    PROPOSE_RESOLVE/APPROVE_RESOLVE four-eyes). Portal + tests updated.
+  - **E2:** `EvidencePack`/`VerifyEvidencePack` — reproducible, tamper-evident
+    content-hash pack per run (manifests + outcome + break resolutions); the
+    count-vs-control-total population note baked in; the D2 metric-nit closed
+    (worker prints the live open-break count). Worker `-recon-evidence <runID>`.
+    Cryptographic key-signing deferred to the KMS track.
+
+**R-P0-6 COMPLETE — A✓ B✓ C✓ D1✓ D2✓ D3✓ D4✓ E1✓ E2✓.** Last Gate-A slice; Gate A
+closes and G4's conditional lifts on reviewer verification. Next: independent
+pen-test before pilot.
 
 ## Invariants held throughout
 - Currency-before-amount, amount ceiling, overflow-safety (R-P0-3/4) unchanged.
