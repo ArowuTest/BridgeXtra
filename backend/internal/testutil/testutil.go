@@ -50,10 +50,11 @@ const (
 var dbNameRe = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 type DB struct {
-	Name   string
-	Admin  *pgxpool.Pool // owner: migrations, seeds, cross-tenant assertions
-	App    *pgxpool.Pool // tcp_app: RLS enforced — the pool business code uses
-	Worker *pgxpool.Pool // tcp_worker: BYPASSRLS dispatcher
+	Name     string
+	Admin    *pgxpool.Pool // owner: migrations, seeds, cross-tenant assertions
+	App      *pgxpool.Pool // tcp_app: RLS enforced — the pool business code uses
+	Worker   *pgxpool.Pool // tcp_worker: BYPASSRLS dispatcher
+	Operator *pgxpool.Pool // tcp_operator: RLS-enforced read-only operator (Gate B #1)
 }
 
 func hostPort() string {
@@ -117,11 +118,19 @@ func MustSetup(t *testing.T, suffix string) *DB {
 		app.Close()
 		t.Fatalf("worker pool: %v", err)
 	}
+	operator, err := platform.NewPool(ctx, dsn("tcp_operator", "devlocal_operator", name))
+	if err != nil {
+		admin.Close()
+		app.Close()
+		worker.Close()
+		t.Fatalf("operator pool: %v", err)
+	}
 
-	db := &DB{Name: name, Admin: admin, App: app, Worker: worker}
+	db := &DB{Name: name, Admin: admin, App: app, Worker: worker, Operator: operator}
 	t.Cleanup(func() {
 		app.Close()
 		worker.Close()
+		operator.Close()
 		admin.Close()
 	})
 	return db
