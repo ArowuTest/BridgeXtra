@@ -11,6 +11,7 @@ package handler
 // minor units plus a server-formatted display string.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -19,6 +20,8 @@ import (
 	"time"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
@@ -90,7 +93,9 @@ func toTripResponse(t repo.GuardrailTrip) tripResponse {
 // read even by mistake.
 func (p *Portal) riskTrips(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	trips, err := repo.ListOpenTrips(r.Context(), p.ReadPool, sess.OperatorScope())
+	trips, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.GuardrailTrip, error) {
+		return repo.ListOpenTrips(ctx, tx, sess.OperatorScope())
+	})
 	if err != nil {
 		p.Log.Error("portal risk trips list", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -108,7 +113,9 @@ func (p *Portal) riskTrips(w http.ResponseWriter, r *http.Request) {
 // same no-oracle 404 — no handler-side convention check to forget (M4C-F1).
 func (p *Portal) loadTripScoped(w http.ResponseWriter, r *http.Request) (repo.GuardrailTrip, bool) {
 	sess := sessionFrom(r.Context())
-	trip, err := repo.GetTripByID(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	trip, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.GuardrailTrip, error) {
+		return repo.GetTripByID(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		p.writeRiskErr(w, err)
 		return repo.GuardrailTrip{}, false

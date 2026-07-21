@@ -25,7 +25,6 @@ func TestRP08_Login_RateLimited(t *testing.T) {
 		Admins:   &repo.Admins{Pool: db.App},
 		Sessions: &repo.PortalSessions{Pool: db.App},
 		Config:   configsvc.New(db.Worker),
-		ReadPool: db.Worker,
 		// Tight: 3-request burst so the 4th is refused deterministically.
 		Limiter: ratelimit.New(map[string]ratelimit.Limit{
 			"login":   {RatePerMinute: 0.001, Burst: 3},

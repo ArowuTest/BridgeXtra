@@ -9,9 +9,12 @@ package handler
 // (V3-ORG-005), which the RBAC pack proves from the production map.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
@@ -36,8 +39,16 @@ func (p *Portal) supportTimeline(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "token is required")
 		return
 	}
-	sub, advances, notes, complaints, actions, err := repo.SubscriberTimeline(
-		r.Context(), p.ReadPool, sess.OperatorScope(), token)
+	var sub repo.TimelineSubscriber
+	var advances []repo.TimelineAdvance
+	var notes []repo.DemoNotificationView
+	var complaints []repo.TimelineComplaint
+	var actions []repo.TimelineStatusAction
+	err := p.Operator.Read(r.Context(), sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		sub, advances, notes, complaints, actions, e = repo.SubscriberTimeline(ctx, tx, sess.OperatorScope(), token)
+		return e
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "SUBSCRIBER_NOT_FOUND", "no live subscriber for that token in your scope")
@@ -117,7 +128,9 @@ func toComplaintResponse(c repo.ComplaintRow) complaintRowResponse {
 // supportComplaints lists complaints in the operator's telco bound.
 func (p *Portal) supportComplaints(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	items, err := repo.ListComplaints(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	items, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.ComplaintRow, error) {
+		return repo.ListComplaints(ctx, tx, sess.OperatorScope(), 0)
+	})
 	if err != nil {
 		p.Log.Error("portal support complaints", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -180,7 +193,9 @@ func (p *Portal) supportComplaintOpen(w http.ResponseWriter, r *http.Request) {
 // transitions loudly.
 func (p *Portal) supportComplaintProgress(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	cmp, err := repo.GetComplaintScoped(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	cmp, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.ComplaintRow, error) {
+		return repo.GetComplaintScoped(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "COMPLAINT_NOT_FOUND", "complaint not found")

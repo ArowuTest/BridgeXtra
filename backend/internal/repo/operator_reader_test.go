@@ -9,6 +9,7 @@ package repo_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -24,8 +25,8 @@ func readerSees(t *testing.T, db *testutil.DB, sessionScope, subID string) bool 
 	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker}
 	scope := repo.PortalSession{Scope: sessionScope}.OperatorScope()
 	var seen bool
-	if err := reader.Read(context.Background(), scope, func(tx pgx.Tx) error {
-		return tx.QueryRow(context.Background(),
+	if err := reader.Read(context.Background(), scope, func(ctx context.Context, tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM subscriber_accounts WHERE subscriber_account_id=$1)`, subID).Scan(&seen)
 	}); err != nil {
 		t.Fatalf("reader.Read(%q): %v", sessionScope, err)
@@ -77,5 +78,37 @@ func TestOperatorReader_ProgrammeScopePinsTelco(t *testing.T) {
 	}
 	if readerSees(t, db, "programme:prg_sim_airtime01", "sub_other") {
 		t.Fatal("a programme operator must never see another telco's rows (telco pinned via resolver)")
+	}
+}
+
+// The safety net: a portal read that does NOT go through the OperatorReader
+// wrapper runs on the operator pool with no scope GUC. Because tcp_operator does
+// not bypass RLS, the read fails closed to empty — a forgotten wrapper leaks
+// nothing. Through the wrapper the same in-scope row is visible.
+func TestOperatorReader_MissedWrapperFailsClosed(t *testing.T) {
+	db := testutil.MustSetup(t, "oprdr_missed")
+	seedTwoTenants(t, db) // sub_sim: telco SIM_NG, token tok_sim
+	ctx := context.Background()
+	scope := repo.PortalSession{Scope: "telco:SIM_NG"}.OperatorScope()
+
+	// UNWRAPPED: call the read directly on the operator pool (no scoped tx) ->
+	// RLS returns nothing -> the subscriber is not found.
+	if _, _, _, _, _, err := repo.SubscriberTimeline(ctx, db.Operator, scope, "tok_sim"); !errors.Is(err, repo.ErrNotFound) {
+		t.Fatalf("an unwrapped operator read must fail closed (ErrNotFound), got %v", err)
+	}
+
+	// WRAPPED: through the chokepoint the scope GUC is set and the in-scope
+	// subscriber is visible.
+	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker}
+	var found bool
+	if err := reader.Read(ctx, scope, func(ctx context.Context, tx pgx.Tx) error {
+		_, _, _, _, _, e := repo.SubscriberTimeline(ctx, tx, scope, "tok_sim")
+		found = e == nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("through the wrapper, the in-scope subscriber must be visible")
 	}
 }

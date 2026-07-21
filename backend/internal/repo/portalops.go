@@ -14,7 +14,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 )
@@ -56,7 +55,7 @@ func scanAmbiguous(row pgx.Row) (AmbiguousAttempt, error) {
 // ListAmbiguousAttempts returns UNKNOWN attempts plus SENT attempts older than
 // the governed staleness threshold, oldest first (the longest-ambiguous
 // exposure surfaces on top). Scope-bounded via the advances join.
-func ListAmbiguousAttempts(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, staleSentBeforeRFC3339 string, limit int) ([]AmbiguousAttempt, error) {
+func ListAmbiguousAttempts(ctx context.Context, pool Querier, scope OperatorScope, staleSentBeforeRFC3339 string, limit int) ([]AmbiguousAttempt, error) {
 	if !scope.authority {
 		return nil, nil
 	}
@@ -92,7 +91,7 @@ func ListAmbiguousAttempts(ctx context.Context, pool *pgxpool.Pool, scope Operat
 // load-scoped-then-act. Out-of-scope, absent, and already-resolved attempts
 // all return ErrNotFound — the no-oracle 404 is structural, and an operator
 // cannot nudge an attempt the resolver has already settled.
-func GetAmbiguousAttempt(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, attemptID string) (AmbiguousAttempt, error) {
+func GetAmbiguousAttempt(ctx context.Context, pool Querier, scope OperatorScope, attemptID string) (AmbiguousAttempt, error) {
 	var it AmbiguousAttempt
 	if !scope.authority {
 		return it, fmt.Errorf("attempt %q: %w", attemptID, ErrNotFound)
@@ -143,7 +142,7 @@ func scanParked(row pgx.Row) (ParkedReversalRow, error) {
 // ListParkedReversals returns PARKED reversals oldest first. pending_reversals
 // is telco-grained, so this takes the TelcoLevelBound — a programme-scoped
 // operator sees nothing rather than every telco's money events.
-func ListParkedReversals(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]ParkedReversalRow, error) {
+func ListParkedReversals(ctx context.Context, pool Querier, scope OperatorScope, limit int) ([]ParkedReversalRow, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
 		return nil, nil
@@ -208,7 +207,7 @@ func scanStatusAction(row pgx.Row) (StatusActionRow, error) {
 // ListStatusActions returns status actions newest-first. subscriber_accounts
 // is telco-grained (no programme dimension), so the read takes the
 // TelcoLevelBound — a programme-scoped operator sees nothing.
-func ListStatusActions(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]StatusActionRow, error) {
+func ListStatusActions(ctx context.Context, pool Querier, scope OperatorScope, limit int) ([]StatusActionRow, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
 		return nil, nil
@@ -240,7 +239,7 @@ func ListStatusActions(ctx context.Context, pool *pgxpool.Pool, scope OperatorSc
 
 // GetStatusAction loads one action within the operator's telco-level bound
 // (load-scoped-then-act; no-oracle 404).
-func GetStatusAction(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, actionID string) (StatusActionRow, error) {
+func GetStatusAction(ctx context.Context, pool Querier, scope OperatorScope, actionID string) (StatusActionRow, error) {
 	var a StatusActionRow
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
@@ -260,7 +259,7 @@ func GetStatusAction(ctx context.Context, pool *pgxpool.Pool, scope OperatorScop
 
 // GetParkedReversal loads one PARKED reversal within the operator's
 // telco-level bound (load-scoped-then-act; no-oracle 404).
-func GetParkedReversal(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, pendingReversalID string) (ParkedReversalRow, error) {
+func GetParkedReversal(ctx context.Context, pool Querier, scope OperatorScope, pendingReversalID string) (ParkedReversalRow, error) {
 	var p ParkedReversalRow
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {

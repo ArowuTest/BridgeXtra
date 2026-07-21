@@ -74,7 +74,7 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Settlement: settlement.New(db.App, appCfg, slog.Default()),
 		Recovery:   recovery.New(db.App, appCfg, led, slog.Default()),
 		Demo:       ops.NewDemo(db.App, appCfg, orig, slog.Default()),
-		ReadPool:   db.Worker,
+		Operator:   repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker},
 		Limiter:    testLimiter(),
 		Log:        slog.Default(),
 	}

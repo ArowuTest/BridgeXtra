@@ -7,10 +7,13 @@ package handler
 // exact minor units plus a server-formatted display.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
@@ -56,8 +59,9 @@ func (p *Portal) ledgerJournals(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	journals, err := repo.ListJournals(r.Context(), p.ReadPool, sess.OperatorScope(),
-		q.Get("advance_id"), q.Get("correlation_id"), limit)
+	journals, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.JournalHeader, error) {
+		return repo.ListJournals(ctx, tx, sess.OperatorScope(), q.Get("advance_id"), q.Get("correlation_id"), limit)
+	})
 	if err != nil {
 		p.Log.Error("portal ledger journals", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -73,7 +77,9 @@ func (p *Portal) ledgerJournals(w http.ResponseWriter, r *http.Request) {
 // ledgerJournal returns one journal with its balanced entries (tap-to-journal).
 func (p *Portal) ledgerJournal(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	d, err := repo.GetJournalWithEntries(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	d, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.JournalDetail, error) {
+		return repo.GetJournalWithEntries(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "JOURNAL_NOT_FOUND", "journal not found")
@@ -120,7 +126,9 @@ func toBreakResponse(b repo.BreakItem) breakResponse {
 
 func (p *Portal) financeBreaks(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	breaks, err := repo.ListOpenBreaks(r.Context(), p.ReadPool, sess.OperatorScope())
+	breaks, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.BreakItem, error) {
+		return repo.ListOpenBreaks(ctx, tx, sess.OperatorScope())
+	})
 	if err != nil {
 		p.Log.Error("portal finance breaks", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -146,7 +154,9 @@ var breakActions = map[string]bool{
 // app role in a tenant tx via the ops service, with the session actor.
 func (p *Portal) financeBreakAction(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	brk, err := repo.GetOpenBreak(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	brk, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.BreakItem, error) {
+		return repo.GetOpenBreak(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "BREAK_NOT_FOUND", "reconciliation break not found")
@@ -216,7 +226,9 @@ func toSettlement(s repo.SettlementSummary) settlementResponse {
 
 func (p *Portal) financeSettlements(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	list, err := repo.ListSettlements(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	list, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.SettlementSummary, error) {
+		return repo.ListSettlements(ctx, tx, sess.OperatorScope(), 0)
+	})
 	if err != nil {
 		p.Log.Error("portal settlements list", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -231,7 +243,9 @@ func (p *Portal) financeSettlements(w http.ResponseWriter, r *http.Request) {
 
 func (p *Portal) financeSettlement(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	d, err := repo.GetSettlementWithLines(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	d, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.SettlementDetail, error) {
+		return repo.GetSettlementWithLines(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "SETTLEMENT_NOT_FOUND", "settlement not found")
@@ -254,7 +268,9 @@ func (p *Portal) financeSettlement(w http.ResponseWriter, r *http.Request) {
 // not a 500) — the whole point of the tool is to surface it.
 func (p *Portal) financeSettlementVerify(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	d, err := repo.GetSettlementWithLines(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	d, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.SettlementDetail, error) {
+		return repo.GetSettlementWithLines(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "SETTLEMENT_NOT_FOUND", "settlement not found")

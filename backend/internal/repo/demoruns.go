@@ -11,7 +11,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 )
@@ -82,7 +81,7 @@ func scanDemoRun(row pgx.Row) (DemoRunRow, error) {
 }
 
 // ListDemoRuns returns runs newest-first (telco-grained: TelcoLevelBound).
-func ListDemoRuns(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]DemoRunRow, error) {
+func ListDemoRuns(ctx context.Context, pool Querier, scope OperatorScope, limit int) ([]DemoRunRow, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
 		return nil, nil
@@ -111,7 +110,7 @@ func ListDemoRuns(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, 
 }
 
 // GetDemoRun loads one run within the operator's bound (no-oracle 404).
-func GetDemoRun(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, runID string) (DemoRunRow, error) {
+func GetDemoRun(ctx context.Context, pool Querier, scope OperatorScope, runID string) (DemoRunRow, error) {
 	var r DemoRunRow
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
@@ -158,7 +157,7 @@ type DemoNotificationView struct {
 
 // GetDemoChain reads the run's live artifact chain from the REAL tables,
 // bounded to the run's telco (the run row was already scope-loaded).
-func GetDemoChain(ctx context.Context, pool *pgxpool.Pool, run DemoRunRow) (DemoAdvanceView, []DemoAttemptView, []DemoNotificationView, error) {
+func GetDemoChain(ctx context.Context, pool Querier, run DemoRunRow) (DemoAdvanceView, []DemoAttemptView, []DemoNotificationView, error) {
 	var adv DemoAdvanceView
 	var minor, outMinor int64
 	var cur string

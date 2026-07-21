@@ -186,6 +186,14 @@ func (r *PortalSessions) Revoke(ctx context.Context, token string) error {
 
 // --- Gate B #1 Slice 2: DB-enforced operator reads ------------------------
 
+// Querier is the read surface shared by *pgxpool.Pool and pgx.Tx. Portal read
+// functions take a Querier so they run either directly on a pool OR inside the
+// OperatorReader's scoped tx — the latter is how Slice 2 makes them DB-enforced.
+type Querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // OperatorReader runs portal operator READS on the RLS-enforced tcp_operator
 // pool with the tenant scope set LOCAL from the TRUSTED session authority. It is
 // the SINGLE server-side site where app.op_all is ever set — and only for the
@@ -198,14 +206,11 @@ type OperatorReader struct {
 	Resolve *pgxpool.Pool
 }
 
-// ErrUnknownProgramme: a programme-scoped session named a programme with no telco.
-var ErrUnknownProgramme = errors.New("repo: programme has no telco (cannot scope operator read)")
-
 // Read opens a tx on the operator pool, sets the scope GUCs LOCAL from the scope's
 // authority, and runs fn. Fail-closed: a scope without authority sets no GUC, so
 // the existing RLS telco policy matches nothing and the read returns empty — a
 // forgotten/mis-derived scope leaks nothing.
-func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(tx pgx.Tx) error) error {
+func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(ctx context.Context, tx pgx.Tx) error) error {
 	tx, err := r.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("operator read begin: %w", err)
@@ -223,12 +228,17 @@ func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(t
 	case scope.programme != "":
 		// Programme-scoped: pin the telco (DB-enforced) via a trusted lookup; the
 		// repo query keeps the programme_id filter (intra-tenant, app-level residual).
+		// A programme that resolves to no telco (unknown/mis-scoped) sets NO GUC —
+		// fail-closed to empty rather than erroring, so a stale or foreign programme
+		// scope simply sees nothing.
 		telco, err := r.programmeTelco(ctx, scope.programme)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `SELECT set_config('app.telco_id',$1,true)`, telco); err != nil {
-			return fmt.Errorf("scope programme telco: %w", err)
+		if telco != "" {
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.telco_id',$1,true)`, telco); err != nil {
+				return fmt.Errorf("scope programme telco: %w", err)
+			}
 		}
 	default:
 		// The ONLY op_all path: authority AND no telco AND no programme => the '*'
@@ -237,7 +247,7 @@ func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(t
 			return fmt.Errorf("scope op_all: %w", err)
 		}
 	}
-	if err := fn(tx); err != nil {
+	if err := fn(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -249,7 +259,9 @@ func (r OperatorReader) programmeTelco(ctx context.Context, programmeID string) 
 	var telco string
 	err := r.Resolve.QueryRow(ctx, `SELECT telco_id FROM programmes WHERE programme_id=$1`, programmeID).Scan(&telco)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", ErrUnknownProgramme
+		// Unknown/mis-scoped programme: no telco to pin — the caller sets no GUC and
+		// the read fails closed to empty (never an error, never a leak).
+		return "", nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("resolve programme telco: %w", err)

@@ -14,7 +14,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 )
@@ -55,7 +54,7 @@ func scanJournalHeader(row pgx.Row) (JournalHeader, error) {
 // ListJournals returns journals newest-first within the operator's scope,
 // optionally filtered by advance or correlation id. A no-authority operator
 // gets an empty set without a query (structural, M4C-F1).
-func ListJournals(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, advanceID, correlationID string, limit int) ([]JournalHeader, error) {
+func ListJournals(ctx context.Context, pool Querier, scope OperatorScope, advanceID, correlationID string, limit int) ([]JournalHeader, error) {
 	if !scope.authority {
 		return nil, nil
 	}
@@ -89,7 +88,7 @@ func ListJournals(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, 
 // GetJournalWithEntries loads one journal and its balanced entries WITHIN the
 // operator's scope — an out-of-scope or absent id both return ErrNotFound, so
 // the no-oracle 404 is structural (tap-to-journal lineage from the browser).
-func GetJournalWithEntries(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, journalID string) (JournalDetail, error) {
+func GetJournalWithEntries(ctx context.Context, pool Querier, scope OperatorScope, journalID string) (JournalDetail, error) {
 	var d JournalDetail
 	if !scope.authority {
 		return d, fmt.Errorf("journal %q: %w", journalID, ErrNotFound)
@@ -161,7 +160,7 @@ func scanBreak(row pgx.Row) (BreakItem, error) {
 // ListOpenBreaks returns unresolved reconciliation breaks in the operator's
 // telco-level scope (M4C-F1 via TelcoLevelBound — a programme/global operator
 // reads none, never "all telcos").
-func ListOpenBreaks(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope) ([]BreakItem, error) {
+func ListOpenBreaks(ctx context.Context, pool Querier, scope OperatorScope) ([]BreakItem, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
 		return nil, nil
@@ -190,7 +189,7 @@ func ListOpenBreaks(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope
 // GetOpenBreak loads one open break within the operator's telco-level scope —
 // out-of-scope or absent both return ErrNotFound (no oracle). Used to resolve
 // the telco for an action after authorization.
-func GetOpenBreak(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, reconItemID string) (BreakItem, error) {
+func GetOpenBreak(ctx context.Context, pool Querier, scope OperatorScope, reconItemID string) (BreakItem, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
 		return BreakItem{}, fmt.Errorf("recon break %q: %w", reconItemID, ErrNotFound)
@@ -244,7 +243,7 @@ func scanSettlement(row pgx.Row) (SettlementSummary, error) {
 
 // ListSettlements returns settlement statements newest-first within the
 // operator's telco/programme scope (standard OperatorScope; M4C-F1).
-func ListSettlements(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]SettlementSummary, error) {
+func ListSettlements(ctx context.Context, pool Querier, scope OperatorScope, limit int) ([]SettlementSummary, error) {
 	if !scope.authority {
 		return nil, nil
 	}
@@ -274,7 +273,7 @@ func ListSettlements(ctx context.Context, pool *pgxpool.Pool, scope OperatorScop
 
 // GetSettlementWithLines loads one statement + its lines within the operator's
 // scope — out-of-scope or absent both return ErrNotFound (no oracle).
-func GetSettlementWithLines(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, statementID string) (SettlementDetail, error) {
+func GetSettlementWithLines(ctx context.Context, pool Querier, scope OperatorScope, statementID string) (SettlementDetail, error) {
 	var d SettlementDetail
 	if !scope.authority {
 		return d, fmt.Errorf("settlement %q: %w", statementID, ErrNotFound)

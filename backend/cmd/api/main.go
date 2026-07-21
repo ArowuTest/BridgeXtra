@@ -45,6 +45,7 @@ func main() {
 	adminDSN := env("TCP_ADMIN_DSN", "postgres://postgres:devlocal@localhost:5434/telco_credit")
 	appDSN := env("TCP_APP_DSN", "postgres://tcp_app:devlocal_app@localhost:5434/telco_credit")
 	workerDSN := env("TCP_WORKER_DSN", "postgres://tcp_worker:devlocal_worker@localhost:5434/telco_credit")
+	operatorDSN := env("TCP_OPERATOR_DSN", "postgres://tcp_operator:devlocal_operator@localhost:5434/telco_credit")
 	addr := env("TCP_API_ADDR", ":8090")
 
 	// #44 (VR-32 prod hardening): in production, block loopback + private-range
@@ -92,6 +93,16 @@ func main() {
 	}
 	defer workerPool.Close()
 
+	// Gate B #1: the RLS-enforced read-only operator pool. Portal operator reads
+	// run here inside a scope-set tx (repo.OperatorReader); the worker pool is the
+	// trusted resolver for programme->telco only.
+	operatorPool, err := platform.NewPool(ctx, operatorDSN)
+	if err != nil {
+		log.Error("operator db connect failed", "err", err)
+		os.Exit(1)
+	}
+	defer operatorPool.Close()
+
 	telcos := &repo.Telcos{Pool: appPool}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: appPool, Log: log}
 	programmes := repo.Programmes{}
@@ -125,14 +136,15 @@ func main() {
 		Admins:   &repo.Admins{Pool: appPool},
 		Sessions: &repo.PortalSessions{Pool: appPool},
 		Config:   configsvc.New(workerPool),
-		// Re-arm actions run as the app role in a tenant tx; operator reads span
-		// telcos on the worker pool (BYPASSRLS) bounded by the operator's scope.
+		// Re-arm actions run as the app role in a tenant tx; operator reads run on
+		// the RLS-enforced tcp_operator pool inside a scope-set tx (OperatorReader),
+		// with the worker pool as the trusted programme->telco resolver only.
 		Treasury:          treasury.New(appPool, configsvc.New(appPool), log),
 		Ops:               ops.New(appPool, configsvc.New(appPool), log),
 		Settlement:        settlement.New(appPool, configsvc.New(appPool), log),
 		Recovery:          rec,
 		Demo:              ops.NewDemo(appPool, appCfg, orig, log),
-		ReadPool:          workerPool,
+		Operator:          repo.OperatorReader{Pool: operatorPool, Resolve: workerPool},
 		Limiter:           limiter,
 		TrustedProxyCount: trustedProxies,
 		Log:               log,

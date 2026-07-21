@@ -14,7 +14,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const tripCols = `trip_id, telco_id, programme_id, guardrail, measured_minor, limit_minor, currency,
@@ -40,7 +39,7 @@ func scanTrip(row pgx.Row) (GuardrailTrip, error) {
 // newest-first, bounded to the operator's scope. An operator with no tenant
 // authority ('global') gets an empty set WITHOUT a query — the see-all SQL is
 // structurally unreachable except for a '*' admin (M4C-F1).
-func ListOpenTrips(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope) ([]GuardrailTrip, error) {
+func ListOpenTrips(ctx context.Context, pool Querier, scope OperatorScope) ([]GuardrailTrip, error) {
 	if !scope.authority {
 		return nil, nil
 	}
@@ -70,7 +69,7 @@ func ListOpenTrips(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope)
 // scope applied in the query itself — a cross-scope (or nonexistent) id both
 // return ErrNotFound, so the no-oracle 404 is structural, not a handler
 // convention the next caller might forget (M4C-F1).
-func GetTripByID(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, tripID string) (GuardrailTrip, error) {
+func GetTripByID(ctx context.Context, pool Querier, scope OperatorScope, tripID string) (GuardrailTrip, error) {
 	if !scope.authority {
 		return GuardrailTrip{}, fmt.Errorf("guardrail trip %q: %w", tripID, ErrNotFound)
 	}

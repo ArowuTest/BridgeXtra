@@ -13,7 +13,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 )
@@ -64,7 +63,7 @@ type TimelineStatusAction struct {
 // the operator's telco bound: identity, advances, notifications, complaints,
 // status actions. Unknown token, out-of-scope, and no-telco-authority all
 // return ErrNotFound (no oracle).
-func SubscriberTimeline(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, msisdnToken string) (
+func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, msisdnToken string) (
 	TimelineSubscriber, []TimelineAdvance, []DemoNotificationView, []TimelineComplaint, []TimelineStatusAction, error) {
 
 	var sub TimelineSubscriber
@@ -209,7 +208,7 @@ func scanComplaintRow(row pgx.Row) (ComplaintRow, error) {
 }
 
 // ListComplaints returns complaints newest-first (telco-grained bound).
-func ListComplaints(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, limit int) ([]ComplaintRow, error) {
+func ListComplaints(ctx context.Context, pool Querier, scope OperatorScope, limit int) ([]ComplaintRow, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
 		return nil, nil
@@ -241,7 +240,7 @@ func ListComplaints(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope
 
 // GetComplaintScoped loads one complaint within the operator's bound
 // (load-scoped-then-act; no-oracle 404).
-func GetComplaintScoped(ctx context.Context, pool *pgxpool.Pool, scope OperatorScope, complaintID string) (ComplaintRow, error) {
+func GetComplaintScoped(ctx context.Context, pool Querier, scope OperatorScope, complaintID string) (ComplaintRow, error) {
 	var c ComplaintRow
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {

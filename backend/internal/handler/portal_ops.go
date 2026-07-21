@@ -10,11 +10,14 @@ package handler
 // SQL; actions load-scoped-then-act via the app-pool tenant tx.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
@@ -66,8 +69,9 @@ func (p *Portal) opsFulfilments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	staleBefore := time.Now().UTC().Add(-time.Duration(qc.StaleSentAfterSeconds) * time.Second)
-	items, err := repo.ListAmbiguousAttempts(r.Context(), p.ReadPool, sess.OperatorScope(),
-		staleBefore.Format(time.RFC3339Nano), limit)
+	items, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.AmbiguousAttempt, error) {
+		return repo.ListAmbiguousAttempts(ctx, tx, sess.OperatorScope(), staleBefore.Format(time.RFC3339Nano), limit)
+	})
 	if err != nil {
 		p.Log.Error("portal ops fulfilments", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -88,7 +92,9 @@ func (p *Portal) opsFulfilments(w http.ResponseWriter, r *http.Request) {
 // attempt the resolver settled in the meantime (C2).
 func (p *Portal) opsEnquireNow(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	at, err := repo.GetAmbiguousAttempt(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	at, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.AmbiguousAttempt, error) {
+		return repo.GetAmbiguousAttempt(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "ATTEMPT_NOT_FOUND", "ambiguous attempt not found")
@@ -143,7 +149,9 @@ func (p *Portal) opsReversals(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	items, err := repo.ListParkedReversals(r.Context(), p.ReadPool, sess.OperatorScope(), limit)
+	items, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.ParkedReversalRow, error) {
+		return repo.ListParkedReversals(ctx, tx, sess.OperatorScope(), limit)
+	})
 	if err != nil {
 		p.Log.Error("portal ops reversals", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -162,7 +170,9 @@ func (p *Portal) opsReversals(w http.ResponseWriter, r *http.Request) {
 // -> honest 409 (the FOR UPDATE claim makes double-apply impossible, C2).
 func (p *Portal) opsReversalRetry(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	pr, err := repo.GetParkedReversal(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	pr, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.ParkedReversalRow, error) {
+		return repo.GetParkedReversal(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "REVERSAL_NOT_FOUND", "parked reversal not found")
@@ -220,7 +230,9 @@ func toStatusActionResponse(a repo.StatusActionRow) statusActionResponse {
 // opsStatusActions lists status actions (telco-grained: TelcoLevelBound).
 func (p *Portal) opsStatusActions(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	items, err := repo.ListStatusActions(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	items, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.StatusActionRow, error) {
+		return repo.ListStatusActions(ctx, tx, sess.OperatorScope(), 0)
+	})
 	if err != nil {
 		p.Log.Error("portal status actions list", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -279,7 +291,9 @@ func (p *Portal) opsStatusActionRequest(w http.ResponseWriter, r *http.Request) 
 func (p *Portal) opsStatusActionDecide(approve bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sess := sessionFrom(r.Context())
-		a, err := repo.GetStatusAction(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+		a, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.StatusActionRow, error) {
+			return repo.GetStatusAction(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+		})
 		if err != nil {
 			if errors.Is(err, repo.ErrNotFound) {
 				writeErr(w, http.StatusNotFound, "STATUS_ACTION_NOT_FOUND", "status action not found")
@@ -385,7 +399,9 @@ func toDemoRunResponse(r repo.DemoRunRow) demoRunResponse {
 // opsDemoRuns lists recent runs (telco-grained: TelcoLevelBound).
 func (p *Portal) opsDemoRuns(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	runs, err := repo.ListDemoRuns(r.Context(), p.ReadPool, sess.OperatorScope(), 0)
+	runs, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.DemoRunRow, error) {
+		return repo.ListDemoRuns(ctx, tx, sess.OperatorScope(), 0)
+	})
 	if err != nil {
 		p.Log.Error("portal demo runs", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
@@ -402,7 +418,9 @@ func (p *Portal) opsDemoRuns(w http.ResponseWriter, r *http.Request) {
 // the real tables every poll, so the resolver's progress shows as it happens.
 func (p *Portal) opsDemoRunDetail(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	run, err := repo.GetDemoRun(r.Context(), p.ReadPool, sess.OperatorScope(), r.PathValue("id"))
+	run, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) (repo.DemoRunRow, error) {
+		return repo.GetDemoRun(ctx, tx, sess.OperatorScope(), r.PathValue("id"))
+	})
 	if err != nil {
 		if errors.Is(err, repo.ErrNotFound) {
 			writeErr(w, http.StatusNotFound, "DEMO_RUN_NOT_FOUND", "demo run not found")
@@ -412,13 +430,22 @@ func (p *Portal) opsDemoRunDetail(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 		return
 	}
-	adv, attempts, notes, err := repo.GetDemoChain(r.Context(), p.ReadPool, run)
+	var adv repo.DemoAdvanceView
+	var attempts []repo.DemoAttemptView
+	var notes []repo.DemoNotificationView
+	err = p.Operator.Read(r.Context(), sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) error {
+		var e error
+		adv, attempts, notes, e = repo.GetDemoChain(ctx, tx, run)
+		return e
+	})
 	if err != nil {
 		p.Log.Error("portal demo chain", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 		return
 	}
-	journals, err := repo.ListJournals(r.Context(), p.ReadPool, sess.OperatorScope(), "", run.CorrelationID, 50)
+	journals, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.JournalHeader, error) {
+		return repo.ListJournals(ctx, tx, sess.OperatorScope(), "", run.CorrelationID, 50)
+	})
 	if err != nil {
 		p.Log.Error("portal demo journals", "err", err)
 		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")

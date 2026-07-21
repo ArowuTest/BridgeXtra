@@ -17,8 +17,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -49,7 +47,7 @@ type Portal struct {
 	Settlement        *settlement.Service // M4d settlement verification (tenant tx)
 	Recovery          *recovery.Service   // M4e parked-reversal retry (tenant tx, reuses guarded apply)
 	Demo              *ops.Demo           // M4e-3 fault demo (real origination path, sim-only allowlist)
-	ReadPool          *pgxpool.Pool       // M4c operator cross-tenant reads (worker/BYPASSRLS)
+	Operator          repo.OperatorReader // Gate B #1 Slice 2: DB-enforced operator reads (tcp_operator + scoped tx)
 	Limiter           *ratelimit.Limiter  // R-P0-8 inbound rate limit (login)
 	TrustedProxyCount int                 // R-P2-7 client-IP derivation
 	Log               *slog.Logger
