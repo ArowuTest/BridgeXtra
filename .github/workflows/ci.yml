@@ -123,3 +123,57 @@ jobs:
           TCP_TEST_HOSTPORT: localhost:5434
           TCP_TEST_MANAGED_OWNER: "1"
         run: go test -count=1 -run TestApply_AsManagedNonSuperuserOwner ./backend/internal/platform/dbmigrate/
+
+  # Gate B #3: the operator portal is now merge-blocking too — a red typecheck,
+  # lint, build, or a missing/weakened browser security header fails the PR
+  # (VR-56-F1: the CSP is the console's XSS defence for the CSRF-token session).
+  portal:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: portal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+
+      - name: Install (locked)
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit)
+        run: npm run typecheck
+
+      - name: Lint (next lint — zero warnings)
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      # Prove the security headers are actually SERVED (not just declared): boot
+      # the production server and assert every header, and that the CSP is the
+      # strict nonce form — NOT a weakened 'unsafe-inline' script policy.
+      - name: Security headers present + strict CSP
+        run: |
+          npm run start >/tmp/portal.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null "http://localhost:3090/login" && break || sleep 1
+          done
+          h=$(curl -sD - -o /dev/null "http://localhost:3090/login")
+          echo "$h"
+          fail=0
+          req() { echo "$h" | grep -iq "$1" || { echo "MISSING header: $1"; fail=1; }; }
+          req "^content-security-policy:"
+          req "^strict-transport-security: *max-age=63072000"
+          req "^x-frame-options: *DENY"
+          req "^x-content-type-options: *nosniff"
+          req "^referrer-policy: *no-referrer"
+          req "^permissions-policy:"
+          csp=$(echo "$h" | grep -i "^content-security-policy:")
+          echo "$csp" | grep -q "nonce-" || { echo "CSP is not nonce-based"; fail=1; }
+          if echo "$csp" | grep -oiE "script-src[^;]*" | grep -q "unsafe-inline"; then
+            echo "CSP script-src permits unsafe-inline — XSS defence defeated"; fail=1
+          fi
+          exit $fail

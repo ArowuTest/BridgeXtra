@@ -6,7 +6,8 @@
     "dev": "next dev -p 3090",
     "build": "next build",
     "start": "next start -p 3090",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "next": "^15.5.20",
@@ -17,9 +18,12 @@
     "postcss": "^8.5.10"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3",
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "^15.5.20",
     "typescript": "^5"
   }
 }
