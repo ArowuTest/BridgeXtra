@@ -27,11 +27,28 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
 // ErrBlocked is returned when a destination resolves to a forbidden address.
 var ErrBlocked = errors.New("egress: destination is not a permitted target")
+
+// blockPrivate is the VR-32 prod-hardening toggle (#44). Default OFF so dev
+// (localhost simulator) and Render service-to-service over a private network keep
+// working. Set ON at boot in a production deployment where every legitimate
+// egress target (the real telco endpoints) is public — then loopback and RFC1918
+// private / ULA ranges are ALSO blocked, closing the last SSRF avenue. It is a
+// deployment-topology setting (like a DSN), not a per-tenant policy, so it is
+// governed by an env var read once at boot, not admin config.
+var blockPrivate atomic.Bool
+
+// SetBlockPrivate arms/disarms the private-range block. Called once at process
+// boot from TCP_EGRESS_BLOCK_PRIVATE; read at dial time by IsBlocked.
+func SetBlockPrivate(on bool) { blockPrivate.Store(on) }
+
+// BlockPrivateEnabled reports the current mode (for boot logging).
+func BlockPrivateEnabled() bool { return blockPrivate.Load() }
 
 // SafeClient returns an *http.Client whose dialer enforces the egress guard.
 // A zero timeout means "no client-level timeout" (the caller governs deadlines
@@ -79,13 +96,22 @@ func guardedDial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return nil, lastErr
 }
 
-// IsBlocked reports whether an IP is a forbidden egress target: link-local
-// (cloud metadata) unicast/multicast, any multicast, or the unspecified
-// address. Exported so the config validators can reject an endpoint that is an
-// IP literal in a blocked range at approval time (defence in depth).
+// IsBlocked reports whether an IP is a forbidden egress target. ALWAYS blocked:
+// link-local (cloud metadata) unicast/multicast, any multicast, and the
+// unspecified address. ADDITIONALLY blocked when the prod private-range toggle
+// is on (#44): loopback (127.0.0.0/8, ::1) and RFC1918 / ULA private ranges.
+// Exported so the config validators can reject an endpoint that is an IP literal
+// in a blocked range at approval time (defence in depth) — and so a strict-mode
+// deployment rejects a private-target config at approval, not just at dial.
 func IsBlocked(ip net.IP) bool {
-	return ip.IsLinkLocalUnicast() ||
+	if ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() ||
 		ip.IsMulticast() ||
-		ip.IsUnspecified()
+		ip.IsUnspecified() {
+		return true
+	}
+	if blockPrivate.Load() && (ip.IsLoopback() || ip.IsPrivate()) {
+		return true
+	}
+	return false
 }

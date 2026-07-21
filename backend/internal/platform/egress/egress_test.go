@@ -68,3 +68,34 @@ func TestIsBlocked(t *testing.T) {
 		}
 	}
 }
+
+// #44 (VR-32 prod hardening): with the private-range block ON, loopback and
+// RFC1918/ULA are ALSO blocked; with it OFF (default), they are allowed. The
+// always-blocked ranges (metadata/multicast/unspecified) are unaffected.
+func TestBlockPrivate_Toggle(t *testing.T) {
+	t.Cleanup(func() { egress.SetBlockPrivate(false) })
+
+	private := []string{"127.0.0.1", "::1", "10.1.2.3", "192.168.5.5", "172.16.0.1", "fc00::1"}
+
+	// Default OFF: private/loopback allowed.
+	egress.SetBlockPrivate(false)
+	for _, ip := range private {
+		if egress.IsBlocked(net.ParseIP(ip)) {
+			t.Errorf("with block OFF, %s must be allowed", ip)
+		}
+	}
+	// ON: private/loopback blocked.
+	egress.SetBlockPrivate(true)
+	for _, ip := range private {
+		if !egress.IsBlocked(net.ParseIP(ip)) {
+			t.Errorf("with block ON, %s must be blocked", ip)
+		}
+	}
+	// Always-blocked ranges stay blocked; an ordinary public IP stays allowed.
+	if !egress.IsBlocked(net.ParseIP("169.254.169.254")) {
+		t.Error("metadata address must always be blocked")
+	}
+	if egress.IsBlocked(net.ParseIP("8.8.8.8")) {
+		t.Error("a public address must remain allowed even in strict mode")
+	}
+}

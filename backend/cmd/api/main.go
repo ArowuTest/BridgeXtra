@@ -20,6 +20,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbroles"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
@@ -45,6 +46,12 @@ func main() {
 	appDSN := env("TCP_APP_DSN", "postgres://tcp_app:devlocal_app@localhost:5434/telco_credit")
 	workerDSN := env("TCP_WORKER_DSN", "postgres://tcp_worker:devlocal_worker@localhost:5434/telco_credit")
 	addr := env("TCP_API_ADDR", ":8090")
+
+	// #44 (VR-32 prod hardening): in production, block loopback + private-range
+	// egress too — every legitimate outbound target (the real telco) is public.
+	// Default off so dev/Render private-network traffic keeps working.
+	egress.SetBlockPrivate(env("TCP_EGRESS_BLOCK_PRIVATE", "false") == "true")
+	log.Info("egress guard", "block_private_ranges", egress.BlockPrivateEnabled())
 
 	// Boot-time self-migration (project lesson: never depend on an external
 	// deploy hook having run).
