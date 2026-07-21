@@ -156,7 +156,9 @@ func main() {
 		_ = json.NewEncoder(w).Encode(out)
 	})))
 
-	srv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	// Gate B: baseline security headers on every response (SSRF-adjacent pen-test
+	// hardening — a JSON API that serves no active content of its own).
+	srv := &http.Server{Addr: addr, Handler: handler.SecurityHeaders(mux), ReadHeaderTimeout: 10 * time.Second}
 	log.Info("api listening", "addr", addr)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("server stopped", "err", err)
