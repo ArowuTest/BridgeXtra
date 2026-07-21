@@ -183,3 +183,76 @@ func (r *PortalSessions) Revoke(ctx context.Context, token string) error {
 		WHERE session_hash = $1 AND revoked_at IS NULL`, th[:])
 	return err
 }
+
+// --- Gate B #1 Slice 2: DB-enforced operator reads ------------------------
+
+// OperatorReader runs portal operator READS on the RLS-enforced tcp_operator
+// pool with the tenant scope set LOCAL from the TRUSTED session authority. It is
+// the SINGLE server-side site where app.op_all is ever set — and only for the
+// '*' platform admin. A telco- or programme-scoped session can never reach the
+// op_all path (they take their own branch), which is the security boundary the
+// review requires. Resolve is a trusted pool (worker/owner, BYPASSRLS) used ONLY
+// to look up which telco owns a programme — never to read tenant money data.
+type OperatorReader struct {
+	Pool    *pgxpool.Pool
+	Resolve *pgxpool.Pool
+}
+
+// ErrUnknownProgramme: a programme-scoped session named a programme with no telco.
+var ErrUnknownProgramme = errors.New("repo: programme has no telco (cannot scope operator read)")
+
+// Read opens a tx on the operator pool, sets the scope GUCs LOCAL from the scope's
+// authority, and runs fn. Fail-closed: a scope without authority sets no GUC, so
+// the existing RLS telco policy matches nothing and the read returns empty — a
+// forgotten/mis-derived scope leaks nothing.
+func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(tx pgx.Tx) error) error {
+	tx, err := r.Pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("operator read begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	switch {
+	case !scope.authority:
+		// No authority => no reads. Leave every GUC unset; RLS returns empty.
+	case scope.telco != "":
+		// Telco-scoped: DB-ENFORCED by the existing telco RLS policy.
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.telco_id',$1,true)`, scope.telco); err != nil {
+			return fmt.Errorf("scope telco: %w", err)
+		}
+	case scope.programme != "":
+		// Programme-scoped: pin the telco (DB-enforced) via a trusted lookup; the
+		// repo query keeps the programme_id filter (intra-tenant, app-level residual).
+		telco, err := r.programmeTelco(ctx, scope.programme)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.telco_id',$1,true)`, telco); err != nil {
+			return fmt.Errorf("scope programme telco: %w", err)
+		}
+	default:
+		// The ONLY op_all path: authority AND no telco AND no programme => the '*'
+		// platform admin reading the whole estate. App-gated, bounded, audited here.
+		if _, err := tx.Exec(ctx, `SELECT set_config('app.op_all','true',true)`); err != nil {
+			return fmt.Errorf("scope op_all: %w", err)
+		}
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// programmeTelco resolves a programme's owning telco via the trusted resolver pool
+// (BYPASSRLS) — a metadata lookup, not tenant data.
+func (r OperatorReader) programmeTelco(ctx context.Context, programmeID string) (string, error) {
+	var telco string
+	err := r.Resolve.QueryRow(ctx, `SELECT telco_id FROM programmes WHERE programme_id=$1`, programmeID).Scan(&telco)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", ErrUnknownProgramme
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve programme telco: %w", err)
+	}
+	return telco, nil
+}
