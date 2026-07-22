@@ -192,3 +192,82 @@ jobs:
           [ "$nonced" -ge 1 ] || { echo "NO script carries the request nonce — CSP would block the app (white screen)"; fail=1; }
           [ "$unnonced" -eq 0 ] || { echo "${unnonced} same-origin scripts lack the nonce — strict-dynamic would block them"; fail=1; }
           exit $fail
+
+  # Gate B #3 Slice B: portal RBAC-scope journeys against the REAL stack (Go API +
+  # seeded Postgres + the built portal). Server-side role×route RBAC is already
+  # exhaustively unit-tested in Go; this proves the BROWSER story — per-role nav,
+  # out-of-role route refusal, and the scope indicator — end to end, merge-blocking.
+  portal-e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: devlocal
+          POSTGRES_DB: telco_credit
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TCP_ADMIN_DSN: postgres://postgres:devlocal@localhost:5434/telco_credit
+      # CI test operators (ephemeral DB fixtures, not secrets — same idea as the
+      # roleKeys in portal_test.go). One JSON list drives BOTH the seed tool and
+      # the Playwright keys so they can never drift.
+      E2E_OPERATORS: '[{"actor":"e2e_admin","key":"e2e-key-admin-00000001","role":"ADMIN","scope":"*"},{"actor":"e2e_risk","key":"e2e-key-risk-000000001","role":"RISK","scope":"*"},{"actor":"e2e_finance","key":"e2e-key-fin-0000000001","role":"FINANCE","scope":"*"},{"actor":"e2e_ops","key":"e2e-key-ops-0000000001","role":"OPS","scope":"*"},{"actor":"e2e_support","key":"e2e-key-sup-0000000001","role":"SUPPORT","scope":"*"},{"actor":"e2e_fin_scoped","key":"e2e-key-finscoped-0001","role":"FINANCE","scope":"telco:SIM_NG"}]'
+      PORTAL_E2E_KEYS: '{"ADMIN":"e2e-key-admin-00000001","RISK":"e2e-key-risk-000000001","FINANCE":"e2e-key-fin-0000000001","OPS":"e2e-key-ops-0000000001","SUPPORT":"e2e-key-sup-0000000001","FINANCE_SCOPED":"e2e-key-finscoped-0001"}'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: portal/package-lock.json
+
+      - name: Migrate the database
+        run: go run ./backend/cmd/migrate
+
+      - name: Seed CI operators (one per role + a telco-scoped one)
+        env:
+          TCP_SEED_ALLOW: "1"
+          TCP_SEED_OPERATORS: ${{ env.E2E_OPERATORS }}
+        run: go run ./backend/cmd/seed-operators
+
+      - name: Build + start the API
+        run: |
+          go build -o /tmp/tcp-api ./backend/cmd/api
+          /tmp/tcp-api >/tmp/api.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf -o /dev/null "http://localhost:8090/healthz" && { echo "api ready"; break; }
+            sleep 1
+          done
+          curl -sf -o /dev/null "http://localhost:8090/healthz" || { echo "API failed to boot:"; cat /tmp/api.log; exit 1; }
+
+      - name: Portal deps + build
+        working-directory: portal
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Playwright (chromium)
+        working-directory: portal
+        run: npx playwright install --with-deps chromium
+
+      - name: Start portal + run RBAC-scope journeys
+        working-directory: portal
+        env:
+          BX_API_ORIGIN: http://localhost:8090
+        run: |
+          npm run start >/tmp/portal.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null "http://localhost:3090/login" && { echo "portal ready"; break; }
+            sleep 1
+          done
+          curl -sf -o /dev/null "http://localhost:3090/login" || { echo "portal failed to boot:"; cat /tmp/portal.log; exit 1; }
+          npm run test:e2e
