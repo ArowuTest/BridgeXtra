@@ -152,16 +152,23 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Prove the security headers are actually SERVED (not just declared): boot
-      # the production server and assert every header, and that the CSP is the
-      # strict nonce form — NOT a weakened 'unsafe-inline' script policy.
-      - name: Security headers present + strict CSP
+      # Prove the security headers are actually SERVED (not just declared), that
+      # the CSP is the strict nonce form (NOT weakened 'unsafe-inline'), and
+      # (VR-62-F1) that the app actually LOADS under its own CSP: every same-origin
+      # script in the served HTML must carry THIS request's nonce. A static-
+      # prerender regression (e.g. dropping `await headers()` from layout.tsx, or a
+      # Next upgrade changing prerender behaviour) ships nonce-less scripts that
+      # strict-dynamic then blocks (white screen) while the header stays strict —
+      # this is the check that catches that, not the header assertion.
+      - name: Security headers + strict CSP + app loads under its own CSP
         run: |
           npm run start >/tmp/portal.log 2>&1 &
           for i in $(seq 1 30); do
             curl -sf -o /dev/null "http://localhost:3090/login" && break || sleep 1
           done
-          h=$(curl -sD - -o /dev/null "http://localhost:3090/login")
+          # One request: headers AND body share the same per-request nonce.
+          body=$(curl -sD /tmp/hdr.txt "http://localhost:3090/login")
+          h=$(cat /tmp/hdr.txt)
           echo "$h"
           fail=0
           req() { echo "$h" | grep -iq "$1" || { echo "MISSING header: $1"; fail=1; }; }
@@ -172,8 +179,16 @@ jobs:
           req "^referrer-policy: *no-referrer"
           req "^permissions-policy:"
           csp=$(echo "$h" | grep -i "^content-security-policy:")
-          echo "$csp" | grep -q "nonce-" || { echo "CSP is not nonce-based"; fail=1; }
+          nonce=$(echo "$csp" | grep -oE "nonce-[A-Za-z0-9+/=]+" | head -1 | sed "s/nonce-//")
+          [ -n "$nonce" ] || { echo "CSP is not nonce-based"; fail=1; }
           if echo "$csp" | grep -oiE "script-src[^;]*" | grep -q "unsafe-inline"; then
             echo "CSP script-src permits unsafe-inline — XSS defence defeated"; fail=1
           fi
+          # VR-62-F1: the app-loads-under-CSP regression guard.
+          nonced=$(echo "$body" | grep -oE "<script[^>]*nonce=\"${nonce}\"" | wc -l)
+          scripts=$(echo "$body" | grep -oE "<script( [^>]*)?>" | wc -l)
+          unnonced=$(echo "$body" | grep -oE "<script( [^>]*)?>" | grep -cv "nonce=" || true)
+          echo "scripts total=${scripts} nonced=${nonced} un-nonced=${unnonced}"
+          [ "$nonced" -ge 1 ] || { echo "NO script carries the request nonce — CSP would block the app (white screen)"; fail=1; }
+          [ "$unnonced" -eq 0 ] || { echo "${unnonced} same-origin scripts lack the nonce — strict-dynamic would block them"; fail=1; }
           exit $fail
