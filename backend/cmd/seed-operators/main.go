@@ -45,6 +45,8 @@ func main() {
 
 	dsn := os.Getenv("TCP_ADMIN_DSN")
 	if dsn == "" {
+		// #nosec G101 -- local-dev docker fallback (A-14), not a production
+		// credential; CI/prod always injects TCP_ADMIN_DSN (V2-SEC-005).
 		dsn = "postgres://postgres:devlocal@localhost:5434/telco_credit"
 	}
 	ctx := context.Background()
