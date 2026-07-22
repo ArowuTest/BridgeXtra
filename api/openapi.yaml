@@ -1434,6 +1434,198 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/portal/operators:
+    get:
+      operationId: portalOperatorsList
+      summary: List provisioned operators (ADMIN only)
+      description: The console view of every operator credential and its status.
+      responses:
+        "200":
+          description: Operator list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operators]
+                properties:
+                  operators:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        actor: { type: string }
+                        role: { type: string }
+                        scope: { type: string }
+                        status: { type: string, enum: [ACTIVE, REVOKED] }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/portal/operators/requests:
+    get:
+      operationId: portalOperatorRequests
+      summary: List open operator create-requests (ADMIN only)
+      responses:
+        "200":
+          description: Open create requests
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [requests]
+                properties:
+                  requests: { type: array, items: { type: object } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      operationId: portalOperatorPropose
+      summary: Propose creating an operator (MAKER; four-eyes)
+      description: >
+        Records a create request for a DISTINCT admin to approve. Creating an
+        operator is a grant from nothing and is always four-eyes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [actor, role, scope, reason]
+              properties:
+                actor: { type: string }
+                role: { type: string, enum: [ADMIN, RISK, FINANCE, OPS, SUPPORT] }
+                scope: { type: string }
+                reason: { type: string }
+      responses:
+        "201":
+          description: Create request recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id]
+                properties:
+                  request_id: { type: string }
+                  actor: { type: string }
+                  state: { type: string, enum: [REQUESTED] }
+        "400":
+          description: Invalid request (OPERATOR_BAD_REQUEST)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Operator already has an open request (OPERATOR_OPEN_REQUEST)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/portal/operators/requests/{id}/approve:
+    post:
+      operationId: portalOperatorApprove
+      summary: Approve a create request (CHECKER; distinct admin) — returns the one-time key
+      description: >
+        A DISTINCT admin approves; the credential is created and the plaintext
+        access key is returned EXACTLY ONCE (stored hash-only, never retrievable).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Operator created; one-time access key
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_key]
+                properties:
+                  request_id: { type: string }
+                  access_key: { type: string }
+                  note: { type: string }
+        "404":
+          description: Request not found (OPERATOR_REQUEST_NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Self-approval refused (OPERATOR_MAKER_CHECKER)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/portal/operators/requests/{id}/reject:
+    post:
+      operationId: portalOperatorReject
+      summary: Reject a create request (CHECKER; distinct admin)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Request rejected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  request_id: { type: string }
+                  state: { type: string, enum: [REJECTED] }
+        "404":
+          description: Request not found (OPERATOR_REQUEST_NOT_FOUND)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: Self-decision refused (OPERATOR_MAKER_CHECKER)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /v1/portal/operators/{actor}/revoke:
+    post:
+      operationId: portalOperatorRevoke
+      summary: Revoke an operator (single-actor)
+      description: >
+        Deactivates the credential (status REVOKED); the M4A-F1 kill-switch ends
+        the operator's live sessions immediately. Reducing access is never gated.
+      parameters:
+        - name: actor
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string }
+      responses:
+        "200":
+          description: Operator revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  actor: { type: string }
+                  status: { type: string, enum: [REVOKED] }
+        "409":
+          description: Operator not found or already revoked (OPERATOR_NOT_ACTIVE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
 components:
   securitySchemes:
     ApiKeyAuth:

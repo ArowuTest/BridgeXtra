@@ -81,6 +81,12 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 		"/v1/portal/support/subscriber":               true,
 		"/v1/portal/support/complaints":               true,
 		"/v1/portal/support/complaints/{id}/progress": true,
+		// Governed operator provisioning (v1) — ADMIN-only, four-eyes create + revoke
+		"/v1/portal/operators":                        true,
+		"/v1/portal/operators/requests":               true,
+		"/v1/portal/operators/requests/{id}/approve":  true,
+		"/v1/portal/operators/requests/{id}/reject":   true,
+		"/v1/portal/operators/{actor}/revoke":         true,
 	}
 	for p := range served {
 		if doc.Paths.Find(p) == nil {

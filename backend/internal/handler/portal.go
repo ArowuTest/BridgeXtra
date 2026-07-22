@@ -20,6 +20,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
@@ -41,15 +42,16 @@ const (
 type Portal struct {
 	Admins            *repo.Admins
 	Sessions          *repo.PortalSessions
-	Config            *configsvc.Service  // ADMIN config lifecycle (M4b UI sits on this)
-	Treasury          *treasury.Service   // M4c guardrail re-arm actions (tenant tx)
-	Ops               *ops.Service        // M4d breaks-queue actions (tenant tx)
-	Settlement        *settlement.Service // M4d settlement verification (tenant tx)
-	Recovery          *recovery.Service   // M4e parked-reversal retry (tenant tx, reuses guarded apply)
-	Demo              *ops.Demo           // M4e-3 fault demo (real origination path, sim-only allowlist)
-	Operator          repo.OperatorReader // Gate B #1 Slice 2: DB-enforced operator reads (tcp_operator + scoped tx)
-	Limiter           *ratelimit.Limiter  // R-P0-8 inbound rate limit (login)
-	TrustedProxyCount int                 // R-P2-7 client-IP derivation
+	Config            *configsvc.Service    // ADMIN config lifecycle (M4b UI sits on this)
+	Treasury          *treasury.Service     // M4c guardrail re-arm actions (tenant tx)
+	Ops               *ops.Service          // M4d breaks-queue actions (tenant tx)
+	Settlement        *settlement.Service   // M4d settlement verification (tenant tx)
+	Recovery          *recovery.Service     // M4e parked-reversal retry (tenant tx, reuses guarded apply)
+	Demo              *ops.Demo             // M4e-3 fault demo (real origination path, sim-only allowlist)
+	Operator          repo.OperatorReader   // Gate B #1 Slice 2: DB-enforced operator reads (tcp_operator + scoped tx)
+	Operators         *operatormgmt.Service // governed operator provisioning (v1: four-eyes create + revoke)
+	Limiter           *ratelimit.Limiter    // R-P0-8 inbound rate limit (login)
+	TrustedProxyCount int                   // R-P2-7 client-IP derivation
 	Log               *slog.Logger
 }
 
@@ -65,6 +67,15 @@ var routeRoles = map[string][]string{
 	"POST /v1/portal/config/{id}/submit":   {roleAdmin},
 	"POST /v1/portal/config/{id}/approve":  {roleAdmin},
 	"POST /v1/portal/config/{id}/activate": {roleAdmin},
+
+	// Governed operator provisioning (v1) — ADMIN-only. Create is four-eyes
+	// (propose + a distinct approve); revoke is single-actor.
+	"GET /v1/portal/operators":                        {roleAdmin},
+	"GET /v1/portal/operators/requests":               {roleAdmin},
+	"POST /v1/portal/operators/requests":              {roleAdmin},
+	"POST /v1/portal/operators/requests/{id}/approve": {roleAdmin},
+	"POST /v1/portal/operators/requests/{id}/reject":  {roleAdmin},
+	"POST /v1/portal/operators/{actor}/revoke":        {roleAdmin},
 
 	// M4c risk workspace: reads for oversight roles; re-arm actions for the
 	// risk actioners (two-person rule schema-enforced regardless).
@@ -151,6 +162,13 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/config/{id}/submit", p.configLifecycle("submit"))
 	p.mountRBAC(mux, "POST /v1/portal/config/{id}/approve", p.configLifecycle("approve"))
 	p.mountRBAC(mux, "POST /v1/portal/config/{id}/activate", p.configLifecycle("activate"))
+
+	p.mountRBAC(mux, "GET /v1/portal/operators", http.HandlerFunc(p.operatorsList))
+	p.mountRBAC(mux, "GET /v1/portal/operators/requests", http.HandlerFunc(p.operatorRequestsList))
+	p.mountRBAC(mux, "POST /v1/portal/operators/requests", http.HandlerFunc(p.operatorPropose))
+	p.mountRBAC(mux, "POST /v1/portal/operators/requests/{id}/approve", http.HandlerFunc(p.operatorApprove))
+	p.mountRBAC(mux, "POST /v1/portal/operators/requests/{id}/reject", http.HandlerFunc(p.operatorReject))
+	p.mountRBAC(mux, "POST /v1/portal/operators/{actor}/revoke", http.HandlerFunc(p.operatorRevoke))
 
 	p.mountRBAC(mux, "GET /v1/portal/risk/trips", http.HandlerFunc(p.riskTrips))
 	p.mountRBAC(mux, "POST /v1/portal/risk/trips/{id}/request-rearm", http.HandlerFunc(p.riskRequestRearm))
