@@ -40,6 +40,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/outboxdispatch"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recon"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/replay"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/scoringsched"
 )
 
 func env(k, def string) string {
@@ -56,6 +57,16 @@ func envDur(k string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// workerInstanceID identifies this worker process as a scoring-cycle claimant so
+// multi-instance reclaims are attributable (host/pid/uuid).
+func workerInstanceID() string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		host = "worker"
+	}
+	return fmt.Sprintf("%s/%d/%s", host, os.Getpid(), platform.NewID("wkr"))
 }
 
 func main() {
@@ -78,6 +89,8 @@ func main() {
 	overrideReason := flag.String("reason", "", "reason for -recon-override-propose")
 	evidenceRun := flag.String("recon-evidence", "",
 		"R-P0-6 E2: print the signed, reproducible evidence pack (JSON + pack_hash) for the given recon run id and exit")
+	scoreOnce := flag.Bool("score", false,
+		"Phase 0: run the durable scoring scheduler once for every active telco/programme and exit (ingest -> score on the config-driven cadence, idempotent per cycle)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -247,6 +260,20 @@ func main() {
 		return
 	}
 
+	// Phase 0 scoring scheduler, wired for both the one-shot job and the standing
+	// loop. instanceID (host/pid/uuid) is the cycle claimant so multi-instance
+	// reclaims are attributable. Scoring writes go through appPool (RLS); the
+	// cross-tenant telco list uses workerPool.
+	instanceID := workerInstanceID()
+	scheduler := scoringsched.New(appPool, workerPool, appCfg, log, instanceID)
+
+	if *scoreOnce {
+		log.Info("scoring scheduler one-shot", "instance", instanceID)
+		scheduler.RunDueAll(ctx, time.Now().UTC())
+		log.Info("scoring scheduler one-shot complete")
+		return
+	}
+
 	// --- standing services ---
 	adapter := mno.NewHTTPAdapter(appCfg)
 	led := ledger.New(appCfg)
@@ -278,6 +305,7 @@ func main() {
 
 	dispatchEvery := envDur("TCP_DISPATCH_INTERVAL", 2*time.Second)
 	resolveEvery := envDur("TCP_RESOLVER_INTERVAL", 5*time.Second)
+	scoreEvery := envDur("TCP_SCORING_INTERVAL", 60*time.Second)
 
 	// Resolver loop: iterate active telcos from the registry (never a
 	// hardcoded tenant list) and resolve due enquiries for each.
@@ -305,8 +333,26 @@ func main() {
 		}
 	}()
 
+	// Scoring scheduler loop: on each tick, run the due cycle for every active
+	// telco/programme. Most ticks are cheap no-ops (the cycle is already claimed
+	// for this cadence window); a due cycle ingests fresh features and re-scores
+	// so decisions never expire out from under offers.
+	go func() {
+		t := time.NewTicker(scoreEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				scheduler.RunDueAll(ctx, time.Now().UTC())
+			}
+		}
+	}()
+
 	log.Info("worker running", "dispatch_interval", dispatchEvery.String(),
-		"resolver_interval", resolveEvery.String())
+		"resolver_interval", resolveEvery.String(), "scoring_interval", scoreEvery.String(),
+		"instance", instanceID)
 	if err := d.Run(ctx, dispatchEvery); err != nil && ctx.Err() == nil {
 		log.Error("worker stopped", "err", err)
 		os.Exit(1)
