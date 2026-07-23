@@ -177,7 +177,13 @@ func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, appr
 		}
 
 		// Balanced movement: the receivable dies, the loss is recognised
-		// (template-rendered, CFG-012).
+		// (template-rendered, CFG-012). Deferred fee recognition: FEE_UNEARNED_
+		// REVERSED reverses any remaining unearned fee (DR UNEARNED_FEE / CR
+		// WRITE_OFF_EXPENSE) — a deferred fee is NEVER recognised as income; only
+		// principal is the loss. Zero here so the legs omit and the loss is the
+		// full outstanding (unchanged); the write-off slice binds the fresh unearned
+		// remainder under DEFERRED. Always bound.
+		unearnedRev, _ := entity.ZeroMoney(adv.Outstanding.Currency())
 		if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 			BusinessEventKey: wo.WriteOffID + "/posted",
 			EventType:        ledger.EventWriteOff,
@@ -185,7 +191,7 @@ func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, appr
 			ProgrammeID:      adv.ProgrammeID,
 			AdvanceID:        adv.AdvanceID,
 			CorrelationID:    correlationID,
-		}, ledger.Bindings{ledger.SymAmount: adv.Outstanding}); err != nil {
+		}, ledger.Bindings{ledger.SymAmount: adv.Outstanding, ledger.SymFeeUnearnedReversed: unearnedRev}); err != nil {
 			return err
 		}
 		if err := s.writeoffs.MarkPosted(ctx, tx, writeOffID); err != nil {

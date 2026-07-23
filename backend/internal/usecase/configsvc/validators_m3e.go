@@ -29,12 +29,18 @@ func init() {
 	validators["ledger.templates"] = validateLedgerTemplates
 }
 
-// symbol basis vectors: (disbursed, fee, amount)
-var symbolBasis = map[string][3]int{
-	"DISBURSED":   {1, 0, 0},
-	"FEE":         {0, 1, 0},
-	"OUTSTANDING": {1, 1, 0}, // identity: outstanding = disbursed + fee (both fee models)
-	"AMOUNT":      {0, 0, 1},
+// symbol basis vectors: (disbursed, fee, amount, feeDeferAdj, feeRecognized,
+// feeUnearnedReversed). Each deferred-fee recognition symbol has its OWN axis so
+// a mis-authored template that paired two DIFFERENT recognition symbols could
+// never net to zero and pass — the balance proof stays strict.
+var symbolBasis = map[string][6]int{
+	"DISBURSED":             {1, 0, 0, 0, 0, 0},
+	"FEE":                   {0, 1, 0, 0, 0, 0},
+	"OUTSTANDING":           {1, 1, 0, 0, 0, 0}, // identity: outstanding = disbursed + fee (both fee models)
+	"AMOUNT":                {0, 0, 1, 0, 0, 0},
+	"FEE_DEFER_ADJ":         {0, 0, 0, 1, 0, 0}, // origination deferral (fee income -> unearned)
+	"FEE_RECOGNIZED":        {0, 0, 0, 0, 1, 0}, // recovery recognise / reverse de-recognise
+	"FEE_UNEARNED_REVERSED": {0, 0, 0, 0, 0, 1}, // write-off unearned reversal
 }
 
 func validateLedgerTemplates(ctx context.Context, tx pgx.Tx, content json.RawMessage) error {
@@ -68,7 +74,7 @@ func validateLedgerTemplates(ctx context.Context, tx pgx.Tx, content json.RawMes
 		if len(tpl.Lines) < 2 {
 			return fmt.Errorf("template %s: at least two lines required (double entry)", event)
 		}
-		var debit, credit [3]int
+		var debit, credit [6]int
 		for i, l := range tpl.Lines {
 			if l.Account == nil || !chartAccounts[*l.Account] {
 				return fmt.Errorf("template %s line %d: account not on the ACTIVE chart (armed-but-dead)", event, i)
@@ -81,9 +87,9 @@ func validateLedgerTemplates(ctx context.Context, tx pgx.Tx, content json.RawMes
 			}
 			vec, ok := symbolBasis[*l.Amount]
 			if !ok {
-				return fmt.Errorf("template %s line %d: unknown amount symbol %q (known: DISBURSED, FEE, OUTSTANDING, AMOUNT)", event, i, *l.Amount)
+				return fmt.Errorf("template %s line %d: unknown amount symbol %q (known: DISBURSED, FEE, OUTSTANDING, AMOUNT, FEE_DEFER_ADJ, FEE_RECOGNIZED, FEE_UNEARNED_REVERSED)", event, i, *l.Amount)
 			}
-			for k := 0; k < 3; k++ {
+			for k := 0; k < 6; k++ {
 				if *l.Side == "DEBIT" {
 					debit[k] += vec[k]
 				} else {

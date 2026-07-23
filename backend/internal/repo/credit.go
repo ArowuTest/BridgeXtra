@@ -346,16 +346,17 @@ type Advances struct{}
 
 const advanceCols = `advance_id, telco_id, programme_id, subscriber_account_id, offer_id, funding_pool_id,
 	idempotency_key, correlation_id, state, version, face_value_minor, fee_minor, disbursed_minor,
-	outstanding_minor, currency, accepted_at, activated_at, closed_at, updated_at`
+	outstanding_minor, currency, accepted_at, activated_at, closed_at, updated_at, fee_recognition`
 
 func advanceScan(row pgx.Row) (entity.Advance, error) {
 	var a entity.Advance
 	var face, fee, disb, out int64
 	var cur string
 	var poolID *string // NULL until EXPOSURE_RESERVED (0006)
+	var feeRec *string // NULL for legacy advances (=> treated as UPFRONT)
 	err := row.Scan(&a.AdvanceID, &a.TelcoID, &a.ProgrammeID, &a.SubscriberAccountID, &a.OfferID,
 		&poolID, &a.IdempotencyKey, &a.CorrelationID, &a.State, &a.Version,
-		&face, &fee, &disb, &out, &cur, &a.AcceptedAt, &a.ActivatedAt, &a.ClosedAt, &a.UpdatedAt)
+		&face, &fee, &disb, &out, &cur, &a.AcceptedAt, &a.ActivatedAt, &a.ClosedAt, &a.UpdatedAt, &feeRec)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return a, ErrNotFound
 	}
@@ -364,6 +365,9 @@ func advanceScan(row pgx.Row) (entity.Advance, error) {
 	}
 	if poolID != nil {
 		a.FundingPoolID = *poolID
+	}
+	if feeRec != nil {
+		a.FeeRecognition = *feeRec
 	}
 	c := entity.Currency(cur)
 	if a.FaceValue, err = entity.NewMoney(face, c); err != nil {
@@ -385,16 +389,20 @@ func advanceScan(row pgx.Row) (entity.Advance, error) {
 //   - (created=false) when the idempotency key already exists (EDG-001 replay);
 //   - typed errors for one-active / offer-reuse violations.
 func (Advances) Insert(ctx context.Context, tx pgx.Tx, a entity.Advance) (created bool, err error) {
+	var feeRec *string // NULL for legacy/unset; set once here (pinned, never mutated)
+	if a.FeeRecognition != "" {
+		feeRec = &a.FeeRecognition
+	}
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO advances (advance_id, telco_id, programme_id, subscriber_account_id, offer_id,
 		  funding_pool_id, idempotency_key, correlation_id, state, version,
-		  face_value_minor, fee_minor, disbursed_minor, outstanding_minor, currency)
-		VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,1,$9,$10,$11,$12,$13)
+		  face_value_minor, fee_minor, disbursed_minor, outstanding_minor, currency, fee_recognition)
+		VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,1,$9,$10,$11,$12,$13,$14)
 		ON CONFLICT (telco_id, idempotency_key) DO NOTHING`,
 		a.AdvanceID, a.TelcoID, a.ProgrammeID, a.SubscriberAccountID, a.OfferID,
 		a.IdempotencyKey, a.CorrelationID, a.State,
 		a.FaceValue.Amount(), a.Fee.Amount(), a.Disbursed.Amount(),
-		a.Outstanding.Amount(), string(a.FaceValue.Currency()))
+		a.Outstanding.Amount(), string(a.FaceValue.Currency()), feeRec)
 	if err != nil {
 		return false, constraintErr(err)
 	}

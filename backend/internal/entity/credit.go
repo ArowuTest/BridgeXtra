@@ -163,6 +163,14 @@ const (
 	FeeAddedToRepayment FeeModel = "ADDED_TO_REPAYMENT"
 )
 
+// Fee recognition policy — WHEN fee income is recognised (orthogonal to FeeModel,
+// which governs cash mechanics). Pinned on the advance at origination; an empty
+// pin (legacy advance) is treated as UPFRONT.
+const (
+	FeeRecognitionUpfront  = "UPFRONT"
+	FeeRecognitionDeferred = "DEFERRED"
+)
+
 type OfferState string
 
 const (
@@ -229,10 +237,15 @@ type Advance struct {
 	Fee                 Money
 	Disbursed           Money
 	Outstanding         Money
-	AcceptedAt          time.Time
-	ActivatedAt         *time.Time
-	ClosedAt            *time.Time
-	UpdatedAt           time.Time
+	// FeeRecognition is the fee-income timing policy PINNED at origination and
+	// replayed by recovery/reversal/write-off (never re-read from config, so a
+	// mid-life policy flip cannot desync apply/reverse). Empty = legacy advance
+	// issued before the feature => treated as UPFRONT.
+	FeeRecognition string // "" (legacy=UPFRONT) | "UPFRONT" | "DEFERRED"
+	AcceptedAt     time.Time
+	ActivatedAt    *time.Time
+	ClosedAt       *time.Time
+	UpdatedAt      time.Time
 }
 
 type FulfilmentAttemptState string

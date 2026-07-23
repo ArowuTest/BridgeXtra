@@ -124,6 +124,33 @@ var checks = []struct {
 		`SELECT business_event_key FROM journals
 		 GROUP BY business_event_key, event_type HAVING count(*) > 1`,
 	},
+	{
+		"INV-018", "UNEARNED_FEE has a net-debit (negative liability) balance — deferred fee over-reversed",
+		`SELECT currency FROM journal_entries
+		 WHERE account_code = 'UNEARNED_FEE'
+		 GROUP BY currency HAVING SUM(debit_minor - credit_minor) > 0`,
+	},
+	{
+		"INV-019", "UNEARNED_FEE ledger balance != booked-remaining unearned fee over live DEFERRED advances (deferred-fee cross-check)",
+		// Deferred fee credited to UNEARNED_FEE at origination is drawn down as
+		// the waterfall allocates the fee-portion; the liability's live balance
+		// (credit-normal) must equal fee_minus-recovered-fee summed over advances
+		// still live and pinned DEFERRED. CLOSED advances net to 0 (fee fully
+		// recognised); WRITTEN_OFF advances are reversed to 0 by write-off and are
+		// excluded from the book side — both sides contribute 0. Single-currency
+		// book assumption, same as INV-016.
+		`SELECT 'UNEARNED_FEE' WHERE
+		   (SELECT COALESCE(SUM(credit_minor - debit_minor),0)
+		      FROM journal_entries WHERE account_code = 'UNEARNED_FEE')
+		   <>
+		   (SELECT COALESCE(SUM(a.fee_minor - COALESCE(fa.net_fee,0)),0)
+		      FROM advances a
+		      LEFT JOIN (SELECT advance_id, SUM(amount_minor) AS net_fee
+		                   FROM recovery_allocations WHERE component = 'FEE'
+		                   GROUP BY advance_id) fa ON fa.advance_id = a.advance_id
+		     WHERE a.fee_recognition = 'DEFERRED'
+		       AND a.state IN ('ACTIVE','PARTIALLY_RECOVERED'))`,
+	},
 }
 
 // Check runs every invariant sweep and returns all violations found.

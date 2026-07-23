@@ -335,7 +335,12 @@ func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID strin
 		}
 
 		// Balanced journal for the applied portion (idempotent by event id;
-		// template-rendered, CFG-012).
+		// template-rendered, CFG-012). Deferred fee recognition: FEE_RECOGNIZED
+		// recognises the fee-portion this event allocated (DR UNEARNED_FEE / CR
+		// FEE_INCOME). Bound to zero here so those legs omit and the journal is
+		// unchanged (UPFRONT); the recovery-recognition slice binds the allocated
+		// fee-portion under DEFERRED. Always bound — PostEvent checks bound-before-omit.
+		feeRecog, _ := entity.ZeroMoney(applied.Currency())
 		if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 			BusinessEventKey: evt.RecoveryEventID + "/applied",
 			EventType:        ledger.EventRecoveryApplied,
@@ -343,7 +348,7 @@ func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID strin
 			ProgrammeID:      adv.ProgrammeID,
 			AdvanceID:        adv.AdvanceID,
 			CorrelationID:    cmd.CorrelationID,
-		}, ledger.Bindings{ledger.SymAmount: applied}); err != nil {
+		}, ledger.Bindings{ledger.SymAmount: applied, ledger.SymFeeRecognized: feeRecog}); err != nil {
 			return err
 		}
 
@@ -750,7 +755,12 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 		return err
 	}
 
-	// Mirrored journal: receivable rebuilds, telco claws back.
+	// Mirrored journal: receivable rebuilds, telco claws back. Deferred fee
+	// recognition: FEE_RECOGNIZED de-recognises the fee-portion this reversal
+	// clawed back (DR FEE_INCOME / CR UNEARNED_FEE — the exact transpose of apply).
+	// Zero here so the legs omit (unchanged); the reversal-recognition slice binds
+	// the reversed fee-portion under DEFERRED. Always bound.
+	feeRecog, _ := entity.ZeroMoney(amount.Currency())
 	if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 		BusinessEventKey: original.RecoveryEventID + "/reversed/" + reversalSourceID,
 		EventType:        ledger.EventRecoveryReversed,
@@ -758,7 +768,7 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 		ProgrammeID:      adv.ProgrammeID,
 		AdvanceID:        adv.AdvanceID,
 		CorrelationID:    correlationID,
-	}, ledger.Bindings{ledger.SymAmount: amount}); err != nil {
+	}, ledger.Bindings{ledger.SymAmount: amount, ledger.SymFeeRecognized: feeRecog}); err != nil {
 		return err
 	}
 

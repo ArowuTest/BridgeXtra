@@ -925,6 +925,12 @@ func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID strin
 			}
 			// Ledger: recognition at confirmed fulfilment (A-10/V2-LED-006),
 			// rendered from the governed template (CFG-012, M3e).
+			// Deferred fee recognition: FEE_DEFER_ADJ moves the fee from FEE_INCOME
+			// to the UNEARNED_FEE liability at origination. Bound to zero here so the
+			// deferral legs omit and the journal is byte-identical (UPFRONT); the
+			// origination-pin slice flips it to adv.Fee under DEFERRED. Always bound
+			// — PostEvent checks bound-before-omit.
+			feeDeferAdj, _ := entity.ZeroMoney(adv.Fee.Currency())
 			if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 				BusinessEventKey: adv.AdvanceID + "/issued",
 				EventType:        ledger.EventAdvanceIssued,
@@ -936,6 +942,7 @@ func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID strin
 				ledger.SymOutstanding: adv.Outstanding,
 				ledger.SymDisbursed:   adv.Disbursed,
 				ledger.SymFee:         adv.Fee,
+				ledger.SymFeeDeferAdj: feeDeferAdj,
 			}); err != nil {
 				return err
 			}

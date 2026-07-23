@@ -25,6 +25,14 @@ const (
 	SymDisbursed   Symbol = "DISBURSED"   // advance disbursed value
 	SymFee         Symbol = "FEE"         // advance fee
 	SymOutstanding Symbol = "OUTSTANDING" // repayment obligation (= DISBURSED + FEE)
+
+	// Deferred fee recognition (bound to a real amount under fee_recognition=
+	// DEFERRED, else to ZeroMoney so the paired legs omit — the journal stays
+	// byte-identical under UPFRONT). Each is one DEBIT + one CREDIT leg in its
+	// template, so it cancels on its own validator basis axis.
+	SymFeeDeferAdj         Symbol = "FEE_DEFER_ADJ"         // origination: move fee income -> unearned liability
+	SymFeeRecognized       Symbol = "FEE_RECOGNIZED"        // recovery: recognise (apply) / de-recognise (reverse) the allocated fee-portion
+	SymFeeUnearnedReversed Symbol = "FEE_UNEARNED_REVERSED" // write-off: reverse remaining unearned (never income)
 )
 
 // TemplateLine is one governed posting line.
