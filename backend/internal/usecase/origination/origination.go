@@ -37,6 +37,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/feepolicy"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
 
@@ -675,6 +676,15 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 			Disbursed:           offer.Disbursed,
 			Outstanding:         offer.Repayment, // obligation = repayment amount
 		}
+		// PIN the fee_recognition policy on the advance at origination. This is the
+		// single fail-closed read (issuance refuses if the config is absent or
+		// invalid); recovery/reversal/write-off replay adv.FeeRecognition and never
+		// re-read config, so a mid-life policy flip cannot desync them.
+		pol, err := feepolicy.Resolve(ctx, s.Config, offer.ProgrammeID)
+		if err != nil {
+			return err
+		}
+		adv.FeeRecognition = pol
 		created, err := s.advances.Insert(ctx, tx, adv)
 		if err != nil {
 			return err
@@ -926,11 +936,14 @@ func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID strin
 			// Ledger: recognition at confirmed fulfilment (A-10/V2-LED-006),
 			// rendered from the governed template (CFG-012, M3e).
 			// Deferred fee recognition: FEE_DEFER_ADJ moves the fee from FEE_INCOME
-			// to the UNEARNED_FEE liability at origination. Bound to zero here so the
-			// deferral legs omit and the journal is byte-identical (UPFRONT); the
-			// origination-pin slice flips it to adv.Fee under DEFERRED. Always bound
-			// — PostEvent checks bound-before-omit.
+			// to the UNEARNED_FEE liability at origination. Under DEFERRED it is
+			// adv.Fee (fee lands in the liability, FEE_INCOME nets 0); under UPFRONT/
+			// legacy it is zero and the deferral legs omit (byte-identical journal).
+			// Always bound — PostEvent checks bound-before-omit.
 			feeDeferAdj, _ := entity.ZeroMoney(adv.Fee.Currency())
+			if adv.FeeRecognition == entity.FeeRecognitionDeferred {
+				feeDeferAdj = adv.Fee
+			}
 			if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 				BusinessEventKey: adv.AdvanceID + "/issued",
 				EventType:        ledger.EventAdvanceIssued,
