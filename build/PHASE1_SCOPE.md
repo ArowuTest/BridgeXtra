@@ -86,7 +86,9 @@ Config-driven: auth scheme + endpoints extend the `telco.adapter` domain
 ## Design-gate inputs needed from owner/partner BEFORE building real endpoints
 
 1. **Outbound auth scheme** (API key / OAuth2 / mTLS?) + endpoints (token URL,
-   fulfilment URL, status URL).
+   fulfilment URL, status URL). For OAuth2 also confirm the **access-token
+   lifetime** — S1 caches with a 60s TTL floor and 30s refresh headroom, safe for
+   any realistic client-credentials token but worth verifying (reviewer LOW).
 2. **Feed formats + transport** for each of the 3 feeds: push (webhook) vs pull
    (SFTP/poll); JSON/CSV/fixed-width; field specs; frequency/cutoffs.
 3. **Inbound feed authentication** (how MTN signs/authenticates what it sends us)
