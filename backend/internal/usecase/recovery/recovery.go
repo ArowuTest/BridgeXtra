@@ -312,8 +312,10 @@ func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID strin
 			}
 		}
 
-		// Waterfall split from governed config (V2-COL-002/004).
-		if err := s.allocate(ctx, tx, evt, adv, applied); err != nil {
+		// Waterfall split from governed config (V2-COL-002/004). feeTake is the
+		// fee-portion this event allocated — threaded to the recognition leg below.
+		feeTake, err := s.allocate(ctx, tx, evt, adv, applied)
+		if err != nil {
 			return err
 		}
 
@@ -337,10 +339,13 @@ func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID strin
 		// Balanced journal for the applied portion (idempotent by event id;
 		// template-rendered, CFG-012). Deferred fee recognition: FEE_RECOGNIZED
 		// recognises the fee-portion this event allocated (DR UNEARNED_FEE / CR
-		// FEE_INCOME). Bound to zero here so those legs omit and the journal is
-		// unchanged (UPFRONT); the recovery-recognition slice binds the allocated
-		// fee-portion under DEFERRED. Always bound — PostEvent checks bound-before-omit.
+		// FEE_INCOME). Under DEFERRED it recognises exactly feeTake; under
+		// UPFRONT/legacy it is zero and the legs omit (unchanged). Always bound —
+		// PostEvent checks bound-before-omit.
 		feeRecog, _ := entity.ZeroMoney(applied.Currency())
+		if adv.FeeRecognition == entity.FeeRecognitionDeferred {
+			feeRecog = feeTake
+		}
 		if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 			BusinessEventKey: evt.RecoveryEventID + "/applied",
 			EventType:        ledger.EventRecoveryApplied,
@@ -705,6 +710,10 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 		return err
 	}
 	remaining := amount
+	// feeReversed is the fee-portion this reversal claws back — threaded to the
+	// deferred de-recognition leg (DR FEE_INCOME / CR UNEARNED_FEE), the exact
+	// transpose of apply. At most one FEE iteration per event (validateAllocation).
+	feeReversed, _ := entity.ZeroMoney(amount.Currency())
 	for i := len(ac.Waterfall) - 1; i >= 0 && remaining.IsPositive(); i-- {
 		comp := entity.AllocationComponent(ac.Waterfall[i])
 		have, ok := perComp[comp]
@@ -729,6 +738,9 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 			Amount:          neg,
 		}); err != nil {
 			return err
+		}
+		if comp == entity.ComponentFee {
+			feeReversed = take
 		}
 		if remaining, err = remaining.Sub(take); err != nil {
 			return err
@@ -758,9 +770,12 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 	// Mirrored journal: receivable rebuilds, telco claws back. Deferred fee
 	// recognition: FEE_RECOGNIZED de-recognises the fee-portion this reversal
 	// clawed back (DR FEE_INCOME / CR UNEARNED_FEE — the exact transpose of apply).
-	// Zero here so the legs omit (unchanged); the reversal-recognition slice binds
-	// the reversed fee-portion under DEFERRED. Always bound.
+	// Under DEFERRED it de-recognises exactly feeReversed; under UPFRONT/legacy it
+	// is zero and the legs omit (unchanged). Always bound.
 	feeRecog, _ := entity.ZeroMoney(amount.Currency())
+	if adv.FeeRecognition == entity.FeeRecognitionDeferred {
+		feeRecog = feeReversed
+	}
 	if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 		BusinessEventKey: original.RecoveryEventID + "/reversed/" + reversalSourceID,
 		EventType:        ledger.EventRecoveryReversed,
@@ -848,19 +863,24 @@ func (s *Service) quarantine(ctx context.Context, tx pgx.Tx, out *IngestResult, 
 
 // allocate splits the applied amount across waterfall components using
 // recovered-so-far state (fee first by seeded default).
-func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEvent, adv entity.Advance, applied entity.Money) error {
+func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEvent, adv entity.Advance, applied entity.Money) (entity.Money, error) {
+	// feeTake is the fee-portion THIS event allocates — returned so deferred
+	// recognition (DR UNEARNED_FEE / CR FEE_INCOME) posts exactly the waterfall-
+	// allocated fee, allocation-driven and never time-driven. Zero for a
+	// principal-only event (the fee iteration is skipped or already exhausted).
+	feeTake, _ := entity.ZeroMoney(adv.Outstanding.Currency())
 	cfgV, err := s.Config.ActiveAt(ctx, "recovery.allocation", "programme:"+adv.ProgrammeID, time.Now().UTC())
 	if err != nil {
-		return fmt.Errorf("recovery.allocation config: %w", err)
+		return feeTake, fmt.Errorf("recovery.allocation config: %w", err)
 	}
 	var ac allocationCfg
 	if err := json.Unmarshal(cfgV.Content, &ac); err != nil {
-		return err
+		return feeTake, err
 	}
 
 	recovered, err := s.allocations.SumByComponent(ctx, tx, adv.AdvanceID)
 	if err != nil {
-		return err
+		return feeTake, err
 	}
 	// recoveredOf: Money accessor with an explicit zero for absent components.
 	cur := adv.Outstanding.Currency()
@@ -876,19 +896,19 @@ func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEv
 	// FEE total = adv.Fee; PRINCIPAL total = gross repayment - fee.
 	feeRec, err := recoveredOf(entity.ComponentFee)
 	if err != nil {
-		return err
+		return feeTake, err
 	}
 	prinRec, err := recoveredOf(entity.ComponentPrincipal)
 	if err != nil {
-		return err
+		return feeTake, err
 	}
 	totalRecovered, err := feeRec.Add(prinRec)
 	if err != nil {
-		return err
+		return feeTake, err
 	}
 	grossRepayment, err := adv.Outstanding.Add(totalRecovered)
 	if err != nil {
-		return err
+		return feeTake, err
 	}
 
 	remaining := applied
@@ -902,25 +922,25 @@ func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEv
 			compTotal = adv.Fee
 		case entity.ComponentPrincipal:
 			if compTotal, err = grossRepayment.Sub(adv.Fee); err != nil {
-				return err
+				return feeTake, err
 			}
 		default:
-			return fmt.Errorf("unknown waterfall component %q", comp)
+			return feeTake, fmt.Errorf("unknown waterfall component %q", comp)
 		}
 		compRecovered, err := recoveredOf(entity.AllocationComponent(comp))
 		if err != nil {
-			return err
+			return feeTake, err
 		}
 		compRemaining, err := compTotal.Sub(compRecovered)
 		if err != nil {
-			return err
+			return feeTake, err
 		}
 		if !compRemaining.IsPositive() {
 			continue
 		}
 		take := remaining
 		if c, err := take.Cmp(compRemaining); err != nil {
-			return err
+			return feeTake, err
 		} else if c > 0 {
 			take = compRemaining
 		}
@@ -931,14 +951,19 @@ func (s *Service) allocate(ctx context.Context, tx pgx.Tx, evt entity.RecoveryEv
 			Component:       entity.AllocationComponent(comp),
 			Amount:          take,
 		}); err != nil {
-			return err
+			return feeTake, err
+		}
+		// Capture the fee-portion for deferred recognition. validateAllocation
+		// requires FEE exactly once, so this is the single unambiguous fee take.
+		if entity.AllocationComponent(comp) == entity.ComponentFee {
+			feeTake = take
 		}
 		if remaining, err = remaining.Sub(take); err != nil {
-			return err
+			return feeTake, err
 		}
 	}
 	if remaining.IsPositive() {
-		return fmt.Errorf("allocation waterfall did not consume applied amount: %s left of %s", remaining, applied)
+		return feeTake, fmt.Errorf("allocation waterfall did not consume applied amount: %s left of %s", remaining, applied)
 	}
-	return nil
+	return feeTake, nil
 }
