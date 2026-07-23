@@ -180,10 +180,20 @@ func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, appr
 		// (template-rendered, CFG-012). Deferred fee recognition: FEE_UNEARNED_
 		// REVERSED reverses any remaining unearned fee (DR UNEARNED_FEE / CR
 		// WRITE_OFF_EXPENSE) — a deferred fee is NEVER recognised as income; only
-		// principal is the loss. Zero here so the legs omit and the loss is the
-		// full outstanding (unchanged); the write-off slice binds the fresh unearned
-		// remainder under DEFERRED. Always bound.
+		// principal is the loss. The reversal amount is recomputed FRESH here on the
+		// just-loaded advance (adv.Fee − net fee recovered), never the request-time
+		// value: a recovery landing across the maker-checker window may have already
+		// recognised part of the fee, so a stale value would over-reverse UNEARNED_FEE
+		// negative and understate the loss (INV-018 would then fire). Zero under
+		// UPFRONT/legacy so the legs omit. Always bound.
+		feeRem, _, err := s.outstandingSplit(ctx, tx, adv)
+		if err != nil {
+			return err
+		}
 		unearnedRev, _ := entity.ZeroMoney(adv.Outstanding.Currency())
+		if adv.FeeRecognition == entity.FeeRecognitionDeferred {
+			unearnedRev = feeRem
+		}
 		if _, _, err := s.Ledger.PostEvent(ctx, tx, ledger.Journal{
 			BusinessEventKey: wo.WriteOffID + "/posted",
 			EventType:        ledger.EventWriteOff,
