@@ -21,6 +21,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbroles"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/rechargewebhook"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
@@ -157,6 +158,17 @@ func main() {
 	portal.Mount(mux)
 	channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, TrustedProxyCount: trustedProxies, Log: log}
 	channel.Mount(mux, auth)
+
+	// Phase 1 S2: the inbound MNO recharge webhook (HMAC-authenticated, its own
+	// middleware chain, feeding the same recovery money core). DORMANT until a
+	// telco is armed (feed enabled at both scopes + its RECOVERY recon layer live).
+	rechargeHook := &handler.RechargeWebhook{
+		Recovery: rec, Config: appCfg,
+		Creds: &repo.WebhookCredentials{Pool: appPool}, Recon: &repo.ReconArming{Pool: appPool},
+		Pool: appPool, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
+		Limiter: limiter, TrustedProxyCount: trustedProxies, Log: log,
+	}
+	rechargeHook.Mount(mux)
 	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 		var out []entity.Programme
