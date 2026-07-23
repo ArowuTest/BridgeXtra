@@ -77,13 +77,9 @@ func (r *Admins) ListOperators(ctx context.Context, q Querier) ([]Operator, erro
 // header-authenticated parallel door to configsvc that bypassed portal RBAC
 // and the M4C-F1 scope model. All operator auth now goes through
 // ResolveCredentialWithRole (portalsessions.go), which carries role + scope.
-
-// Create provisions an admin credential (platform-admin bootstrap path; the
-// M4 portal will manage rotation over this same table).
-func (r *Admins) Create(ctx context.Context, adminID, actor, apiKey string) error {
-	h := sha256.Sum256([]byte(apiKey))
-	_, err := r.Pool.Exec(ctx,
-		`INSERT INTO admin_credentials (admin_id, actor, key_hash) VALUES ($1,$2,$3)`,
-		adminID, actor, h[:])
-	return err
-}
+//
+// The role-LESS Create was removed (pre-pen-test hardening): once migration 0047
+// granted tcp_app INSERT on admin_credentials, a role-omitting INSERT combined
+// with the column's DEFAULT 'ADMIN' was a dead path that could mint an ACTIVE
+// ADMIN with no four-eyes. Migration 0048 drops that DEFAULT, so every credential
+// INSERT must now name a role explicitly (CreateWithRoleTx does).

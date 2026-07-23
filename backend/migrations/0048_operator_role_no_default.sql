@@ -1,0 +1,11 @@
+-- 0048_operator_role_no_default.sql — pre-pen-test hardening for the operator
+-- provisioning surface. Migration 0047 granted tcp_app INSERT on
+-- admin_credentials (the governed create path). With admin_credentials.role
+-- carrying DEFAULT 'ADMIN' (from 0017), any INSERT that OMITTED role would
+-- silently mint an ACTIVE ADMIN — a privilege grant with no four-eyes. The
+-- role-less repo path (Admins.Create) is deleted in the same change; dropping
+-- the DEFAULT closes it at the database: role is now mandatory-explicit on every
+-- credential INSERT (still NOT NULL — a role-omitting INSERT fails, never
+-- defaults to ADMIN). CreateWithRoleTx always names the role, so no live path
+-- changes.
+ALTER TABLE admin_credentials ALTER COLUMN role DROP DEFAULT;

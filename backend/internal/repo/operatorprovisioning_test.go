@@ -53,6 +53,21 @@ func TestOperatorProvisioning_TcpAppCannotUpdateRoleScope(t *testing.T) {
 	}
 }
 
+// Pre-pen-test hardening (0048): with the role DEFAULT dropped, a credential
+// INSERT that OMITS role fails (NOT NULL, no default) — the dead role-less path
+// can no longer silently mint an ACTIVE ADMIN. Every INSERT must name a role.
+func TestOperatorProvisioning_RoleIsMandatoryNoDefault(t *testing.T) {
+	db := testutil.MustSetup(t, "opprov_norole")
+	ctx := context.Background()
+	_, err := db.App.Exec(ctx,
+		`INSERT INTO admin_credentials (admin_id, actor, key_hash, scope) VALUES ($1,$2,$3,$4)`,
+		"adm_nr", "op_norole", []byte{0x09, 0x08, 0x07}, "*")
+	var pg *pgconn.PgError
+	if !errors.As(err, &pg) || pg.Code != "23502" { // not_null_violation
+		t.Fatalf("role-omitting INSERT must fail NOT NULL (23502) with no ADMIN default, got %v", err)
+	}
+}
+
 // The two-actor create rule and one-open convergence are schema-enforced.
 func TestOperatorProvisioning_TwoActorAndConvergence(t *testing.T) {
 	db := testutil.MustSetup(t, "opprov_2actor")
