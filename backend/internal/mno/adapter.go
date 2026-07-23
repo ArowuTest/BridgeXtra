@@ -91,20 +91,29 @@ type HTTPAdapter struct {
 	// governed circuit_* config on first use.
 	mu       sync.Mutex
 	breakers map[string]*breaker
+
+	// Phase 1 S1: cached oauth2 client-credentials tokens, keyed by
+	// telco|token_url|client_id, reused until shortly before expiry.
+	tokMu  sync.Mutex
+	tokens map[string]cachedToken
 }
 
 func NewHTTPAdapter(cfg *configsvc.Service) *HTTPAdapter {
 	// SSRF egress guard (VR-32): 0 = no client timeout, the per-call context
 	// deadline governs.
-	return &HTTPAdapter{Config: cfg, HTTPClient: egress.SafeClient(0), breakers: map[string]*breaker{}}
+	return &HTTPAdapter{
+		Config: cfg, HTTPClient: egress.SafeClient(0),
+		breakers: map[string]*breaker{}, tokens: map[string]cachedToken{},
+	}
 }
 
 type adapterCfg struct {
-	FulfilmentURL          string `json:"fulfilment_url"`
-	RequestTimeoutMs       int    `json:"request_timeout_ms"`
-	CircuitErrThreshPct    int    `json:"circuit_error_threshold_pct"`
-	CircuitMinRequests     int    `json:"circuit_min_requests"`
-	CircuitCooldownSeconds int    `json:"circuit_cooldown_seconds"`
+	FulfilmentURL          string   `json:"fulfilment_url"`
+	RequestTimeoutMs       int      `json:"request_timeout_ms"`
+	CircuitErrThreshPct    int      `json:"circuit_error_threshold_pct"`
+	CircuitMinRequests     int      `json:"circuit_min_requests"`
+	CircuitCooldownSeconds int      `json:"circuit_cooldown_seconds"`
+	Auth                   *authCfg `json:"auth"` // Phase 1 S1: optional outbound partner auth
 }
 
 // breakerFor returns the telco's circuit breaker, creating it from config on
@@ -196,6 +205,12 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Idempotency-Key", telcoIdempotencyKey)
+	// Phase 1 S1: apply partner auth (fail-closed) BEFORE sending — never dial the
+	// telco unauthenticated. Nothing has been sent yet, so an auth failure is a
+	// clean non-send: return an error, the saga releases the reservation.
+	if err := a.applyAuth(callCtx, telcoID, cfg, httpReq); err != nil {
+		return Result{}, err
+	}
 	resp, err := a.HTTPClient.Do(httpReq)
 	if err != nil {
 		// Conservative classification (INV-009): once Do begins, the request
@@ -267,6 +282,10 @@ func (a *HTTPAdapter) EnquireStatus(ctx context.Context, telcoID, platformReques
 		return Result{}, err
 	}
 	res := Result{}
+	// Phase 1 S1: apply partner auth (fail-closed) before the enquiry too.
+	if err := a.applyAuth(callCtx, telcoID, cfg, httpReq); err != nil {
+		return Result{}, err
+	}
 	resp, err := a.HTTPClient.Do(httpReq)
 	if err != nil {
 		// Enquiry itself failed: still Unknown; the resolver retries enquiry

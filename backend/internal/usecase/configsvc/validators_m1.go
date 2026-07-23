@@ -215,6 +215,22 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 		CircuitMinRequests     *int    `json:"circuit_min_requests"`
 		CircuitCooldownSeconds *int    `json:"circuit_cooldown_seconds"`
 		MaxWeeklyRechargeMinor *int64  `json:"max_weekly_recharge_minor"`
+		// Phase 1 S1: optional outbound partner auth. Secrets are NEVER stored in
+		// config — only the names of the env vars that hold them.
+		Auth *struct {
+			Scheme          *string `json:"scheme"`
+			Header          *string `json:"header"`
+			SecretEnv       *string `json:"secret_env"`
+			TokenURL        *string `json:"token_url"`
+			ClientID        *string `json:"client_id"`
+			ClientSecretEnv *string `json:"client_secret_env"`
+			Scope           *string `json:"scope"`
+			Audience        *string `json:"audience"`
+			// Forbidden raw-secret fields, parsed only to reject them with a clear
+			// message (strictUnmarshal would otherwise reject them generically).
+			Secret       *string `json:"secret"`
+			ClientSecret *string `json:"client_secret"`
+		} `json:"auth"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -256,6 +272,50 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 	if v.MaxWeeklyRechargeMinor == nil || *v.MaxWeeklyRechargeMinor <= 0 ||
 		*v.MaxWeeklyRechargeMinor > 922_000_000_000_000 {
 		return fmt.Errorf("max_weekly_recharge_minor is required and must be in (0, 922e12] — the feature-feed plausibility ceiling (G2-F3)")
+	}
+
+	// Phase 1 S1: the optional outbound partner-auth block. Fail-closed and
+	// secret-safe: raw secrets are forbidden (env-var names only); only
+	// none|apikey|oauth2 are honoured by the adapter, so nothing else may arm.
+	if a := v.Auth; a != nil {
+		if a.Secret != nil || a.ClientSecret != nil {
+			return fmt.Errorf("auth: raw secrets are forbidden in config — use secret_env / client_secret_env (env var names, resolved at call time)")
+		}
+		scheme := ""
+		if a.Scheme != nil {
+			scheme = *a.Scheme
+		}
+		switch scheme {
+		case "none":
+			// explicit no-auth (the default when the block is absent)
+		case "apikey":
+			if a.Header == nil || *a.Header == "" {
+				return fmt.Errorf("auth apikey: header is required (the header name to carry the key)")
+			}
+			if a.SecretEnv == nil || *a.SecretEnv == "" {
+				return fmt.Errorf("auth apikey: secret_env is required (env var holding the key)")
+			}
+		case "oauth2":
+			if a.TokenURL == nil {
+				return fmt.Errorf("auth oauth2: token_url is required")
+			}
+			tu, err := url.Parse(*a.TokenURL)
+			if err != nil || (tu.Scheme != "http" && tu.Scheme != "https") || tu.Host == "" {
+				return fmt.Errorf("auth oauth2: token_url must be an absolute http(s) URL")
+			}
+			if a.ClientID == nil || *a.ClientID == "" {
+				return fmt.Errorf("auth oauth2: client_id is required")
+			}
+			if a.ClientSecretEnv == nil || *a.ClientSecretEnv == "" {
+				return fmt.Errorf("auth oauth2: client_secret_env is required (env var name)")
+			}
+		case "mtls":
+			return fmt.Errorf("auth mtls: not yet supported (Phase 1 S1b) — configure none|apikey|oauth2")
+		case "":
+			return fmt.Errorf("auth: scheme is required (none|apikey|oauth2)")
+		default:
+			return fmt.Errorf("auth: unknown scheme %q (allowed: none|apikey|oauth2)", scheme)
+		}
 	}
 	return nil
 }
