@@ -43,6 +43,17 @@ handler for the full middleware chain.
 - Blast-radius clamps: per-event amount + per-telco daily ceiling → over-limit **HELD** (not ingested) + audit + alert.
 - Secrets are **env-var names only** (`telco_webhook_credentials.secret_env`, unique per credential); the secret never enters config, DB, or logs.
 
+## EOD recovery-attributed-deduction feed (S3 — added to the MTN ask)
+
+**New go-live dependency surfaced by the S3 adversarial pass.** Reconciling the
+recharge stream needs a telco-authoritative, recovery-**attributed** figure — a
+raw balance cannot reconcile *recoveries* (it moves for usage/top-ups/recovery
+alike). **Ask MTN: per subscriber, per business day, the amount you deducted toward
+loan recovery** (integer minor units + currency), plus the closing balance for a
+cross-check only. *If MTN cannot supply the recovery-attributed figure, RECOVERY
+reconciliation is not possible — and without it the recharge feed cannot safely go
+live.* Full shape + reconciliation semantics: `PHASE1_S3_SEEDER_CONTRACT.md`.
+
 ## Provisioning (out-of-band, owner)
 
 1. Register a credential: `telco_webhook_credentials(key_id, telco_id, secret_env, label)`.
