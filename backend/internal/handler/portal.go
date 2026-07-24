@@ -22,6 +22,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/rechargehold"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
@@ -50,6 +51,7 @@ type Portal struct {
 	Demo              *ops.Demo             // M4e-3 fault demo (real origination path, sim-only allowlist)
 	Operator          repo.OperatorReader   // Gate B #1 Slice 2: DB-enforced operator reads (tcp_operator + scoped tx)
 	Operators         *operatormgmt.Service // governed operator provisioning (v1: four-eyes create + revoke)
+	Held              *rechargehold.Service // S2.3b HELD-recharge review queue (four-eyes release)
 	Limiter           *ratelimit.Limiter    // R-P0-8 inbound rate limit (login)
 	TrustedProxyCount int                   // R-P2-7 client-IP derivation
 	Log               *slog.Logger
@@ -91,6 +93,13 @@ var routeRoles = map[string][]string{
 	"GET /v1/portal/finance/settlements":              {roleAdmin, roleFinance},
 	"GET /v1/portal/finance/settlements/{id}":         {roleAdmin, roleFinance},
 	"POST /v1/portal/finance/settlements/{id}/verify": {roleAdmin, roleFinance},
+
+	// Phase 1 S2.3b: the HELD-recharge review queue (blast-radius-held webhook
+	// recharges). Release is four-eyes in the usecase; reject is single-actor.
+	"GET /v1/portal/finance/held-recharges":                       {roleAdmin, roleFinance},
+	"POST /v1/portal/finance/held-recharges/{id}/request-release": {roleAdmin, roleFinance},
+	"POST /v1/portal/finance/held-recharges/{id}/approve-release": {roleAdmin, roleFinance},
+	"POST /v1/portal/finance/held-recharges/{id}/reject":          {roleAdmin, roleFinance},
 
 	// M4e ops workspace (C7 — roles pinned deliberately): queue READS go to
 	// OPS plus FINANCE (both queues are money-adjacent: ambiguous fulfilments
@@ -181,6 +190,11 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/finance/settlements", http.HandlerFunc(p.financeSettlements))
 	p.mountRBAC(mux, "GET /v1/portal/finance/settlements/{id}", http.HandlerFunc(p.financeSettlement))
 	p.mountRBAC(mux, "POST /v1/portal/finance/settlements/{id}/verify", http.HandlerFunc(p.financeSettlementVerify))
+
+	p.mountRBAC(mux, "GET /v1/portal/finance/held-recharges", http.HandlerFunc(p.heldRechargesList))
+	p.mountRBAC(mux, "POST /v1/portal/finance/held-recharges/{id}/request-release", http.HandlerFunc(p.heldRechargeRequestRelease))
+	p.mountRBAC(mux, "POST /v1/portal/finance/held-recharges/{id}/approve-release", http.HandlerFunc(p.heldRechargeApproveRelease))
+	p.mountRBAC(mux, "POST /v1/portal/finance/held-recharges/{id}/reject", http.HandlerFunc(p.heldRechargeReject))
 
 	p.mountRBAC(mux, "GET /v1/portal/ops/fulfilments", http.HandlerFunc(p.opsFulfilments))
 	p.mountRBAC(mux, "POST /v1/portal/ops/fulfilments/{id}/enquire-now", http.HandlerFunc(p.opsEnquireNow))

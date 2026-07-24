@@ -27,6 +27,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/rechargehold"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
@@ -77,6 +78,7 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Demo:       ops.NewDemo(db.App, appCfg, orig, slog.Default()),
 		Operator:   repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker},
 		Operators:  operatormgmt.New(db.App, slog.Default()),
+		Held:       rechargehold.New(db.App, recovery.New(db.App, appCfg, led, slog.Default()), slog.Default()),
 		Limiter:    testLimiter(),
 		Log:        slog.Default(),
 	}

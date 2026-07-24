@@ -27,6 +27,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/rechargehold"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/settlement"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
@@ -151,6 +152,7 @@ func main() {
 		// grants it exactly INSERT + UPDATE(status) on admin_credentials (create
 		// + revoke), and nothing on role/scope — write-once is DB-enforced.
 		Operators:         operatormgmt.New(appPool, log),
+		Held:              rechargehold.New(appPool, rec, log),
 		Limiter:           limiter,
 		TrustedProxyCount: trustedProxies,
 		Log:               log,

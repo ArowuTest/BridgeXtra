@@ -333,6 +333,44 @@ func main() {
 		}
 	}()
 
+	// S2.3b: recharge-webhook nonce prune. The nonce is defence-in-depth for the
+	// freshness window, so anything past the horizon is unreachable anyway; the
+	// horizon derives from the GLOBAL telco.recharge_feed config (2x window+skew
+	// — config-driven, no hardcoded threshold). Config-read failure skips the
+	// sweep (rows persisting is the safe direction).
+	pruneEvery := envDur("TCP_NONCE_PRUNE_INTERVAL", time.Hour)
+	go func() {
+		t := time.NewTicker(pruneEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				cv, err := appCfg.ActiveAt(ctx, "telco.recharge_feed", "global", time.Now().UTC())
+				if err != nil {
+					log.Error("nonce prune: feed config unavailable — skipping sweep", "err", err)
+					continue
+				}
+				var fc struct {
+					ReplayWindowSeconds int `json:"replay_window_seconds"`
+					FutureSkewSeconds   int `json:"future_skew_seconds"`
+				}
+				if err := json.Unmarshal(cv.Content, &fc); err != nil || fc.ReplayWindowSeconds <= 0 {
+					log.Error("nonce prune: feed config unreadable — skipping sweep", "err", err)
+					continue
+				}
+				horizon := 2 * time.Duration(fc.ReplayWindowSeconds+fc.FutureSkewSeconds) * time.Second
+				n, err := repo.PruneWebhookNonces(ctx, workerPool, horizon)
+				if err != nil {
+					log.Error("nonce prune failed", "err", err)
+				} else if n > 0 {
+					log.Info("nonce prune", "deleted", n, "horizon", horizon.String())
+				}
+			}
+		}
+	}()
+
 	// Scoring scheduler loop: on each tick, run the due cycle for every active
 	// telco/programme. Most ticks are cheap no-ops (the cycle is already claimed
 	// for this cadence window); a due cycle ingests fresh features and re-scores

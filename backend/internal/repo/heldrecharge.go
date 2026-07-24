@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 )
@@ -48,6 +49,23 @@ func (HeldRecharge) Hold(ctx context.Context, tx pgx.Tx, e HeldEvent) (created b
 		return false, err
 	}
 	return ct.RowsAffected() == 1, nil
+}
+
+// PruneWebhookNonces deletes recharge-webhook nonce rows older than the horizon
+// (S2.3b maintenance). The nonce is pure defence-in-depth for the freshness
+// window — anything older than the window is STALE-rejected before the nonce is
+// consulted, so pruning past the horizon loses nothing; recovery idempotency by
+// source_event_id remains the durable backstop. Runs on the worker (cross-tenant
+// maintenance, like the dispatcher).
+func PruneWebhookNonces(ctx context.Context, pool *pgxpool.Pool, olderThan time.Duration) (int64, error) {
+	ct, err := pool.Exec(ctx, `
+		DELETE FROM idempotency_records
+		WHERE operation = 'recharge.webhook' AND created_at < now() - $1::interval`,
+		olderThan.String())
+	if err != nil {
+		return 0, err
+	}
+	return ct.RowsAffected(), nil
 }
 
 // HeldRow is a held recharge as read back for the review queue.
