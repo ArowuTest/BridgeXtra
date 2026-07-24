@@ -22,10 +22,10 @@ type RecoveryEvents struct{}
 func (RecoveryEvents) Insert(ctx context.Context, tx pgx.Tx, e entity.RecoveryEvent) (created bool, err error) {
 	ct, err := tx.Exec(ctx, `
 		INSERT INTO recovery_events (recovery_event_id, telco_id, source_event_id,
-		  subscriber_account_id, amount_minor, currency, state, occurred_at)
-		VALUES ($1,$2,$3,NULLIF($4,''),$5,$6,$7,$8)
+		  subscriber_account_id, msisdn_token, amount_minor, currency, state, occurred_at)
+		VALUES ($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9)
 		ON CONFLICT (telco_id, source_event_id) DO NOTHING`,
-		e.RecoveryEventID, e.TelcoID, e.SourceEventID, e.SubscriberAccountID,
+		e.RecoveryEventID, e.TelcoID, e.SourceEventID, e.SubscriberAccountID, e.MSISDNToken,
 		e.Amount.Amount(), string(e.Amount.Currency()), e.State, e.OccurredAt)
 	if err != nil {
 		return false, err

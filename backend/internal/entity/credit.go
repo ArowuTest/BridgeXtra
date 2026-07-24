@@ -287,6 +287,7 @@ type RecoveryEvent struct {
 	TelcoID             string
 	SourceEventID       string
 	SubscriberAccountID string
+	MSISDNToken         string // S3-A: the raw token, stored so recon re-resolves identity at recon time
 	Amount              Money
 	State               RecoveryEventState
 	OccurredAt          time.Time

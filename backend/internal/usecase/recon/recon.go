@@ -216,6 +216,13 @@ type Summary struct {
 	SourceHash                string
 	SourceControlTotalMinor   int64
 	PlatformControlTotalMinor int64
+	// S3-B positive-confirmation telemetry (additive; unused by FULFILMENT):
+	// SourceRecordCount is the windowed source count (also on the header);
+	// MatchedControlTotalMinor is the platform money that MATCHED the source —
+	// the RECOVERY freshness gate advances "live" only when this covers
+	// min_confirmation_ratio of the platform control total.
+	SourceRecordCount        int64
+	MatchedControlTotalMinor int64
 	// Rejected is true when the run failed the completeness floor and was
 	// recorded as REJECTED without superseding the prior ACTIVE run.
 	Rejected bool
@@ -548,6 +555,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 			return mErr
 		}
 		sum.SourceControlTotalMinor, sum.SourceHash = srcTotal, srcHash
+		sum.SourceRecordCount = srcCount
 
 		// Platform side (layer-supplied), bounded to the window.
 		plat, err := spec.fetchPlatform(ctx, tx, programmeID, periodStart, periodEnd)
@@ -563,6 +571,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 		// Classification is buffered (pure) so the immutable run header can be
 		// inserted with final control totals + outcome counts BEFORE its items.
 		var items []reconItem
+		var matchedTotal int64 // S3-B: platform money that MATCHED the source (confirmation gate)
 		writeItem := func(matchKey, itemType, platformRef, telcoRef, status string, detail map[string]any) error {
 			items = append(items, reconItem{matchKey, itemType, platformRef, telcoRef, status, detail})
 			return nil
@@ -591,7 +600,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 			key := tr.PlatformRequestID
 			if seen[key] {
 				sum.DuplicateTelco++
-				if err := writeItem(key, "FULFILMENT", key, tr.TelcoReference,
+				if err := writeItem(key, spec.name, key, tr.TelcoReference,
 					"BREAK_DUPLICATE_TELCO_RECORD", map[string]any{
 						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
 					}); err != nil {
@@ -608,7 +617,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 				if p, ok := plat[key]; ok {
 					platformRef = p.AdvanceID
 				}
-				if err := writeItem(key, "FULFILMENT", platformRef, tr.TelcoReference,
+				if err := writeItem(key, spec.name, platformRef, tr.TelcoReference,
 					"BREAK_CONTRADICTORY_TELCO_STATUS", map[string]any{
 						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
 						"note": "same key reported both FAILED and SUCCESS in this window",
@@ -623,7 +632,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 				// EDG-027 class: telco says credited, platform has no
 				// money-bearing advance. NEVER force-matched.
 				sum.MissingPlatform++
-				if err := writeItem(key, "FULFILMENT", key, tr.TelcoReference,
+				if err := writeItem(key, spec.name, key, tr.TelcoReference,
 					"BREAK_MISSING_PLATFORM", map[string]any{
 						"telco_amount_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
 					}); err != nil {
@@ -634,7 +643,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 				// NEVER fed to the numeric compare (overflow-safe) — it is a
 				// data-integrity break for ops, both values recorded.
 				sum.Malformed++
-				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, spec.name, p.AdvanceID, tr.TelcoReference,
 					"BREAK_MALFORMED_TELCO_RECORD", map[string]any{
 						"platform_minor": p.FaceValueMinor, "platform_currency": p.Currency,
 						"telco_minor": tr.FaceValueMinor, "telco_currency": tr.Currency,
@@ -646,7 +655,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 				// not a match. Compared as raw strings; no cross-rate is ever
 				// applied in reconciliation.
 				sum.CurrencyMismatch++
-				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, spec.name, p.AdvanceID, tr.TelcoReference,
 					"BREAK_CURRENCY_MISMATCH", map[string]any{
 						"platform_currency": p.Currency, "telco_currency": tr.Currency,
 						"platform_minor": p.FaceValueMinor, "telco_minor": tr.FaceValueMinor,
@@ -657,7 +666,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 				// Both amounts are now range-validated and same-currency, so
 				// the subtraction cannot overflow.
 				sum.AmountMismatch++
-				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				if err := writeItem(key, spec.name, p.AdvanceID, tr.TelcoReference,
 					"BREAK_AMOUNT_MISMATCH", map[string]any{
 						"platform_minor": p.FaceValueMinor, "telco_minor": tr.FaceValueMinor,
 						"currency": p.Currency,
@@ -666,7 +675,8 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 				}
 			default:
 				sum.Matched++
-				if err := writeItem(key, "FULFILMENT", p.AdvanceID, tr.TelcoReference,
+				matchedTotal += p.FaceValueMinor
+				if err := writeItem(key, spec.name, p.AdvanceID, tr.TelcoReference,
 					"MATCHED", map[string]any{"amount_minor": p.FaceValueMinor, "currency": p.Currency}); err != nil {
 					return err
 				}
@@ -676,13 +686,14 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 		for id, p := range plat {
 			if !seen[id] {
 				sum.MissingTelco++
-				if err := writeItem(id, "FULFILMENT", p.AdvanceID, p.TelcoReference,
+				if err := writeItem(id, spec.name, p.AdvanceID, p.TelcoReference,
 					"BREAK_MISSING_TELCO", map[string]any{"platform_minor": p.FaceValueMinor}); err != nil {
 					return err
 				}
 			}
 		}
 		sum.PlatformControlTotalMinor = platTotal
+		sum.MatchedControlTotalMinor = matchedTotal
 		breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco + sum.Contradictory
 
 		// Completeness gate (R-P0-6): a rerun must carry at least

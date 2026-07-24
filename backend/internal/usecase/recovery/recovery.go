@@ -249,6 +249,7 @@ func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID strin
 			TelcoID:             telcoID,
 			SourceEventID:       cmd.SourceEventID,
 			SubscriberAccountID: subscriberID,
+			MSISDNToken:         cmd.MSISDNToken, // S3-A: stored so recon re-resolves identity at recon time
 			Amount:              cmd.Amount,
 			State:               entity.RecoveryPending,
 			OccurredAt:          cmd.OccurredAt,
