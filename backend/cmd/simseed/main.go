@@ -21,10 +21,16 @@ import (
 	"flag"
 	"log"
 	"os"
+	"regexp"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/simseed"
 )
+
+// seedRe constrains the -seed flag to a simple identifier. This is a real input
+// guard (a seed is a stable label, not free text) and it makes the value safe to
+// echo to the log (no control characters → no CWE-117 log injection).
+var seedRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func main() {
 	if os.Getenv("TCP_SEED_ALLOW") != "1" {
@@ -41,6 +47,10 @@ func main() {
 	subscribers := flag.Int("subscribers", 50, "number of synthetic subscribers to seed")
 	flag.Parse()
 
+	if !seedRe.MatchString(*seed) {
+		log.Fatalf("simseed: -seed must match %s (a simple stable identifier)", seedRe.String())
+	}
+
 	ctx := context.Background()
 	pool, err := platform.NewPool(ctx, dsn)
 	if err != nil {
@@ -56,5 +66,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("simseed: cohort: %v", err)
 	}
+	// #nosec G706 -- *seed is validated against seedRe (^[A-Za-z0-9._-]+$) above,
+	// so it carries no control characters and cannot forge log lines (CWE-117).
 	log.Printf("simseed: cohort done — %d subscriber(s) created, %d requested, seed=%q (re-run is a no-op)", created, *subscribers, *seed)
 }
