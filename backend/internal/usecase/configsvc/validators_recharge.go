@@ -22,18 +22,20 @@ func init() {
 
 func validateRechargeFeed(_ context.Context, _ pgx.Tx, content json.RawMessage) error {
 	var v struct {
-		Enabled                   *bool   `json:"enabled"`
-		Transport                 *string `json:"transport"`
-		Auth                      *string `json:"auth"`
-		KeyIDHeader               *string `json:"key_id_header"`
-		SignatureHeader           *string `json:"signature_header"`
-		TimestampHeader           *string `json:"timestamp_header"`
-		ReplayWindowSeconds       *int    `json:"replay_window_seconds"`
-		FutureSkewSeconds         *int    `json:"future_skew_seconds"`
-		MaxBodyBytes              *int    `json:"max_body_bytes"`
-		ExpectedCurrency          *string `json:"expected_currency"`
-		PerEventAmountMaxMinor    *int64  `json:"per_event_amount_max_minor"`
-		PerTelcoDailyCeilingMinor *int64  `json:"per_telco_daily_ceiling_minor"`
+		Enabled                      *bool   `json:"enabled"`
+		Transport                    *string `json:"transport"`
+		Auth                         *string `json:"auth"`
+		KeyIDHeader                  *string `json:"key_id_header"`
+		SignatureHeader              *string `json:"signature_header"`
+		TimestampHeader              *string `json:"timestamp_header"`
+		ReplayWindowSeconds          *int    `json:"replay_window_seconds"`
+		FutureSkewSeconds            *int    `json:"future_skew_seconds"`
+		MaxBodyBytes                 *int    `json:"max_body_bytes"`
+		ExpectedCurrency             *string `json:"expected_currency"`
+		PerEventAmountMaxMinor       *int64  `json:"per_event_amount_max_minor"`
+		PerTelcoDailyCeilingMinor    *int64  `json:"per_telco_daily_ceiling_minor"`
+		RecoveryMaxBackdateSeconds   *int    `json:"recovery_max_backdate_seconds"`
+		RecoveryMaxFutureSkewSeconds *int    `json:"recovery_max_future_skew_seconds"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -78,6 +80,17 @@ func validateRechargeFeed(_ context.Context, _ pgx.Tx, content json.RawMessage) 
 	}
 	if *v.PerTelcoDailyCeilingMinor < *v.PerEventAmountMaxMinor {
 		return fmt.Errorf("telco.recharge_feed: per_telco_daily_ceiling_minor must be >= per_event_amount_max_minor")
+	}
+	// S3-C occurred_at clamp. Backdate is bounded to <= the 90-day rereconcile
+	// ceiling so a booked recovery always lands in a window the RECOVERY re-sweep
+	// can still reach (operationally set <= the telco's rereconcile_lookback_seconds);
+	// future skew is tight. Required so a typo can neither open an unbounded backdate
+	// nor collapse the accepted window.
+	if v.RecoveryMaxBackdateSeconds == nil || *v.RecoveryMaxBackdateSeconds < 0 || *v.RecoveryMaxBackdateSeconds > 7_776_000 {
+		return fmt.Errorf("telco.recharge_feed: recovery_max_backdate_seconds must be 0..7776000 (<= the 90d rereconcile ceiling)")
+	}
+	if v.RecoveryMaxFutureSkewSeconds == nil || *v.RecoveryMaxFutureSkewSeconds < 0 || *v.RecoveryMaxFutureSkewSeconds > 300 {
+		return fmt.Errorf("telco.recharge_feed: recovery_max_future_skew_seconds must be 0..300")
 	}
 	return nil
 }

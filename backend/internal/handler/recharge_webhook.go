@@ -77,6 +77,11 @@ type feedCfg struct {
 	ExpectedCurrency          string `json:"expected_currency"`
 	PerEventAmountMaxMinor    int64  `json:"per_event_amount_max_minor"`
 	PerTelcoDailyCeilingMinor int64  `json:"per_telco_daily_ceiling_minor"`
+	// S3-C occurred_at clamp: bound how far a webhook event's business time may be
+	// back-dated (so every booked recovery lands in a window the RECOVERY re-sweep
+	// still covers) or future-dated.
+	RecoveryMaxBackdateSeconds   int `json:"recovery_max_backdate_seconds"`
+	RecoveryMaxFutureSkewSeconds int `json:"recovery_max_future_skew_seconds"`
 }
 
 // Mount wires the webhook route through the standard onion.
@@ -244,6 +249,18 @@ func (h *RechargeWebhook) ingest(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.Currency != v.cfg.ExpectedCurrency {
 		writeErr(w, http.StatusUnprocessableEntity, "RECHARGE_INVALID_EVENT", "unexpected currency")
+		return
+	}
+	// S3-C occurred_at clamp: cap displacement so every booked recovery lands in a
+	// window the RECOVERY re-sweep still covers, and reject an implausibly future-
+	// dated event. A wrongly-rejected legitimate event is NOT lost to assurance —
+	// it becomes a feed BREAK_MISSING_PLATFORM (safe, surfaced), never a silently
+	// mis-windowed booking.
+	age := time.Now().UTC().Sub(ev.OccurredAt)
+	if age > time.Duration(v.cfg.RecoveryMaxBackdateSeconds)*time.Second ||
+		age < -time.Duration(v.cfg.RecoveryMaxFutureSkewSeconds)*time.Second {
+		h.auditPlatform(ctx, auditRechargeDenied, "telco:"+telco, telco, "occurred_at outside clamp range", r)
+		writeErr(w, http.StatusUnprocessableEntity, "RECHARGE_OCCURRED_AT_OUT_OF_RANGE", "recharge occurred_at is outside the accepted range")
 		return
 	}
 	amount, err := entity.NewMoney(ev.AmountMinor, entity.Currency(ev.Currency))

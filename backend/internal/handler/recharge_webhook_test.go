@@ -86,7 +86,7 @@ func newWebhookFixture(t *testing.T, suffix string, telcoEnabled bool, perEventM
 func activateRechargeFeed(t *testing.T, cfgW *configsvc.Service, scope string, enabled bool, perEventMax int64) {
 	t.Helper()
 	ctx := context.Background()
-	content := fmt.Sprintf(`{"enabled":%v,"transport":"webhook_push","auth":"hmac_sha256","key_id_header":"X-Bx-Key-Id","signature_header":"X-Bx-Signature","timestamp_header":"X-Bx-Timestamp","replay_window_seconds":120,"future_skew_seconds":60,"max_body_bytes":65536,"expected_currency":"NGN","per_event_amount_max_minor":%d,"per_telco_daily_ceiling_minor":50000000000}`, enabled, perEventMax)
+	content := fmt.Sprintf(`{"enabled":%v,"transport":"webhook_push","auth":"hmac_sha256","key_id_header":"X-Bx-Key-Id","signature_header":"X-Bx-Signature","timestamp_header":"X-Bx-Timestamp","replay_window_seconds":120,"future_skew_seconds":60,"max_body_bytes":65536,"expected_currency":"NGN","per_event_amount_max_minor":%d,"per_telco_daily_ceiling_minor":50000000000,"recovery_max_backdate_seconds":1209600,"recovery_max_future_skew_seconds":60}`, enabled, perEventMax)
 	c, err := cfgW.CreateDraft(ctx, "telco.recharge_feed", scope, "alice", "arm", []byte(content))
 	if err != nil {
 		t.Fatalf("draft %s: %v", scope, err)
@@ -125,6 +125,33 @@ func nowTS() string { return fmt.Sprintf("%d", time.Now().UTC().Unix()) }
 func rechargeBody(eventID string, amountMinor int64) string {
 	return fmt.Sprintf(`{"event_id":%q,"msisdn_token":"tok_sim_0001","amount_minor":%d,"currency":"NGN","occurred_at":%q}`,
 		eventID, amountMinor, time.Now().UTC().Format(time.RFC3339))
+}
+
+func rechargeBodyAt(eventID string, amountMinor int64, occurredAt time.Time) string {
+	return fmt.Sprintf(`{"event_id":%q,"msisdn_token":"tok_sim_0001","amount_minor":%d,"currency":"NGN","occurred_at":%q}`,
+		eventID, amountMinor, occurredAt.UTC().Format(time.RFC3339))
+}
+
+// I8 (S3-C): occurred_at is clamped so a booked recovery always lands in a window
+// the RECOVERY re-sweep still covers. The signing timestamp stays fresh (isolating
+// the BODY occurred_at check from the request-freshness check).
+func TestS3C_OccurredAtClamp(t *testing.T) {
+	f := newWebhookFixture(t, "wh_clamp", true, 50_000_000, true)
+	// Backdated beyond the 14d window -> refused, never ingested.
+	if resp := f.post(t, "SIM_NG", whKeyID, whSecret, nowTS(), rechargeBodyAt("e_old", 5000, time.Now().UTC().AddDate(0, 0, -30))); resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("a 30-day-backdated occurred_at must be refused (422), got %d", resp.StatusCode)
+	}
+	if n := f.recoveryEventCount(t, "wh:e_old"); n != 0 {
+		t.Fatalf("a clamped event must NOT be ingested, got %d", n)
+	}
+	// Future-dated beyond skew -> refused.
+	if resp := f.post(t, "SIM_NG", whKeyID, whSecret, nowTS(), rechargeBodyAt("e_fut", 5000, time.Now().UTC().Add(10*time.Minute))); resp.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("a future-dated occurred_at must be refused (422), got %d", resp.StatusCode)
+	}
+	// In-range (now) still ingests.
+	if resp := f.post(t, "SIM_NG", whKeyID, whSecret, nowTS(), rechargeBody("e_ok", 5000)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("an in-range occurred_at must ingest, got %d", resp.StatusCode)
+	}
 }
 
 func (f *whFixture) recoveryEventCount(t *testing.T, src string) int {
