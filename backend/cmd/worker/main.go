@@ -458,11 +458,11 @@ func main() {
 // is read via the worker pool (cross-tenant); the override itself is created
 // tenant-scoped through the recon service.
 func runOverridePropose(ctx context.Context, log *slog.Logger, appPool, workerPool *pgxpool.Pool, appCfg *configsvc.Service, rejectedRunID, actor, reason string) {
-	var telco, programme, state string
+	var telco, programme, layer, state string
 	var periodStart time.Time
 	if err := workerPool.QueryRow(ctx, `
-		SELECT telco_id, programme_id, period_start, state FROM recon_runs WHERE run_id=$1`,
-		rejectedRunID).Scan(&telco, &programme, &periodStart, &state); err != nil {
+		SELECT telco_id, programme_id, layer, period_start, state FROM recon_runs WHERE run_id=$1`,
+		rejectedRunID).Scan(&telco, &programme, &layer, &periodStart, &state); err != nil {
 		log.Error("recon-override-propose: recon run not found", "run", rejectedRunID, "err", err)
 		os.Exit(1)
 	}
@@ -470,8 +470,10 @@ func runOverridePropose(ctx context.Context, log *slog.Logger, appPool, workerPo
 		log.Error("recon-override-propose: target run is not REJECTED", "run", rejectedRunID, "state", state)
 		os.Exit(1)
 	}
+	// I17: the override authorizes the SAME layer as the rejected run it targets
+	// (FULFILMENT or RECOVERY), read from the run itself so it can never mismatch.
 	svc := recon.New(appPool, appCfg, log)
-	id, err := svc.ProposeCompletenessOverride(ctx, telco, programme, periodStart, actor, reason)
+	id, err := svc.ProposeCompletenessOverride(ctx, telco, programme, layer, periodStart, actor, reason)
 	if err != nil {
 		log.Error("recon-override-propose failed", "err", err)
 		os.Exit(1)

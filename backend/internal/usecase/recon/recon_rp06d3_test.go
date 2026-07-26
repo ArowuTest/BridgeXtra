@@ -69,7 +69,7 @@ func TestRP06D3_TwoActorOverride_AcceptsRejectedLowVolume(t *testing.T) {
 	}
 
 	// Maker proposes.
-	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", winStart, "maker", "telco voided 3 records — legitimately quiet window")
+	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", layerFulfilment, winStart, "maker", "telco voided 3 records — legitimately quiet window")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestRP06D3_SelfApprove_Rejected(t *testing.T) {
 	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
-	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", winStart, "solo", "trying to self-approve")
+	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", layerFulfilment, winStart, "solo", "trying to self-approve")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestRP06D3_ConsumedOverride_NotReusable(t *testing.T) {
 	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
-	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", winStart, "maker", "legit")
+	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", layerFulfilment, winStart, "maker", "legit")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestRP06D3_Override_DoesNotAuthorizeWorseShrink(t *testing.T) {
 	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
-	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", winStart, "maker", "reviewed 1-record window")
+	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", layerFulfilment, winStart, "maker", "reviewed 1-record window")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestRP06D3_Override_StaleAfterInterveningReReconcile(t *testing.T) {
 	if _, err := f.svc.ReconcilePeriod(ctx, "SIM_NG", "prg_sim_airtime01", winStart, winEnd); err != nil {
 		t.Fatal(err)
 	}
-	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", winStart, "maker", "reviewed against the 4-record baseline")
+	overrideID, err := f.svc.ProposeCompletenessOverride(ctx, "SIM_NG", "prg_sim_airtime01", layerFulfilment, winStart, "maker", "reviewed against the 4-record baseline")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -421,9 +421,17 @@ func (s *Service) ReconcileRecentPeriods(ctx context.Context, telcoID, programme
 // a different transition. It refuses if no REJECTED run exists for the window
 // (nothing to override) or no ACTIVE run exists (nothing to supersede). Returns
 // the override id for the checker.
-func (s *Service) ProposeCompletenessOverride(ctx context.Context, telcoID, programmeID string, periodStart time.Time, proposedBy, reason string) (string, error) {
+func (s *Service) ProposeCompletenessOverride(ctx context.Context, telcoID, programmeID, layer string, periodStart time.Time, proposedBy, reason string) (string, error) {
 	if reason == "" {
 		return "", fmt.Errorf("completeness override requires a reason")
+	}
+	// I17: the override MUST name the layer it authorizes — the re-reconcile
+	// consumer matches on layer (spec.name), so a FULFILMENT-tagged override is
+	// invisible to a RECOVERY re-reconcile and vice versa. Fail closed on any layer
+	// the engine cannot reconcile, so an override can never be created that no run
+	// will ever consume (armed-but-dead).
+	if layer != layerFulfilment && layer != layerRecovery {
+		return "", fmt.Errorf("completeness override: unknown layer %q — refusing (must be a reconcilable layer)", layer)
 	}
 	overrideID := platform.NewID("rco")
 	tctx := platform.WithTenant(ctx, telcoID)
@@ -434,7 +442,7 @@ func (s *Service) ProposeCompletenessOverride(ctx context.Context, telcoID, prog
 		if err := tx.QueryRow(ctx, `
 			SELECT run_id, period_end FROM recon_runs
 			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE' AND period_start=$4`,
-			telcoID, programmeID, layerFulfilment, periodStart).Scan(&activeRunID, &periodEnd); err != nil {
+			telcoID, programmeID, layer, periodStart).Scan(&activeRunID, &periodEnd); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return fmt.Errorf("no ACTIVE run for this window — nothing to supersede")
 			}
@@ -448,7 +456,7 @@ func (s *Service) ProposeCompletenessOverride(ctx context.Context, telcoID, prog
 			SELECT run_id, source_record_count FROM recon_runs
 			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='REJECTED' AND period_start=$4
 			ORDER BY created_at DESC LIMIT 1`,
-			telcoID, programmeID, layerFulfilment, periodStart).Scan(&rejectedRunID, &authorizedCount); err != nil {
+			telcoID, programmeID, layer, periodStart).Scan(&rejectedRunID, &authorizedCount); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrNoRejectedRun
 			}
@@ -460,7 +468,7 @@ func (s *Service) ProposeCompletenessOverride(ctx context.Context, telcoID, prog
 			   rejected_run_id, baseline_active_run_id, authorized_source_count,
 			   proposed_by, reason)
 			VALUES ($1,$2,$3,$4,$5,$6, $7,$8,$9, $10,$11)`,
-			overrideID, telcoID, programmeID, layerFulfilment, periodStart, periodEnd,
+			overrideID, telcoID, programmeID, layer, periodStart, periodEnd,
 			rejectedRunID, activeRunID, authorizedCount, proposedBy, reason); err != nil {
 			return err
 		}
