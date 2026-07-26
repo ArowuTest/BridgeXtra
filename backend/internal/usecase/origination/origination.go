@@ -37,6 +37,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/economics"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/feepolicy"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/treasury"
 )
@@ -47,6 +48,10 @@ var (
 	ErrOfferExpired         = errors.New("origination: offer expired") // EDG-011
 	ErrOfferNotAcceptable   = errors.New("origination: offer no longer acceptable")
 	ErrSubscriberIneligible = errors.New("origination: subscriber not eligible") // barred/self-excluded/closed
+	// Build 1 — programme economic/legal go-live gate. A programme may be ACTIVE
+	// but cannot originate until its economics are configured (fail-closed).
+	ErrProgrammeEconomicsNotSet  = errors.New("origination: programme economics not configured — cannot originate")
+	ErrProgrammeEconomicsInvalid = errors.New("origination: programme economics config invalid — cannot originate")
 	// ErrRecoveryUnconfirmedHold (S3-C2): the subscriber has a debt CLOSED by a
 	// webhook recovery the EOD recon has not yet confirmed — re-origination is held
 	// so a phantom close cannot free the advance slot before recon catches it.
@@ -320,6 +325,30 @@ func requireValidDecision(dec entity.DecisionSnapshot, now time.Time) error {
 // GetOffers returns the subscriber's valid offers, generating the ladder from
 // the governed product config when none exist (V2-OFR-009 reuse). Every value
 // on an offer derives from config + the pinned decision — nothing hardcoded.
+// resolveEconomics reads the programme's economic/legal identity fail-closed
+// (Build 1). A programme with no programme.economics config — or a malformed one —
+// cannot originate. Mirrors feepolicy.Resolve's single-fail-closed-read discipline
+// but adds a scope-exactness guard: because configsvc.ActiveAt falls back
+// scope->global, a stray GLOBAL economics row would otherwise authorise EVERY
+// programme to lend. Economics are per-programme by definition, so only a
+// programme:<id>-scoped config counts; anything else is treated as "not set". The
+// content is re-validated here (floor lives in code too) so a raw-seeded config that
+// bypassed the maker-checker validator is still refused.
+func (s *Service) resolveEconomics(ctx context.Context, programmeID string) (economics.Terms, string, error) {
+	cv, err := s.Config.ActiveAt(ctx, "programme.economics", "programme:"+programmeID, time.Now().UTC())
+	if err != nil {
+		return economics.Terms{}, "", fmt.Errorf("%w (programme %s)", ErrProgrammeEconomicsNotSet, programmeID)
+	}
+	if cv.Scope != "programme:"+programmeID {
+		return economics.Terms{}, "", fmt.Errorf("%w (programme %s: only a programme-scoped economics config authorises lending, got scope %q)", ErrProgrammeEconomicsNotSet, programmeID, cv.Scope)
+	}
+	terms, err := economics.Parse(cv.Content)
+	if err != nil {
+		return economics.Terms{}, "", fmt.Errorf("%w (programme %s): %v", ErrProgrammeEconomicsInvalid, programmeID, err)
+	}
+	return terms, cv.ConfigVersionID, nil
+}
+
 func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string) ([]OfferView, error) {
 	now := time.Now().UTC()
 	cfgV, err := s.Config.ActiveAt(ctx, "product.airtime", "programme:"+programmeID, now)
@@ -346,6 +375,13 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 			return err
 		} else if status != entity.ProgrammeActive {
 			return fmt.Errorf("%w (programme %s)", treasury.ErrProgrammeSuspended, status)
+		}
+		// Build 1 go-live gate: an ACTIVE programme still cannot lend until its
+		// economic/legal identity is configured (fail-closed, mirrors the
+		// recharge-feed "row required -> deny"). Serving an offer commits us to a
+		// lend we could then complete, so the gate sits at GetOffers too.
+		if _, _, err := s.resolveEconomics(ctx, programmeID); err != nil {
+			return err
 		}
 		sub, err := s.subscribers.GetLiveByToken(ctx, tx, msisdnToken)
 		if err != nil {
@@ -580,6 +616,14 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		} else if status != entity.ProgrammeActive {
 			return fmt.Errorf("%w (programme %s)", treasury.ErrProgrammeSuspended, status)
 		}
+		// Build 1 go-live gate: refuse to book a loan on a programme whose economic/
+		// legal identity is not configured (fail-closed). Resolved here on the fresh
+		// path only (a replay returned above); the terms are recorded on the consent
+		// (origination audit trail) below.
+		econTerms, econVer, err := s.resolveEconomics(ctx, cmd.ProgrammeID)
+		if err != nil {
+			return err
+		}
 		sub, err := s.subscribers.GetLiveByToken(ctx, tx, cmd.MSISDNToken)
 		if err != nil {
 			return err
@@ -753,6 +797,17 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 			"currency":               string(snap.Currency),
 			"decision_snapshot_id":   offer.DecisionSnapshotID,
 			"product_config":         offer.ProductConfigVersionID,
+			// Build 1: the programme economic/legal identity applied to THIS loan,
+			// pinned on the origination record (who funds it, who is the lender of
+			// record, who bears losses, how it settles + is taxed).
+			"economics_config_version_id": econVer,
+			"economic_terms": map[string]any{
+				"funding_model":     econTerms.FundingModel,
+				"lender_of_record":  econTerms.LenderOfRecord,
+				"loss_bearer":       econTerms.LossBearer,
+				"settlement_method": econTerms.SettlementMethod,
+				"tax_treatment":     econTerms.TaxTreatment,
+			},
 		})
 		if err != nil {
 			return err

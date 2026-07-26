@@ -21,6 +21,9 @@ func TestConfigFence_CriticalDomainsValidated(t *testing.T) {
 		"scoring.policy", "scoring.schedule",
 		// Money core.
 		"product.airtime", "advance.reservation", "recovery.allocation",
+		// Build 1 — the programme economic/legal go-live gate (origination refuses
+		// to lend on a programme whose economics are unset/malformed).
+		"programme.economics",
 		"treasury.guardrails", "writeoff.policy", "settlement.terms",
 		"ledger.templates", "fee_recognition",
 		// Safety / compliance.

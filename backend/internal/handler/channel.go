@@ -354,6 +354,11 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 	case errors.Is(err, origination.ErrOverlayBlocked):
 		// V2-SCR-015: which flag fired is logged upstream, never disclosed.
 		writeErr(w, http.StatusForbidden, "SERVICE_RESTRICTED", "service not available for this subscriber right now")
+	case errors.Is(err, origination.ErrProgrammeEconomicsNotSet), errors.Is(err, origination.ErrProgrammeEconomicsInvalid):
+		// Build 1 fail-closed go-live gate: the programme cannot originate until its
+		// economic/legal identity is configured. Non-revealing to the customer; ops
+		// sees the specific error in logs.
+		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
 	case errors.Is(err, treasury.ErrProgrammeSuspended):
 		// M3d fail-closed: lending stopped (guardrail trip or operator).
 		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
