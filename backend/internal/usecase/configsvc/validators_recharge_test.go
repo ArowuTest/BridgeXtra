@@ -20,6 +20,7 @@ func rechargeCfg(overrides map[string]any) string {
 		"key_id_header": "X-Bx-Key-Id", "signature_header": "X-Bx-Signature", "timestamp_header": "X-Bx-Timestamp",
 		"replay_window_seconds": 120, "future_skew_seconds": 60, "max_body_bytes": 65536,
 		"expected_currency": "NGN", "per_event_amount_max_minor": 50000000, "per_telco_daily_ceiling_minor": 50000000000,
+		"recovery_max_backdate_seconds": 1209600, "recovery_max_future_skew_seconds": 60,
 	}
 	for k, v := range overrides {
 		if v == nil {
@@ -50,6 +51,10 @@ func TestS2_RechargeFeedValidator(t *testing.T) {
 		"bad currency":            {"expected_currency": "naira"},
 		"per-event non-positive":  {"per_event_amount_max_minor": 0},
 		"daily below per-event":   {"per_telco_daily_ceiling_minor": 1000, "per_event_amount_max_minor": 50_000_000},
+		"backdate absent":         {"recovery_max_backdate_seconds": nil},
+		"backdate over ceiling":   {"recovery_max_backdate_seconds": 8_000_000},
+		"future skew absent":      {"recovery_max_future_skew_seconds": nil},
+		"future skew too large":   {"recovery_max_future_skew_seconds": 400},
 		"unknown field":           {"foo": 1},
 	}
 	for label, ov := range reject {
