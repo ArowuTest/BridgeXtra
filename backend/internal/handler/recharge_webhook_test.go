@@ -53,7 +53,13 @@ func newWebhookFixture(t *testing.T, suffix string, telcoEnabled bool, perEventM
 		t.Fatal(err)
 	}
 	if reconLive {
-		if err := (&repo.ReconArming{Pool: db.Admin}).SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
+		arm := &repo.ReconArming{Pool: db.Admin}
+		if err := arm.SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
+			t.Fatal(err)
+		}
+		// S3-B: armed alone is no longer "live" — the webhook now requires a fresh
+		// confirmed recon. Advance freshness so this ingest test sees a live gate.
+		if _, err := arm.AdvanceFreshness(ctx, "SIM_NG", repo.ReconLayerRecovery, 172800); err != nil {
 			t.Fatal(err)
 		}
 	}

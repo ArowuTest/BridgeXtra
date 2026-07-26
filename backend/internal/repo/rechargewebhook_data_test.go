@@ -28,8 +28,19 @@ func TestS22_ReconArming_Gate(t *testing.T) {
 	if err := r.SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
 		t.Fatal(err)
 	}
+	// S3-B: armed alone is NOT live — a confirmed recon (freshness) is required.
+	if live, _ := r.IsLayerLive(ctx, "SIM_NG", repo.ReconLayerRecovery); live {
+		t.Fatal("armed but never-confirmed must NOT be live (freshness required)")
+	}
+	if armed, _ := r.IsLayerArmed(ctx, "SIM_NG", repo.ReconLayerRecovery); !armed {
+		t.Fatal("must be armed after SetLive")
+	}
+	// A confirmed recon advances freshness -> live.
+	if ok, err := r.AdvanceFreshness(ctx, "SIM_NG", repo.ReconLayerRecovery, 172800); err != nil || !ok {
+		t.Fatalf("AdvanceFreshness must update the armed row: ok=%v err=%v", ok, err)
+	}
 	if live, _ := r.IsLayerLive(ctx, "SIM_NG", repo.ReconLayerRecovery); !live {
-		t.Fatal("must be live after SetLive")
+		t.Fatal("must be live after a confirmed recon")
 	}
 	// Idempotent.
 	if err := r.SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {

@@ -21,13 +21,16 @@ package recon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/recoveryfeed"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
 const (
@@ -123,37 +126,218 @@ func businessDayWindow(loc *time.Location, businessDate string) (start, end time
 	return start, end, nil
 }
 
-// ReconcileRecoveryDay reconciles ONE Lagos business day: it authenticates the EOD
-// feed via the config-selected adapter, maps each per-token deduction into the
-// canonical telcoTransaction, and runs the shared engine. It does NOT advance
-// arming freshness — that is the positive-confirmation gate in S3-B.
+// ReconcileRecoveryDay reconciles ONE explicit Lagos business day (the single-day
+// entrypoint used by ops/tests). It does NOT advance arming freshness — that is the
+// positive-confirmation gate, applied by RunRecovery to the newest settled day.
 func (s *Service) ReconcileRecoveryDay(ctx context.Context, telcoID, businessDate string) (Summary, error) {
 	cfg, adapter, err := s.loadForRecovery(ctx, telcoID)
 	if err != nil {
 		return Summary{RunID: platform.NewID("run")}, err
 	}
+	return s.reconcileRecoveryDayWith(ctx, cfg, adapter, telcoID, businessDate)
+}
+
+// reconcileRecoveryDayWith is the core: authenticate the EOD feed via the adapter
+// (a bad envelope MAC / manifest mismatch fails the whole day), map each per-token
+// deduction into the canonical telcoTransaction, and run the shared engine.
+func (s *Service) reconcileRecoveryDayWith(ctx context.Context, cfg recoveryCfg, adapter recoveryfeed.Adapter, telcoID, businessDate string) (Summary, error) {
 	start, end, err := businessDayWindow(cfg.loc, businessDate)
 	if err != nil {
 		return Summary{}, err
 	}
-	// The feed is fetched + authenticated OUTSIDE the recon tx (like fulfilment's
-	// telco fetch); a bad envelope MAC / manifest mismatch fails the whole day.
 	env, err := adapter.FetchDay(ctx, telcoID, businessDate)
 	if err != nil {
 		return Summary{}, fmt.Errorf("recovery feed day %s: %w", businessDate, err)
 	}
-	telcoRecords := make([]telcoTransaction, 0, len(env.Rows))
+	return s.reconcileLayer(ctx, recoverySpec(), telcoID, recoveryProgrammeSentinel, start, end, mapFeedToTelco(env, businessDate, start), cfg.toleranceCfg)
+}
+
+// mapFeedToTelco maps each per-token EOD deduction into the canonical telco record.
+// CreditedAt = the Lagos-midnight day start, so every row windows into [start,end).
+func mapFeedToTelco(env recoveryfeed.DayEnvelope, businessDate string, start time.Time) []telcoTransaction {
+	out := make([]telcoTransaction, 0, len(env.Rows))
 	for _, r := range env.Rows {
-		telcoRecords = append(telcoRecords, telcoTransaction{
+		out = append(out, telcoTransaction{
 			PlatformRequestID: r.MSISDNToken, // match key = token (see file header)
-			TelcoReference:    businessDate,  //
+			TelcoReference:    businessDate,
 			FaceValueMinor:    r.RecoveryDeductedMinor,
 			Currency:          r.Currency,
 			Status:            "SUCCESS", // every feed row is a reported deduction
-			CreditedAt:        start,     // Lagos-midnight D -> windows into [start,end)
+			CreditedAt:        start,
 		})
 	}
-	return s.reconcileLayer(ctx, recoverySpec(), telcoID, recoveryProgrammeSentinel, start, end, telcoRecords, cfg.toleranceCfg)
+	return out
+}
+
+// dayConfirmed is the S3-B positive-confirmation gate: does this day's recon prove
+// the feed is confirming the booked recovery money? A genuine quiet day (nothing
+// booked, nothing in the feed) confirms; a feed-only day (all MISSING_PLATFORM)
+// does NOT; otherwise the feed must confirm at least min_confirmation_ratio of the
+// platform control total (measured on MONEY, not row count, so an intra-day
+// sub-event drop where counts happen to match but totals move is caught).
+func dayConfirmed(sum Summary, minConfirmationRatio float64) bool {
+	if sum.PlatformRecords == 0 {
+		return sum.SourceRecordCount == 0
+	}
+	floor := int64(math.Ceil(minConfirmationRatio * float64(sum.PlatformControlTotalMinor)))
+	return sum.MatchedControlTotalMinor >= floor
+}
+
+// RunRecovery reconciles the recent settled Lagos business days for an ARMED telco
+// and advances freshness ONLY when the NEWEST settled day's booked recovery money
+// is confirmed by the feed. An unconfirmed newest day (empty / truncated /
+// mostly-mismatching feed) advances nothing — the gate ages out and the webhook
+// fails closed. Older days in the re-sweep window are re-reconciled only when their
+// feed OR platform side changed (a backdated/forged event landing in an already-
+// reconciled day changes the platform fingerprint -> re-run -> the phantom
+// surfaces); unchanged days are skipped (no churn). The newest day is ALWAYS
+// reconciled (its fresh Summary drives the confirmation gate).
+func (s *Service) RunRecovery(ctx context.Context, telcoID string) ([]Summary, error) {
+	cfg, adapter, err := s.loadForRecovery(ctx, telcoID)
+	if err != nil {
+		return nil, err
+	}
+	// Never reconcile-then-arm: only an already-armed telco is reconciled (the
+	// webhook is dead-closed until the four-eyes arm path creates the row).
+	armed, err := s.Arming.IsLayerArmed(ctx, telcoID, repo.ReconLayerRecovery)
+	if err != nil {
+		return nil, err
+	}
+	if !armed {
+		return nil, nil
+	}
+	nowLag := time.Now().UTC().Add(-time.Duration(cfg.ReconLagSeconds) * time.Second)
+	dLast, ok := lastSettledBusinessDay(cfg.loc, nowLag)
+	if !ok {
+		return nil, nil // nothing fully settled yet
+	}
+	from := nowLag.Add(-time.Duration(cfg.RereconcileLookbackSeconds) * time.Second)
+	days := businessDayStrings(cfg.loc, from, dLast)
+	out := make([]Summary, 0, len(days))
+	for i, d := range days {
+		isLast := i == len(days)-1
+		if !isLast {
+			unchanged, err := s.recoveryDayUnchanged(ctx, cfg, adapter, telcoID, d)
+			if err != nil {
+				return out, err
+			}
+			if unchanged {
+				out = append(out, Summary{Unchanged: true, PeriodEnd: time.Time{}})
+				continue
+			}
+		}
+		sum, err := s.reconcileRecoveryDayWith(ctx, cfg, adapter, telcoID, d)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, sum)
+		if isLast {
+			if dayConfirmed(sum, cfg.MinConfirmationRatio) {
+				if _, err := s.Arming.AdvanceFreshness(ctx, telcoID, repo.ReconLayerRecovery, cfg.ArmFreshnessMaxSeconds); err != nil {
+					return out, err
+				}
+			} else {
+				s.Log.Error("RECOVERY feed confirmation shortfall — freshness NOT advanced; the webhook fails closed as the gate ages out",
+					"telco", telcoID, "day", d,
+					"matched_total_minor", sum.MatchedControlTotalMinor,
+					"platform_total_minor", sum.PlatformControlTotalMinor,
+					"min_confirmation_ratio", cfg.MinConfirmationRatio)
+			}
+		}
+	}
+	return out, nil
+}
+
+// recoveryDayUnchanged reports whether a day already has an ACTIVE run whose feed
+// source-hash AND platform fingerprint (count, net total) both still match — i.e.
+// nothing new arrived on either side, so re-reconciling would only churn.
+func (s *Service) recoveryDayUnchanged(ctx context.Context, cfg recoveryCfg, adapter recoveryfeed.Adapter, telcoID, businessDate string) (bool, error) {
+	start, end, err := businessDayWindow(cfg.loc, businessDate)
+	if err != nil {
+		return false, err
+	}
+	var storedHash string
+	var storedPlatCount, storedPlatTotal int64
+	tctx := platform.WithTenant(ctx, telcoID)
+	err = repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT source_hash, platform_record_count, platform_control_total_minor
+			FROM recon_runs
+			WHERE telco_id=$1 AND programme_id=$2 AND layer=$3 AND state='ACTIVE' AND period_start=$4`,
+			telcoID, recoveryProgrammeSentinel, layerRecovery, start).Scan(&storedHash, &storedPlatCount, &storedPlatTotal)
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil // never reconciled -> must reconcile
+		}
+		return false, err
+	}
+	env, err := adapter.FetchDay(ctx, telcoID, businessDate)
+	if err != nil {
+		return false, err
+	}
+	_, _, freshHash, err := sourceManifest(mapFeedToTelco(env, businessDate, start), cfg.MaxAmountMinor)
+	if err != nil {
+		return false, err
+	}
+	pc, pt, err := s.recoveryPlatformFingerprint(ctx, telcoID, start, end)
+	if err != nil {
+		return false, err
+	}
+	return freshHash == storedHash && int64(pc) == storedPlatCount && pt == storedPlatTotal, nil
+}
+
+// recoveryPlatformFingerprint is the (count, net-total) of the platform side for a
+// day — the cheap signal that a late/backdated event changed an already-reconciled
+// window (the telco-only hash skip of ReconcileRecentPeriods would miss this).
+func (s *Service) recoveryPlatformFingerprint(ctx context.Context, telcoID string, start, end time.Time) (int, int64, error) {
+	var count int
+	var total int64
+	tctx := platform.WithTenant(ctx, telcoID)
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		plat, e := recoverySpec().fetchPlatform(ctx, tx, "", start, end)
+		if e != nil {
+			return e
+		}
+		count = len(plat)
+		for _, p := range plat {
+			total += p.FaceValueMinor
+		}
+		return nil
+	})
+	return count, total, err
+}
+
+// lastSettledBusinessDay returns the most recent Lagos business day whose window
+// end (next civil midnight) is at or before the cutoff (now-lag) — i.e. fully
+// settled. ok=false if none in the recent past.
+func lastSettledBusinessDay(loc *time.Location, cutoff time.Time) (string, bool) {
+	c := cutoff.In(loc)
+	d := time.Date(c.Year(), c.Month(), c.Day(), 0, 0, 0, 0, loc)
+	for i := 0; i < 4; i++ {
+		if end := d.AddDate(0, 0, 1); !end.After(cutoff) {
+			return d.Format("2006-01-02"), true
+		}
+		d = d.AddDate(0, 0, -1)
+	}
+	return "", false
+}
+
+// businessDayStrings lists the Lagos business days from the calendar date of `from`
+// through `toDate` inclusive, oldest first (bounded by the re-sweep lookback).
+func businessDayStrings(loc *time.Location, from time.Time, toDate string) []string {
+	end, err := time.ParseInLocation("2006-01-02", toDate, loc)
+	if err != nil {
+		return nil
+	}
+	f := from.In(loc)
+	cur := time.Date(f.Year(), f.Month(), f.Day(), 0, 0, 0, 0, loc)
+	var out []string
+	for !cur.After(end) {
+		out = append(out, cur.Format("2006-01-02"))
+		cur = cur.AddDate(0, 0, 1)
+	}
+	return out
 }
 
 // loadForRecovery reads recon.recovery (telco->global) with every fail-closed

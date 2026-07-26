@@ -122,13 +122,21 @@ type Service struct {
 	Log    *slog.Logger
 	// HTTPClient fetches the telco-side records; injectable for tests.
 	HTTPClient *http.Client
+	// Arming is the RECOVERY freshness marker (S3-B). Same tcp_app pool: the
+	// column-scoped UPDATE grant (mig 0054) lets it advance freshness on a
+	// confirmed recon; recon_layer_arming is not RLS-scoped (pre-tenant control).
+	Arming *repo.ReconArming
 }
 
 func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service {
 	// R-P0-5: the telco-records fetch is a config-driven outbound door — the
 	// FOURTH the VR-32 SSRF work did not cover. Route it through the shared
 	// egress guard (resolved-IP check + connection pinning) like the other three.
-	return &Service{Pool: pool, Config: cfg, Log: log, HTTPClient: egress.SafeClient(10 * time.Second)}
+	return &Service{
+		Pool: pool, Config: cfg, Log: log,
+		HTTPClient: egress.SafeClient(10 * time.Second),
+		Arming:     &repo.ReconArming{Pool: pool},
+	}
 }
 
 // telcoTransaction is the canonical telco-side record (simulator /sim/transactions).
