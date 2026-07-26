@@ -149,7 +149,35 @@ func (s *Service) reconcileRecoveryDayWith(ctx context.Context, cfg recoveryCfg,
 	if err != nil {
 		return Summary{}, fmt.Errorf("recovery feed day %s: %w", businessDate, err)
 	}
-	return s.reconcileLayer(ctx, recoverySpec(), telcoID, recoveryProgrammeSentinel, start, end, mapFeedToTelco(env, businessDate, start), cfg.toleranceCfg)
+	sum, err := s.reconcileLayer(ctx, recoverySpec(), telcoID, recoveryProgrammeSentinel, start, end, mapFeedToTelco(env, businessDate, start), cfg.toleranceCfg)
+	if err != nil {
+		return sum, err
+	}
+	// S3-C2: clear the re-origination hold for any subscriber whose recovery the
+	// feed CONFIRMED this day (its token MATCHED). A phantom whose token did not
+	// match stays held (surfaced as a break; the subscriber stays blocked). Skipped
+	// on a REJECTED run (no ACTIVE items to confirm against).
+	if !sum.Rejected && !sum.NothingToReconcile {
+		if err := s.clearRecoveryHolds(ctx, telcoID, start, end); err != nil {
+			return sum, err
+		}
+	}
+	return sum, nil
+}
+
+// clearRecoveryHolds clears the re-origination holds a confirmed recon day proved.
+func (s *Service) clearRecoveryHolds(ctx context.Context, telcoID string, start, end time.Time) error {
+	tctx := platform.WithTenant(ctx, telcoID)
+	return repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		n, err := (repo.RecoveryHolds{}).ClearMatched(ctx, tx, start, end)
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			s.Log.Info("RECOVERY recon cleared feed-confirmed re-origination holds", "telco", telcoID, "cleared", n)
+		}
+		return nil
+	})
 }
 
 // mapFeedToTelco maps each per-token EOD deduction into the canonical telco record.

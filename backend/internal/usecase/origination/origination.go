@@ -47,6 +47,10 @@ var (
 	ErrOfferExpired         = errors.New("origination: offer expired") // EDG-011
 	ErrOfferNotAcceptable   = errors.New("origination: offer no longer acceptable")
 	ErrSubscriberIneligible = errors.New("origination: subscriber not eligible") // barred/self-excluded/closed
+	// ErrRecoveryUnconfirmedHold (S3-C2): the subscriber has a debt CLOSED by a
+	// webhook recovery the EOD recon has not yet confirmed — re-origination is held
+	// so a phantom close cannot free the advance slot before recon catches it.
+	ErrRecoveryUnconfirmedHold = errors.New("origination: subscriber has an unconfirmed recovery hold")
 	// Self-exclusion (R1-MUST) errors.
 	ErrSelfExclusionChannelNotAllowed = errors.New("origination: self-exclusion channel not permitted")
 	ErrNotSelfExcluded                = errors.New("origination: subscriber has no active self-exclusion")
@@ -588,6 +592,15 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		// being in sync (safety-floor discipline).
 		if err := s.assertNotSelfExcluded(ctx, tx, sub.SubscriberAccountID); err != nil {
 			return err
+		}
+		// S3-C2 re-origination hold: refuse a fresh advance for a subscriber whose
+		// debt was CLOSED by a webhook recovery the EOD recon has not yet confirmed —
+		// a phantom close must not free the advance slot for a new advance before the
+		// feed confirms it (and the later reversal reopen would deadlock otherwise).
+		if held, err := (repo.RecoveryHolds{}).HasUncleared(ctx, tx, sub.SubscriberAccountID); err != nil {
+			return err
+		} else if held {
+			return ErrRecoveryUnconfirmedHold
 		}
 		// Real-time overlays at the money-moving moment (V2-SCR-015). The
 		// validator guarantees CONFIRM cannot be configured off.

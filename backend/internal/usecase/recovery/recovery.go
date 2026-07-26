@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -335,6 +336,17 @@ func (s *Service) classifyAndApply(ctx context.Context, tx pgx.Tx, telcoID strin
 		}
 		if err := s.pools.ReduceUtilisation(ctx, tx, adv.FundingPoolID, applied); err != nil {
 			return err
+		}
+		// S3-C2 re-origination HOLD: a wh: recovery that CLOSED this debt blocks the
+		// subscriber from re-borrowing until the EOD recon confirms it — a phantom/
+		// forged close must not free the advances_one_active_uq slot for a fresh advance
+		// before recon catches it (the later recovery.Reverse reopen would otherwise
+		// DEADLOCK on that index). Records ELIGIBILITY only; NO money state — money
+		// still books below, unchanged.
+		if out.AdvanceClosed && strings.HasPrefix(evt.SourceEventID, "wh:") {
+			if err := (repo.RecoveryHolds{}).Insert(ctx, tx, telcoID, subscriberID, adv.AdvanceID, evt.RecoveryEventID); err != nil {
+				return err
+			}
 		}
 
 		// Balanced journal for the applied portion (idempotent by event id;

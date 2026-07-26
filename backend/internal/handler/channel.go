@@ -314,6 +314,10 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		writeErr(w, http.StatusConflict, "DIVERGENT_DUPLICATE", "source event id already used for a different payload")
 	case errors.Is(err, origination.ErrSubscriberIneligible):
 		writeErr(w, http.StatusForbidden, "SUBSCRIBER_INACTIVE", "subscriber not eligible")
+	case errors.Is(err, origination.ErrRecoveryUnconfirmedHold):
+		// S3-C2: a debt closed by a not-yet-confirmed webhook recovery holds
+		// re-origination until the EOD recon confirms it (fail-closed).
+		writeErr(w, http.StatusConflict, "RECOVERY_UNCONFIRMED_HOLD", "a recent recovery is pending confirmation; re-borrowing is temporarily on hold")
 	case errors.Is(err, repo.ErrConcurrentAdvanceBlocked):
 		writeErr(w, http.StatusConflict, "CONCURRENT_ADVANCE_BLOCK", "an advance is already open for this subscriber")
 	case errors.Is(err, repo.ErrOfferAlreadyUsed):
