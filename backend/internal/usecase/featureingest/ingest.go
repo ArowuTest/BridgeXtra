@@ -230,7 +230,7 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 			// subscribers this cut carried it for. Feature-quarantined rows are not in
 			// preps, so their identity flag is left untouched (fail-closed: an
 			// unverified subscriber cannot borrow until a clean cut sets the flag).
-			if err := subs.BulkSetNINVerified(ctx, tx, ninIDs, ninFlags); err != nil {
+			if err := subs.BulkSetNINVerified(ctx, tx, ninIDs, ninFlags, file.AsOf); err != nil {
 				return err
 			}
 		}

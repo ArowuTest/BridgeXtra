@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -171,7 +172,12 @@ func (Subscribers) BulkEnsureByToken(ctx context.Context, tx pgx.Tx, telcoID str
 // subscribers (Build 2). One set-based UPDATE via unnest — no per-row round trips,
 // no history rows (the flag is a single mutable column, never appended). Tenant-
 // scoped by RLS (runs inside the ingest tenant tx). A no-op when nothing to set.
-func (Subscribers) BulkSetNINVerified(ctx context.Context, tx pgx.Tx, ids []string, flags []bool) error {
+//
+// MONOTONIC (Build 2 follow-on): the write is guarded on nin_verified_as_of so only
+// a SAME-OR-NEWER feed cut may change the flag — an out-of-order or reprocessed older
+// cut carrying true can never clobber a newer revocation (false). asOf is the feature
+// file's authoritative cut date; a NULL stored as_of (never yet dated) always applies.
+func (Subscribers) BulkSetNINVerified(ctx context.Context, tx pgx.Tx, ids []string, flags []bool, asOf time.Time) error {
 	if len(ids) != len(flags) {
 		return fmt.Errorf("ids and flags must pair")
 	}
@@ -180,9 +186,10 @@ func (Subscribers) BulkSetNINVerified(ctx context.Context, tx pgx.Tx, ids []stri
 	}
 	_, err := tx.Exec(ctx, `
 		UPDATE subscriber_accounts sa
-		SET nin_verified = v.flag
+		SET nin_verified = v.flag, nin_verified_as_of = $3
 		FROM unnest($1::text[], $2::bool[]) AS v(id, flag)
-		WHERE sa.subscriber_account_id = v.id AND sa.effective_to IS NULL`, ids, flags)
+		WHERE sa.subscriber_account_id = v.id AND sa.effective_to IS NULL
+		  AND (sa.nin_verified_as_of IS NULL OR sa.nin_verified_as_of <= $3)`, ids, flags, asOf)
 	if err != nil {
 		return fmt.Errorf("bulk set nin_verified: %w", err)
 	}
