@@ -349,6 +349,36 @@ func (s *Service) resolveEconomics(ctx context.Context, programmeID string) (eco
 	return terms, cv.ConfigVersionID, nil
 }
 
+// requireNINVerified reads origination.nin_gate (global) FAIL-CLOSED (Build 2): an
+// absent OR malformed config means REQUIRE — absent must never mean "off". Only a
+// config that is present and explicitly sets require_nin_verified=false disables the
+// gate (a governed maker-checker opt-out). Never returns an error: any read problem
+// resolves to "require" (the safe direction).
+func (s *Service) requireNINVerified(ctx context.Context) bool {
+	cv, err := s.Config.ActiveAt(ctx, "origination.nin_gate", entity.ScopeGlobal, time.Now().UTC())
+	if err != nil {
+		return true
+	}
+	var v struct {
+		RequireNINVerified *bool `json:"require_nin_verified"`
+	}
+	if err := json.Unmarshal(cv.Content, &v); err != nil || v.RequireNINVerified == nil {
+		return true
+	}
+	return *v.RequireNINVerified
+}
+
+// assertNINVerified is the Build 2 fail-closed eligibility check: when the gate is
+// required, a subscriber whose nin_verified flag is not TRUE — NULL (unknown, MTN
+// has not sent it) or false — cannot borrow. Reuses ErrSubscriberIneligible so the
+// refusal is non-revealing at the channel (the specific reason stays in logs).
+func assertNINVerified(sub entity.SubscriberAccount, require bool) error {
+	if require && (sub.NINVerified == nil || !*sub.NINVerified) {
+		return fmt.Errorf("%w: NIN not verified", ErrSubscriberIneligible)
+	}
+	return nil
+}
+
 func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string) ([]OfferView, error) {
 	now := time.Now().UTC()
 	cfgV, err := s.Config.ActiveAt(ctx, "product.airtime", "programme:"+programmeID, now)
@@ -389,6 +419,11 @@ func (s *Service) GetOffers(ctx context.Context, programmeID, msisdnToken string
 		}
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
+		}
+		// Build 2 NIN eligibility gate: a subscriber whose identity MTN has not
+		// verified cannot borrow (fail-closed — NULL/unknown or false => no loan).
+		if err := assertNINVerified(sub, s.requireNINVerified(ctx)); err != nil {
+			return err
 		}
 		// Register-authoritative self-exclusion check (R1-MUST): refuse on an ACTIVE
 		// self-exclusion directly, so the control never depends on the status mirror
@@ -630,6 +665,11 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		}
 		if sub.Status != "ACTIVE" {
 			return fmt.Errorf("%w: status %s", ErrSubscriberIneligible, sub.Status)
+		}
+		// Build 2 NIN eligibility gate (fail-closed): an unverified identity cannot
+		// borrow — enforced at Confirm too, not just at the offer.
+		if err := assertNINVerified(sub, s.requireNINVerified(ctx)); err != nil {
+			return err
 		}
 		// Register-authoritative self-exclusion check (R1-MUST): refuse on an ACTIVE
 		// self-exclusion directly, so the control never depends on the status mirror

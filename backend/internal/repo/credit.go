@@ -61,10 +61,10 @@ type Subscribers struct{}
 func (Subscribers) GetLiveByToken(ctx context.Context, tx pgx.Tx, msisdnToken string) (entity.SubscriberAccount, error) {
 	var s entity.SubscriberAccount
 	err := tx.QueryRow(ctx, `
-		SELECT subscriber_account_id, telco_id, msisdn_token, status, effective_from, effective_to
+		SELECT subscriber_account_id, telco_id, msisdn_token, status, nin_verified, effective_from, effective_to
 		FROM subscriber_accounts
 		WHERE msisdn_token = $1 AND effective_to IS NULL`, msisdnToken).
-		Scan(&s.SubscriberAccountID, &s.TelcoID, &s.MSISDNToken, &s.Status, &s.EffectiveFrom, &s.EffectiveTo)
+		Scan(&s.SubscriberAccountID, &s.TelcoID, &s.MSISDNToken, &s.Status, &s.NINVerified, &s.EffectiveFrom, &s.EffectiveTo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return s, fmt.Errorf("subscriber token: %w", ErrNotFound)
 	}

@@ -83,8 +83,12 @@ type SubscriberAccount struct {
 	TelcoID             string
 	MSISDNToken         string
 	Status              string
-	EffectiveFrom       time.Time
-	EffectiveTo         *time.Time
+	// NINVerified is MTN's identity-verification flag (Build 2). nil = unknown (MTN
+	// has not sent it) — treated as NOT verified by the fail-closed origination gate.
+	// The raw NIN is never stored; only this boolean rides the subscriber feed.
+	NINVerified   *bool
+	EffectiveFrom time.Time
+	EffectiveTo   *time.Time
 }
 
 type DecisionSnapshot struct {

@@ -60,6 +60,11 @@ type rowShape struct {
 	WeeklyRechargeMinor []int64  `json:"weekly_recharge_minor"`
 	Currency            string   `json:"currency"`
 	QualityFlags        []string `json:"quality_flags"`
+	// NINVerified (Build 2): MTN's identity-verification flag for this subscriber.
+	// nil = feed did not carry it this cut (leave the stored value untouched). The
+	// raw NIN is NEVER sent or stored — only this boolean. Upserted in place onto
+	// subscriber_accounts (no history), NOT part of the scored feature vector.
+	NINVerified *bool `json:"nin_verified"`
 }
 
 // Summary reports one ingest (control totals — a partial ingest is visible).
@@ -168,6 +173,7 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 				token             string
 				features, quality []byte
 				hash              string
+				ninVerified       *bool // Build 2: identity flag, upserted in place (not a feature)
 			}
 			preps := make([]prepared, 0, len(chunk))
 			for i, row := range chunk {
@@ -185,7 +191,8 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 				tokens = append(tokens, row.MSISDNToken)
 				newIDs = append(newIDs, platform.NewID("sub"))
 				preps = append(preps, prepared{token: row.MSISDNToken,
-					features: features, quality: quality, hash: hex.EncodeToString(rowHash[:])})
+					features: features, quality: quality, hash: hex.EncodeToString(rowHash[:]),
+					ninVerified: row.NINVerified})
 			}
 			if len(preps) == 0 {
 				continue
@@ -195,6 +202,8 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 				return err
 			}
 			batch := make([]entity.FeatureSnapshot, 0, len(preps))
+			ninIDs := make([]string, 0, len(preps)) // Build 2: subscribers whose flag this cut carries
+			ninFlags := make([]bool, 0, len(preps))
 			for _, p := range preps {
 				subID, ok := subIDs[p.token]
 				if !ok {
@@ -206,6 +215,10 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 					AsOf: file.AsOf, Features: p.features, Quality: p.quality,
 					ContentHash: p.hash,
 				})
+				if p.ninVerified != nil {
+					ninIDs = append(ninIDs, subID)
+					ninFlags = append(ninFlags, *p.ninVerified)
+				}
 			}
 			written, err := snaps.BulkUpsert(ctx, tx, batch)
 			if err != nil {
@@ -213,6 +226,13 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 			}
 			sum.Written += int(written)
 			sum.Skipped += len(batch) - int(written)
+			// Build 2: upsert MTN's nin_verified flag IN PLACE (no history) for the
+			// subscribers this cut carried it for. Feature-quarantined rows are not in
+			// preps, so their identity flag is left untouched (fail-closed: an
+			// unverified subscriber cannot borrow until a clean cut sets the flag).
+			if err := subs.BulkSetNINVerified(ctx, tx, ninIDs, ninFlags); err != nil {
+				return err
+			}
 		}
 		status := "INGESTED"
 		if sum.Quarantined > 0 && sum.Written == 0 && sum.Skipped == 0 {

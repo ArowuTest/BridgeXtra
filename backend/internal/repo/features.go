@@ -167,6 +167,28 @@ func (Subscribers) BulkEnsureByToken(ctx context.Context, tx pgx.Tx, telcoID str
 	return out, res.Err()
 }
 
+// BulkSetNINVerified upserts MTN's nin_verified flag IN PLACE for the given
+// subscribers (Build 2). One set-based UPDATE via unnest — no per-row round trips,
+// no history rows (the flag is a single mutable column, never appended). Tenant-
+// scoped by RLS (runs inside the ingest tenant tx). A no-op when nothing to set.
+func (Subscribers) BulkSetNINVerified(ctx context.Context, tx pgx.Tx, ids []string, flags []bool) error {
+	if len(ids) != len(flags) {
+		return fmt.Errorf("ids and flags must pair")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE subscriber_accounts sa
+		SET nin_verified = v.flag
+		FROM unnest($1::text[], $2::bool[]) AS v(id, flag)
+		WHERE sa.subscriber_account_id = v.id AND sa.effective_to IS NULL`, ids, flags)
+	if err != nil {
+		return fmt.Errorf("bulk set nin_verified: %w", err)
+	}
+	return nil
+}
+
 // BulkUpsert is the set-based twin of Upsert: one staging COPY + one
 // INSERT..SELECT ON CONFLICT DO NOTHING per chunk. Returns rows written.
 func (FeatureSnapshots) BulkUpsert(ctx context.Context, tx pgx.Tx, snaps []entity.FeatureSnapshot) (int64, error) {

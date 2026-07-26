@@ -277,8 +277,8 @@ func TestChannel_IdempotencyKeyRequired(t *testing.T) {
 func TestChannel_UnknownFulfilment_202Processing(t *testing.T) {
 	f := newChannelFixture(t, "chan_unknown", 2*time.Second, 300)
 	if _, err := f.db.Admin.Exec(context.Background(), `
-		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
-		VALUES ('sub_w1','SIM_NG','tok_TIMEOUT_w1','ACTIVE')`); err != nil {
+		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status, nin_verified)
+		VALUES ('sub_w1','SIM_NG','tok_TIMEOUT_w1','ACTIVE',true)`); err != nil { // Build 2: verified by default
 		t.Fatal(err)
 	}
 	if _, err := f.db.Admin.Exec(context.Background(), `

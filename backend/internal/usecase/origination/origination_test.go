@@ -77,8 +77,8 @@ func (f *fixture) seedSubscriber(t *testing.T, subID, token string, maxFaceMinor
 	t.Helper()
 	ctx := context.Background()
 	if _, err := f.db.Admin.Exec(ctx, `
-		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
-		VALUES ($1, 'SIM_NG', $2, 'ACTIVE')`, subID, token); err != nil {
+		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status, nin_verified)
+		VALUES ($1, 'SIM_NG', $2, 'ACTIVE', true)`, subID, token); err != nil { // Build 2: verified by default
 		t.Fatal(err)
 	}
 	if _, err := f.db.Admin.Exec(ctx, `

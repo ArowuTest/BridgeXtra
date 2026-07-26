@@ -66,7 +66,15 @@ type FeatureRow struct {
 	WeeklyRechargeMinor []int64  `json:"weekly_recharge_minor"` // 13 weeks, most recent first
 	Currency            string   `json:"currency"`
 	QualityFlags        []string `json:"quality_flags,omitempty"`
+	// NINVerified (Build 2): the synthetic MTN reports its subscribers' NIN
+	// identity-verification flag alongside features (never the raw NIN). Ordinary
+	// synthetic subscribers are verified so the demo/pipeline can originate.
+	NINVerified *bool `json:"nin_verified,omitempty"`
 }
+
+// ninVerifiedTrue is the shared flag the synthetic feed stamps on ordinary
+// subscribers (Build 2); a pointer so it can be omitted from fault rows.
+var ninVerifiedTrue = true
 
 // FeatureFile is the canonical batch file shape.
 type FeatureFile struct {
@@ -218,6 +226,7 @@ func (s *Simulator) featureFile(w http.ResponseWriter, r *http.Request) {
 	file := FeatureFile{TelcoID: r.PathValue("telcoId"), AsOf: asOf, Rows: make([]FeatureRow, 0, count)}
 	for i := 1; i <= count; i++ {
 		row := s.featureRow(i)
+		row.NINVerified = &ninVerifiedTrue // Build 2: synthetic subscribers are NIN-verified
 		// M4e-3 fault-demo pool: a few deterministic rows carry FAULT-SHAPED
 		// tokens (the fulfilment route faults on token substring, V2-SIM-002)
 		// but ORDINARY healthy histories, so the real scoring pipeline makes
