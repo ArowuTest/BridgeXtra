@@ -9,6 +9,7 @@ package repo
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -75,6 +76,18 @@ func (r *ReconArming) SetLive(ctx context.Context, telcoID, layer string) error 
 	_, err := r.Pool.Exec(ctx,
 		`INSERT INTO recon_layer_arming (telco_id, layer) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 		telcoID, layer)
+	return err
+}
+
+// SetLiveArmed arms a layer inside a caller tx (the four-eyes approve), writing the
+// governed freshness window from the arm request. tx-based so arming is atomic with
+// the request-state flip. last_recon_at stays NULL — armed but NOT live until the
+// first confirmed recon. Idempotent.
+func (r *ReconArming) SetLiveArmed(ctx context.Context, tx pgx.Tx, telcoID, layer string, freshnessMaxSeconds int) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO recon_layer_arming (telco_id, layer, arm_freshness_max_seconds)
+		 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+		telcoID, layer, freshnessMaxSeconds)
 	return err
 }
 

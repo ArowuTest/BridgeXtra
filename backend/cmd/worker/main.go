@@ -91,6 +91,16 @@ func main() {
 		"R-P0-6 E2: print the signed, reproducible evidence pack (JSON + pack_hash) for the given recon run id and exit")
 	scoreOnce := flag.Bool("score", false,
 		"Phase 0: run the durable scoring scheduler once for every active telco/programme and exit (ingest -> score on the config-driven cadence, idempotent per cycle)")
+	armPropose := flag.String("recon-arm-propose", "",
+		"S3-C MAKER: propose arming the given telco's RECOVERY recon layer; requires -actor -reason -arm-reversal-basis -arm-date-basis")
+	armApprove := flag.String("recon-arm-approve", "",
+		"S3-C CHECKER: approve the given arm request id (must be a DIFFERENT -actor than the proposer)")
+	armDisarm := flag.String("recon-disarm", "",
+		"S3-C: disarm the given telco's RECOVERY recon layer (single-actor; requires -actor -reason)")
+	armReversalBasis := flag.String("arm-reversal-basis", "",
+		"confirmed MTN feed reversal basis for -recon-arm-propose (GROSS|NET_SAME_DAY)")
+	armDateBasis := flag.String("arm-date-basis", "",
+		"confirmed MTN business-date basis for -recon-arm-propose")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -159,6 +169,52 @@ func main() {
 			os.Exit(1)
 		}
 		runOverrideApprove(ctx, log, appPool, workerPool, appCfg, *overrideApprove, *overrideActor)
+		return
+	}
+
+	// S3-C3 four-eyes arming of a telco's RECOVERY recon layer (the money door).
+	// Arm tables are pre-tenant control registries owned by the worker (tcp_worker).
+	if *armPropose != "" {
+		if *overrideActor == "" || *overrideReason == "" {
+			log.Error("recon-arm-propose requires -actor and -reason")
+			os.Exit(1)
+		}
+		svc := recon.New(workerPool, appCfg, log)
+		id, err := svc.ProposeArmRecovery(ctx, recon.ArmProposal{
+			TelcoID: *armPropose, ProposedBy: *overrideActor, Reason: *overrideReason,
+			ConfirmedFeedReversalBasis: *armReversalBasis, ConfirmedBusinessDateBasis: *armDateBasis,
+		})
+		if err != nil {
+			log.Error("recon-arm-propose failed", "err", err)
+			os.Exit(1)
+		}
+		fmt.Println(id)
+		return
+	}
+	if *armApprove != "" {
+		if *overrideActor == "" {
+			log.Error("recon-arm-approve requires -actor")
+			os.Exit(1)
+		}
+		svc := recon.New(workerPool, appCfg, log)
+		if err := svc.ApproveArmRecovery(ctx, *armApprove, *overrideActor); err != nil {
+			log.Error("recon-arm-approve failed", "err", err)
+			os.Exit(1)
+		}
+		log.Info("recon-arm-approve done — RECOVERY armed (live on next confirmed recon)", "request", *armApprove)
+		return
+	}
+	if *armDisarm != "" {
+		if *overrideActor == "" {
+			log.Error("recon-disarm requires -actor")
+			os.Exit(1)
+		}
+		svc := recon.New(workerPool, appCfg, log)
+		if err := svc.DisarmRecovery(ctx, *armDisarm, *overrideActor, *overrideReason); err != nil {
+			log.Error("recon-disarm failed", "err", err)
+			os.Exit(1)
+		}
+		log.Info("recon-disarm done — RECOVERY disarmed", "telco", *armDisarm)
 		return
 	}
 
@@ -542,6 +598,23 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 				os.Exit(1)
 			}
 			fmt.Printf("recon-open-breaks %s/%s open=%d\n", tc.TelcoID, p.ProgrammeID, openBreaks)
+		}
+		// S3-C RECOVERY layer: reconcile this telco's webhook recoveries against the
+		// EOD feed. NON-FATAL per telco — a feed fetch / adapter / auth error logs,
+		// skips this telco (it ages out its own freshness) and NEVER os.Exit (unlike
+		// fulfilment). No-ops for an unarmed telco. RECOVERY breaks count to the exit code.
+		if recSums, rerr := svc.RunRecovery(ctx, tc.TelcoID); rerr != nil {
+			log.Error("RECOVERY recon failed — telco skipped (non-fatal)", "telco", tc.TelcoID, "err", rerr)
+		} else {
+			for _, rs := range recSums {
+				if rs.NothingToReconcile || rs.Unchanged {
+					continue
+				}
+				totalBreaks += rs.MissingPlatform + rs.MissingTelco + rs.AmountMismatch + rs.CurrencyMismatch + rs.Malformed + rs.DuplicateTelco + rs.Contradictory
+				fmt.Printf("recon-recovery %s run=%s period=[%s,%s) matched=%d missing_platform=%d missing_telco=%d amount_mismatch=%d\n",
+					tc.TelcoID, rs.RunID, rs.PeriodStart.UTC().Format(time.RFC3339), rs.PeriodEnd.UTC().Format(time.RFC3339),
+					rs.Matched, rs.MissingPlatform, rs.MissingTelco, rs.AmountMismatch)
+			}
 		}
 	}
 	if totalBreaks > 0 {
