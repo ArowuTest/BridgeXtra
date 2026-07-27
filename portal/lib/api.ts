@@ -1,14 +1,13 @@
-// Portal API client. The session lives in an httpOnly cookie the JS cannot
-// read; the CSRF token is the only piece held client-side (sessionStorage —
-// per-tab, gone on close). NOTE: authorization lives on the SERVER (RBAC map
-// in backend/internal/handler/portal.go). Everything here is convenience.
+// Portal API client. The session lives in an httpOnly cookie the JS cannot read;
+// the CSRF token lives in a separate readable `bx_csrf` cookie (see below). NOTE:
+// authorization lives on the SERVER (RBAC map in backend/internal/handler/portal.go).
+// Everything here is convenience.
 
-// The CSRF token lives in a readable (non-httpOnly) `bx_csrf` cookie the server
-// sets at login — SHARED across same-origin tabs, unlike sessionStorage which is
-// per-tab and would leave a second tab unable to mutate. We echo it in the
-// X-CSRF-Token header; the server verifies THAT header against the session's
-// stored hash. The cookie is transport only — the server never reads it (the
-// double-submit is the header, not a cookie==header comparison).
+// The CSRF token lives in a readable (non-httpOnly) `bx_csrf` cookie the server sets
+// at login. A cookie is shared across same-origin tabs, so every tab reads the same
+// token. We echo it in the X-CSRF-Token header; the server verifies THAT header
+// against the session's stored hash. The cookie is transport only — the server never
+// reads it (the double-submit is the header, not a cookie==header comparison).
 const CSRF_COOKIE = "bx_csrf";
 function csrfToken(): string {
   if (typeof document === "undefined") return "";

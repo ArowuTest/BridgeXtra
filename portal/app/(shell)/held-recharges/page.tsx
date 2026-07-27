@@ -34,6 +34,7 @@ function errMsg(e: unknown): string {
 
 export default function HeldRechargesPage() {
   const [telco, setTelco] = useState("");
+  const [actor, setActor] = useState("");
   const [holds, setHolds] = useState<HeldRecharge[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -41,7 +42,10 @@ export default function HeldRechargesPage() {
 
   useEffect(() => {
     me()
-      .then((s) => setTelco(telcoFromScope(s.scope)))
+      .then((s) => {
+        setTelco(telcoFromScope(s.scope));
+        setActor(s.actor);
+      })
       .catch(() => {});
   }, []);
 
@@ -104,7 +108,16 @@ export default function HeldRechargesPage() {
       render: (h) => (
         <Group gap="xs" justify="flex-end" wrap="nowrap">
           {h.requested_by ? (
-            <Button size="xs" onClick={() => setPending({ kind: "approve", hold: h })}>
+            <Button
+              size="xs"
+              onClick={() => setPending({ kind: "approve", hold: h })}
+              disabled={h.requested_by === actor}
+              title={
+                h.requested_by === actor
+                  ? "You requested this release — a different operator must approve (four-eyes)"
+                  : undefined
+              }
+            >
               Approve release
             </Button>
           ) : (

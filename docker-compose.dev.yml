@@ -5,11 +5,11 @@
 #   make dev-clean    # stop it and wipe the DB + caches (fresh next time)
 #   make dev-seed     # re-run the seeder against the running DB
 #
-# It mirrors the proven portal-e2e CI job (Postgres -> migrate -> seed operators ->
-# api -> portal), plus the seed-dev engine drive that produces a varied loan
-# population. Everything runs from stock images with the repo bind-mounted — no
-# Dockerfiles to maintain. SYNTHETIC-ONLY: the seeder is fenced to the SIM_NG telco
-# and refuses any real DB (VerifySyntheticOnly + the simseed_loop build tag).
+# Flow: postgres -> seed (migrate + operators + loan population) -> api ->
+# seed-held (signed webhooks -> held-recharge queue) + portal. Everything runs from
+# stock images with the repo bind-mounted — no Dockerfiles to maintain. SYNTHETIC-ONLY:
+# the seeder is fenced to the SIM_NG telco and refuses any real DB (a synthetic/empty-DB
+# assertion + VerifySyntheticOnly + the simseed_loop build tag).
 #
 # Portal:   http://localhost:3090   (sign in with a seeded key below)
 # API:      http://localhost:8090/healthz
@@ -71,12 +71,41 @@ services:
       TCP_API_ADDR: ":8090"
       # Dev containers talk over the private compose network — do not block it.
       TCP_EGRESS_BLOCK_PRIVATE: "false"
+      # Verifies the held-recharge webhook HMAC — the seed-held service signs with the
+      # SAME value (synthetic, dev-only; the config stores this env NAME, never a value).
+      TCP_DEV_WH_SECRET: dev-webhook-hmac-secret-not-a-real-secret
     command: ["go", "run", "./backend/cmd/api"]
     ports:
       - "8090:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     depends_on:
       seed:
         condition: service_completed_successfully
+    volumes:
+      - .:/src
+      - tcp-gomodcache:/go/pkg/mod
+      - tcp-gobuildcache:/root/.cache/go-build
+
+  # One-shot (after the api is healthy): post signed webhooks over the per-event clamp
+  # with the RECOVERY layer armed LIVE, so the treasury guardrail holds them and real
+  # rows land in the Finance held-recharge queue. No fabricated rows — the signed
+  # webhook is the only sanctioned producer.
+  seed-held:
+    image: golang:1.25
+    working_dir: /src
+    environment:
+      TCP_SEED_ALLOW: "1"
+      TCP_ADMIN_DSN: postgres://postgres:devlocal@postgres:5432/telco_credit
+      TCP_SEED_API_URL: http://api:8090
+      TCP_DEV_WH_SECRET: dev-webhook-hmac-secret-not-a-real-secret
+    command: ["go", "run", "-tags", "simseed_loop", "./backend/cmd/seed-dev", "-held-recharges"]
+    depends_on:
+      api:
+        condition: service_healthy
     volumes:
       - .:/src
       - tcp-gomodcache:/go/pkg/mod
@@ -93,7 +122,7 @@ services:
       - "3090:3090"
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - .:/src
       - tcp-dev-portal-nodemodules:/src/portal/node_modules
