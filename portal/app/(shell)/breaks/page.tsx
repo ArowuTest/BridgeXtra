@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, BreakAction, ReconBreak, financeBreakAction, financeBreaks } from "@/lib/api";
+import { fmtDateTime } from "@/lib/datetime";
 
 const ACTION_LABEL: Record<BreakAction, string> = {
   ASSIGN: "assigned to self",
@@ -98,7 +99,7 @@ export default function BreaksPage() {
             <tbody>
               {breaks.map((b) => (
                 <tr key={b.recon_item_id}>
-                  <td className="muted">{new Date(b.created_at).toLocaleString()}</td>
+                  <td className="muted">{fmtDateTime(b.created_at)}</td>
                   <td>{b.item_type}</td>
                   <td>
                     <span className="state state-SUBMITTED">{b.status.replace("BREAK_", "")}</span>

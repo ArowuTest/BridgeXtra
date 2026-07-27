@@ -92,16 +92,23 @@ func TestS23b_ScopeRefusal_OtherTelcoOperator(t *testing.T) {
 	f := newPortalFixture(t, "portal_held_scope")
 	seedPortalHold(t, f, "wh:ph2")
 
-	// A FINANCE operator scoped to a DIFFERENT telco must be refused.
+	// A FINANCE operator scoped to a DIFFERENT telco must not see SIM_NG's holds.
 	admins := &repo.Admins{Pool: f.db.Admin}
 	if err := admins.CreateWithRole(context.Background(), "adm_scoped1", "fin_other_telco",
 		"portal-key-fin-scoped-01", "FINANCE", "telco:OTHER_NG"); err != nil {
 		t.Fatal(err)
 	}
 	scoped := f.login(t, "portal-key-fin-scoped-01")
-	code, body := f.callBody(t, &scoped, "GET", "/v1/portal/finance/held-recharges?telco=SIM_NG", "")
-	if code != http.StatusForbidden {
-		t.Fatalf("an out-of-scope operator must be refused (PORTAL_FORBIDDEN), got %d %s", code, body)
+	// The list is scope-bound at the DATA layer (the operator read chokepoint / RLS),
+	// not by a telco parameter: an OTHER_NG operator gets a 200 whose queue EXCLUDES
+	// SIM_NG's holds. This is a STRONGER isolation guarantee than the old param check —
+	// it cannot be bypassed by omitting or forging a telco param.
+	code, body := f.callBody(t, &scoped, "GET", "/v1/portal/finance/held-recharges", "")
+	if code != http.StatusOK {
+		t.Fatalf("scoped operator list must be 200, got %d %s", code, body)
+	}
+	if strings.Contains(string(body), "wh:ph2") {
+		t.Fatalf("an OTHER_NG operator must NOT see SIM_NG's held recharge in its queue, got %s", body)
 	}
 	if code, _ := f.callBody(t, &scoped, "POST", "/v1/portal/finance/held-recharges/hld_x/request-release",
 		fmt.Sprintf(`{"telco":%q,"reason":"r"}`, "SIM_NG")); code != http.StatusForbidden {

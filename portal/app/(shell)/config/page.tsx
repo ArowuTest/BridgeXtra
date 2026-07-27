@@ -8,6 +8,7 @@
 // authorization is enforced server-side (deny-by-default RBAC), never here.
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtDateTime } from "@/lib/datetime";
 import {
   ApiError,
   ConfigSummary,
@@ -163,7 +164,7 @@ export default function ConfigPage() {
                   <td className="mono">{d.scope}</td>
                   <td>{d.active_version_no > 0 ? `v${d.active_version_no}` : "—"}</td>
                   <td className="muted">
-                    {d.active_since ? new Date(d.active_since).toLocaleString() : "—"}
+                    {fmtDateTime(d.active_since)}
                   </td>
                   <td>{d.pending_count > 0 ? d.pending_count : ""}</td>
                 </tr>

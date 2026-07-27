@@ -36,8 +36,10 @@ function fmtErr(err: unknown): string {
 }
 
 function age(iso: string): string {
-  const ms = Date.now() - new Date(iso).getTime();
-  const mins = Math.floor(ms / 60000);
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "—"; // guard: a bad timestamp shows "—", never "NaNm"
+  const mins = Math.floor((Date.now() - t) / 60000);
+  if (mins < 0) return "—";
   if (mins < 60) return `${mins}m`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 48) return `${hrs}h ${mins % 60}m`;
@@ -66,21 +68,40 @@ export default function OpsPage() {
 
   const load = useCallback(async () => {
     setError(null);
-    try {
-      const [f, r, a, dr] = await Promise.all([
-        opsFulfilments(),
-        opsReversals(),
-        opsStatusActions(),
-        opsDemoRuns(),
-      ]);
-      setAttempts(f.attempts);
-      setStaleAfter(f.stale_sent_after_seconds);
-      setReversals(r.reversals);
-      setActions(a.actions);
-      setRuns(dr.runs);
-    } catch (err) {
-      setError(fmtErr(err));
+    // Settle each read INDEPENDENTLY so one failing queue (e.g. a config-refusal
+    // 500 on fulfilments) only empties its own card — it no longer blanks every
+    // tab. Each widget resolves to data or an empty list; a failure surfaces in
+    // the banner without hiding the queues that did load.
+    const [f, r, a, dr] = await Promise.allSettled([
+      opsFulfilments(),
+      opsReversals(),
+      opsStatusActions(),
+      opsDemoRuns(),
+    ]);
+    const errs: string[] = [];
+    if (f.status === "fulfilled") {
+      setAttempts(f.value.attempts);
+      setStaleAfter(f.value.stale_sent_after_seconds);
+    } else {
+      setAttempts([]);
+      errs.push(fmtErr(f.reason));
     }
+    if (r.status === "fulfilled") setReversals(r.value.reversals);
+    else {
+      setReversals([]);
+      errs.push(fmtErr(r.reason));
+    }
+    if (a.status === "fulfilled") setActions(a.value.actions);
+    else {
+      setActions([]);
+      errs.push(fmtErr(a.reason));
+    }
+    if (dr.status === "fulfilled") setRuns(dr.value.runs);
+    else {
+      setRuns([]);
+      errs.push(fmtErr(dr.reason));
+    }
+    setError(errs.length ? errs[0] : null);
     // The demo catalogue is telco-allowlisted: a refusal here is a normal
     // posture (disabled, or this operator's telco isn't SIM), not an error.
     try {

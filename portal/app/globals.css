@@ -60,7 +60,7 @@ input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent-d
 }
 
 .muted { color: var(--muted); }
-.mono { font-family: var(--mono); font-size: 13px; }
+.mono { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
 .error { color: var(--danger); }
 
 /* --- login --- */
@@ -83,9 +83,20 @@ input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent-d
   display: flex;
   flex-direction: column;
   gap: 4px;
+  /* Pin the rail to exactly one viewport, sticky while main scrolls. Without
+     this the grid stretches the sidebar to the (taller) content height and the
+     extra space is distributed as gaps between nav links, so spacing changed
+     page to page. */
+  align-self: start;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 .sidebar .brand { font-weight: 700; font-size: 17px; margin-bottom: 16px; padding: 0 8px; }
-.sidebar nav { display: grid; gap: 2px; flex: 1; }
+/* No flex:1 — links size to content so the 2px gap is constant on every page;
+   align-content:start keeps them top-aligned. */
+.sidebar nav { display: grid; gap: 2px; align-content: start; }
 .sidebar nav a {
   color: var(--muted);
   padding: 8px 10px;
@@ -93,7 +104,7 @@ input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent-d
 }
 .sidebar nav a:hover { background: var(--panel-2); color: var(--text); text-decoration: none; }
 .sidebar nav a.active { background: var(--panel-2); color: var(--accent); }
-.whoami { border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; }
+.whoami { border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; margin-top: auto; }
 .whoami .role {
   display: inline-block;
   background: var(--panel-2);
@@ -104,7 +115,7 @@ input:focus { outline: 2px solid var(--accent-dim); border-color: var(--accent-d
   font-size: 12px;
   color: var(--accent);
 }
-.main { padding: 28px 32px; max-width: 1100px; }
+.main { padding: 28px 32px; max-width: 1100px; min-width: 0; }
 .main h1 { font-size: 20px; margin: 0 0 18px; }
 
 table.data { width: 100%; border-collapse: collapse; }

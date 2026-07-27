@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { me, Session } from "@/lib/api";
+import { fmtDateTime } from "@/lib/datetime";
 
 export default function DashboardPage() {
   const [session, setSession] = useState<Session | null>(null);
@@ -20,7 +21,7 @@ export default function DashboardPage() {
               <span className="role">{session.role}</span>.
             </p>
             <p className="muted">
-              Session expires {new Date(session.expires_at).toLocaleString()}.
+              Session expires {fmtDateTime(session.expires_at)}.
             </p>
           </>
         ) : (

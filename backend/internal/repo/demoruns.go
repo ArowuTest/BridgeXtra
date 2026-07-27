@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -70,13 +71,14 @@ type DemoRunRow struct {
 }
 
 const demoRunCols = `run_id, telco_id, programme_id, scenario, msisdn_token, offer_id,
-	advance_id, correlation_id, requested_by,
-	to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')`
+	advance_id, correlation_id, requested_by, created_at`
 
 func scanDemoRun(row pgx.Row) (DemoRunRow, error) {
 	var r DemoRunRow
+	var createdAt time.Time
 	err := row.Scan(&r.RunID, &r.TelcoID, &r.ProgrammeID, &r.Scenario, &r.MSISDNToken,
-		&r.OfferID, &r.AdvanceID, &r.CorrelationID, &r.RequestedBy, &r.CreatedAt)
+		&r.OfferID, &r.AdvanceID, &r.CorrelationID, &r.RequestedBy, &createdAt)
+	r.CreatedAt = rfc3339(createdAt)
 	return r, err
 }
 
@@ -161,18 +163,20 @@ func GetDemoChain(ctx context.Context, pool Querier, run DemoRunRow) (DemoAdvanc
 	var adv DemoAdvanceView
 	var minor, outMinor int64
 	var cur string
+	var activatedAt, closedAt *time.Time
 	err := pool.QueryRow(ctx, `
 		SELECT advance_id, state, face_value_minor, outstanding_minor, currency,
-		       COALESCE(to_char(activated_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),''),
-		       COALESCE(to_char(closed_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')
+		       activated_at, closed_at
 		FROM advances WHERE advance_id = $1 AND telco_id = $2`, run.AdvanceID, run.TelcoID).
-		Scan(&adv.AdvanceID, &adv.State, &minor, &outMinor, &cur, &adv.ActivatedAt, &adv.ClosedAt)
+		Scan(&adv.AdvanceID, &adv.State, &minor, &outMinor, &cur, &activatedAt, &closedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return adv, nil, nil, fmt.Errorf("demo advance: %w", ErrNotFound)
 	}
 	if err != nil {
 		return adv, nil, nil, err
 	}
+	adv.ActivatedAt = rfc3339Ptr(activatedAt)
+	adv.ClosedAt = rfc3339Ptr(closedAt)
 	if adv.FaceValue, err = scanMoney(minor, cur); err != nil {
 		return adv, nil, nil, err
 	}
@@ -182,9 +186,7 @@ func GetDemoChain(ctx context.Context, pool Querier, run DemoRunRow) (DemoAdvanc
 
 	rows, err := pool.Query(ctx, `
 		SELECT attempt_id, attempt_no, state, COALESCE(telco_reference,''), enquiry_count,
-		       to_char(submitted_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-		       COALESCE(to_char(resolved_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),''),
-		       COALESCE(to_char(next_enquiry_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')
+		       submitted_at, resolved_at, next_enquiry_at
 		FROM fulfilment_attempts WHERE advance_id = $1
 		ORDER BY attempt_no`, run.AdvanceID)
 	if err != nil {
@@ -194,10 +196,15 @@ func GetDemoChain(ctx context.Context, pool Querier, run DemoRunRow) (DemoAdvanc
 	var attempts []DemoAttemptView
 	for rows.Next() {
 		var a DemoAttemptView
+		var submittedAt time.Time
+		var resolvedAt, nextEnquiryAt *time.Time
 		if err := rows.Scan(&a.AttemptID, &a.AttemptNo, &a.State, &a.TelcoRef, &a.EnquiryCount,
-			&a.SubmittedAt, &a.ResolvedAt, &a.NextEnquiryAt); err != nil {
+			&submittedAt, &resolvedAt, &nextEnquiryAt); err != nil {
 			return adv, nil, nil, err
 		}
+		a.SubmittedAt = rfc3339(submittedAt)
+		a.ResolvedAt = rfc3339Ptr(resolvedAt)
+		a.NextEnquiryAt = rfc3339Ptr(nextEnquiryAt)
 		attempts = append(attempts, a)
 	}
 	if err := rows.Err(); err != nil {
@@ -205,9 +212,7 @@ func GetDemoChain(ctx context.Context, pool Querier, run DemoRunRow) (DemoAdvanc
 	}
 
 	nrows, err := pool.Query(ctx, `
-		SELECT kind, state,
-		       to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-		       COALESCE(to_char(sent_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')
+		SELECT kind, state, created_at, sent_at
 		FROM notifications WHERE advance_id = $1 AND telco_id = $2
 		ORDER BY created_at`, run.AdvanceID, run.TelcoID)
 	if err != nil {
@@ -217,9 +222,13 @@ func GetDemoChain(ctx context.Context, pool Querier, run DemoRunRow) (DemoAdvanc
 	var notes []DemoNotificationView
 	for nrows.Next() {
 		var n DemoNotificationView
-		if err := nrows.Scan(&n.Kind, &n.State, &n.CreatedAt, &n.SentAt); err != nil {
+		var nCreated time.Time
+		var nSent *time.Time
+		if err := nrows.Scan(&n.Kind, &n.State, &nCreated, &nSent); err != nil {
 			return adv, attempts, nil, err
 		}
+		n.CreatedAt = rfc3339(nCreated)
+		n.SentAt = rfc3339Ptr(nSent)
 		notes = append(notes, n)
 	}
 	return adv, attempts, notes, nrows.Err()

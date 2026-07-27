@@ -7,6 +7,7 @@
 // here are opening and progressing complaints.
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtDate, fmtDateTime } from "@/lib/datetime";
 import {
   ApiError,
   ComplaintItem,
@@ -165,7 +166,7 @@ export default function SupportPage() {
                 </h2>
                 <p className="muted" style={{ margin: 0 }}>
                   {timeline.subscriber.telco_id} · identity since{" "}
-                  {new Date(timeline.subscriber.effective_from).toLocaleDateString()}
+                  {fmtDate(timeline.subscriber.effective_from)}
                 </p>
               </div>
 
@@ -178,7 +179,7 @@ export default function SupportPage() {
                     <tbody>
                       {timeline.advances.map((a) => (
                         <tr key={a.advance_id}>
-                          <td className="muted">{new Date(a.accepted_at).toLocaleDateString()}</td>
+                          <td className="muted">{fmtDate(a.accepted_at)}</td>
                           <td className="mono">{a.advance_id}</td>
                           <td>{a.face_value.display}</td>
                           <td className="muted">outstanding {a.outstanding.display}</td>
@@ -203,7 +204,7 @@ export default function SupportPage() {
                     <tbody>
                       {timeline.complaints.map((c) => (
                         <tr key={c.complaint_id}>
-                          <td className="muted">{new Date(c.opened_at).toLocaleDateString()}</td>
+                          <td className="muted">{fmtDate(c.opened_at)}</td>
                           <td>{c.category}</td>
                           <td>{c.narrative}</td>
                           <td>
@@ -225,7 +226,7 @@ export default function SupportPage() {
                     <ul style={{ marginTop: 0 }}>
                       {timeline.notifications.map((n, i) => (
                         <li key={i} className="mono" style={{ fontSize: 13 }}>
-                          {n.kind} · {n.state} · {new Date(n.created_at).toLocaleString()}
+                          {n.kind} · {n.state} · {fmtDateTime(n.created_at)}
                         </li>
                       ))}
                       {timeline.status_actions.map((a) => (

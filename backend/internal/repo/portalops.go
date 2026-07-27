@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -36,18 +37,21 @@ type AmbiguousAttempt struct {
 
 const ambiguousCols = `f.attempt_id, f.advance_id, a.telco_id, a.programme_id, a.state,
 	a.face_value_minor, a.currency, f.state, f.attempt_no, f.enquiry_count,
-	to_char(f.submitted_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-	COALESCE(to_char(f.next_enquiry_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')`
+	f.submitted_at, f.next_enquiry_at`
 
 func scanAmbiguous(row pgx.Row) (AmbiguousAttempt, error) {
 	var it AmbiguousAttempt
 	var minor int64
 	var cur string
+	var submittedAt time.Time
+	var nextEnquiryAt *time.Time
 	err := row.Scan(&it.AttemptID, &it.AdvanceID, &it.TelcoID, &it.ProgrammeID, &it.AdvanceState,
-		&minor, &cur, &it.State, &it.AttemptNo, &it.EnquiryCount, &it.SubmittedAt, &it.NextEnquiryAt)
+		&minor, &cur, &it.State, &it.AttemptNo, &it.EnquiryCount, &submittedAt, &nextEnquiryAt)
 	if err != nil {
 		return it, err
 	}
+	it.SubmittedAt = rfc3339(submittedAt)
+	it.NextEnquiryAt = rfc3339Ptr(nextEnquiryAt)
 	it.FaceValue, err = scanMoney(minor, cur)
 	return it, err
 }
@@ -124,17 +128,19 @@ type ParkedReversalRow struct {
 
 const parkedCols = `pending_reversal_id, telco_id, original_source_event_id,
 	reversal_source_event_id, amount_minor, currency, park_reason,
-	to_char(received_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')`
+	received_at`
 
 func scanParked(row pgx.Row) (ParkedReversalRow, error) {
 	var p ParkedReversalRow
 	var minor int64
 	var cur string
+	var receivedAt time.Time
 	err := row.Scan(&p.PendingReversalID, &p.TelcoID, &p.OriginalSourceEventID,
-		&p.ReversalSourceEventID, &minor, &cur, &p.ParkReason, &p.ReceivedAt)
+		&p.ReversalSourceEventID, &minor, &cur, &p.ParkReason, &receivedAt)
 	if err != nil {
 		return p, err
 	}
+	p.ReceivedAt = rfc3339(receivedAt)
 	p.Amount, err = scanMoney(minor, cur)
 	return p, err
 }
@@ -193,14 +199,17 @@ type StatusActionRow struct {
 const statusActionCols = `sa.action_id, sa.telco_id, sa.subscriber_account_id, s.msisdn_token,
 	s.status, sa.from_status, sa.to_status, sa.reason, sa.requested_by,
 	COALESCE(sa.approved_by,''), sa.state,
-	to_char(sa.requested_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-	COALESCE(to_char(sa.decided_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')`
+	sa.requested_at, sa.decided_at`
 
 func scanStatusAction(row pgx.Row) (StatusActionRow, error) {
 	var a StatusActionRow
+	var requestedAt time.Time
+	var decidedAt *time.Time
 	err := row.Scan(&a.ActionID, &a.TelcoID, &a.SubscriberAccountID, &a.MSISDNToken,
 		&a.CurrentStatus, &a.FromStatus, &a.ToStatus, &a.Reason, &a.RequestedBy,
-		&a.ApprovedBy, &a.State, &a.RequestedAt, &a.DecidedAt)
+		&a.ApprovedBy, &a.State, &requestedAt, &decidedAt)
+	a.RequestedAt = rfc3339(requestedAt)
+	a.DecidedAt = rfc3339Ptr(decidedAt)
 	return a, err
 }
 

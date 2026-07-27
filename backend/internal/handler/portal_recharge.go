@@ -8,11 +8,15 @@ package handler
 // (PermitsWrite — '*' or exactly that telco), mirroring the config-draft rule.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/rechargehold"
 )
 
@@ -44,15 +48,21 @@ func (p *Portal) holdScope(w http.ResponseWriter, r *http.Request, telco string)
 	return true
 }
 
-// heldRechargesList — the reviewable queue for one telco.
+// heldRechargesList — the reviewable queue across the operator's scope. A
+// telco-scoped operator sees their telco; a '*' platform admin sees every
+// telco's held queue (op_all policy, 0062). Read through the operator
+// chokepoint (RLS by scope), so no telco parameter is required — the page loads
+// by default instead of hanging on a telco a platform admin cannot supply. Each
+// row carries its own telco_id for the (still per-telco, four-eyes) actions, and
+// the MSISDN is masked at egress like every other money surface.
 func (p *Portal) heldRechargesList(w http.ResponseWriter, r *http.Request) {
-	telco := r.URL.Query().Get("telco")
-	if !p.holdScope(w, r, telco) {
-		return
-	}
-	rows, err := p.Held.ListOpen(r.Context(), telco, 200)
+	sess := sessionFrom(r.Context())
+	rows, err := operatorRead(r.Context(), p, sess.OperatorScope(), func(ctx context.Context, tx pgx.Tx) ([]repo.HeldRow, error) {
+		return repo.HeldRecharge{}.ListOpen(ctx, tx, 200)
+	})
 	if err != nil {
-		p.writeHoldErr(w, err)
+		p.Log.Error("portal held recharges list", "err", err)
+		writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
 		return
 	}
 	out := make([]map[string]any, 0, len(rows))
@@ -68,8 +78,8 @@ func (p *Portal) heldRechargesList(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		out = append(out, map[string]any{
-			"held_id": h.HeldID, "source_event_id": h.SourceEventID,
-			"msisdn_token": h.MSISDNToken, "amount": toMoneyView(m),
+			"held_id": h.HeldID, "source_event_id": h.SourceEventID, "telco_id": h.TelcoID,
+			"msisdn_masked": maskToken(h.MSISDNToken), "amount": toMoneyView(m),
 			"occurred_at": h.OccurredAt, "reason": h.Reason, "requested_by": h.RequestedBy,
 		})
 	}

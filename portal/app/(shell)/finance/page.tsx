@@ -5,6 +5,7 @@
 // Money is displayed exactly as the server formatted it — no client arithmetic.
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtDateTime } from "@/lib/datetime";
 import {
   ApiError,
   JournalEntry,
@@ -110,7 +111,7 @@ export default function FinancePage() {
             <tbody>
               {shown!.map((j) => (
                 <tr key={j.journal_id}>
-                  <td className="muted">{new Date(j.posted_at).toLocaleString()}</td>
+                  <td className="muted">{fmtDateTime(j.posted_at)}</td>
                   <td>{j.event_type}</td>
                   <td className="mono">{j.programme_id}</td>
                   <td className="mono">{j.advance_id || "—"}</td>

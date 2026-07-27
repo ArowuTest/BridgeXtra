@@ -229,15 +229,19 @@ export function financeBreakAction(
 export type HeldRecharge = {
   held_id: string;
   source_event_id: string;
-  msisdn_token: string;
+  telco_id: string; // the network this hold is on (per-row — the queue spans all telcos for a '*' admin)
+  msisdn_masked: string; // server-masked; the full token never reaches the client
   amount: MoneyView; // server-formatted money (amount_minor + currency + display); the UI never computes money
   occurred_at: string;
   reason: string;
   requested_by: string; // the maker (for the Wave A safety-UX: disable Approve for the proposer)
 };
 
-export function heldRecharges(telco: string): Promise<{ held: HeldRecharge[] }> {
-  return request("GET", `/v1/portal/finance/held-recharges?telco=${encodeURIComponent(telco)}`);
+// The queue loads across the operator's scope (a '*' admin sees every telco, a
+// telco-scoped operator sees their own) — no telco parameter, so the page loads
+// by default rather than waiting for a telco the admin cannot supply.
+export function heldRecharges(): Promise<{ held: HeldRecharge[] }> {
+  return request("GET", `/v1/portal/finance/held-recharges`);
 }
 export function heldRechargeRequestRelease(id: string, telco: string, reason: string): Promise<unknown> {
   return request("POST", `/v1/portal/finance/held-recharges/${encodeURIComponent(id)}/request-release`, { telco, reason });

@@ -9,6 +9,7 @@
 // ledger-anchored paydown timeline with running outstanding.
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtDate, fmtDateTime } from "@/lib/datetime";
 import {
   Title,
   Stack,
@@ -98,7 +99,7 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError ? `${e.errorCode}: ${e.message}` : "Request failed. Try again shortly.";
 }
 function day(iso?: string): string {
-  return iso ? iso.slice(0, 10) : "—";
+  return fmtDate(iso);
 }
 
 export default function LoanBookPage() {
@@ -341,7 +342,7 @@ function AdvanceDetail({ d }: { d: LoanBookDetail }) {
   const events: IndexedEvent[] = d.events.map((e, i) => ({ ...e, _i: i }));
   const eventCols: Column<IndexedEvent>[] = [
     { key: "event", header: "Event", render: (e) => e.event_type },
-    { key: "at", header: "Posted", render: (e) => new Date(e.posted_at).toLocaleString() },
+    { key: "at", header: "Posted", render: (e) => fmtDateTime(e.posted_at) },
     { key: "move", header: "Receivable Δ", align: "right", render: (e) => e.receivable_movement.display },
     { key: "running", header: "Running outstanding", align: "right", render: (e) => e.running_outstanding.display },
   ];

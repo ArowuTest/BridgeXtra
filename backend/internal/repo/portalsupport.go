@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -71,24 +72,24 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 	if !ok {
 		return sub, nil, nil, nil, nil, fmt.Errorf("subscriber: %w", ErrNotFound)
 	}
+	var effectiveFrom time.Time
 	err := pool.QueryRow(ctx, `
-		SELECT subscriber_account_id, telco_id, msisdn_token, status,
-		       to_char(effective_from,'YYYY-MM-DD"T"HH24:MI:SS.USOF')
+		SELECT subscriber_account_id, telco_id, msisdn_token, status, effective_from
 		FROM subscriber_accounts
 		WHERE msisdn_token = $1 AND effective_to IS NULL
 		  AND ($2 = '' OR telco_id = $2)`, msisdnToken, telco).
-		Scan(&sub.SubscriberAccountID, &sub.TelcoID, &sub.MSISDNToken, &sub.Status, &sub.EffectiveFrom)
+		Scan(&sub.SubscriberAccountID, &sub.TelcoID, &sub.MSISDNToken, &sub.Status, &effectiveFrom)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return sub, nil, nil, nil, nil, fmt.Errorf("subscriber: %w", ErrNotFound)
 	}
 	if err != nil {
 		return sub, nil, nil, nil, nil, err
 	}
+	sub.EffectiveFrom = rfc3339(effectiveFrom)
 
 	advRows, err := pool.Query(ctx, `
 		SELECT advance_id, programme_id, state, face_value_minor, outstanding_minor, currency,
-		       to_char(accepted_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-		       COALESCE(to_char(closed_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')
+		       accepted_at, closed_at
 		FROM advances WHERE subscriber_account_id = $1
 		ORDER BY accepted_at DESC LIMIT 100`, sub.SubscriberAccountID)
 	if err != nil {
@@ -100,10 +101,14 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 		var a TimelineAdvance
 		var face, out int64
 		var cur string
+		var acceptedAt time.Time
+		var closedAt *time.Time
 		if err := advRows.Scan(&a.AdvanceID, &a.ProgrammeID, &a.State, &face, &out, &cur,
-			&a.AcceptedAt, &a.ClosedAt); err != nil {
+			&acceptedAt, &closedAt); err != nil {
 			return sub, nil, nil, nil, nil, err
 		}
+		a.AcceptedAt = rfc3339(acceptedAt)
+		a.ClosedAt = rfc3339Ptr(closedAt)
 		if a.FaceValue, err = scanMoney(face, cur); err != nil {
 			return sub, nil, nil, nil, nil, err
 		}
@@ -117,9 +122,7 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 	}
 
 	noteRows, err := pool.Query(ctx, `
-		SELECT kind, state,
-		       to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-		       COALESCE(to_char(sent_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')
+		SELECT kind, state, created_at, sent_at
 		FROM notifications WHERE subscriber_account_id = $1
 		ORDER BY created_at DESC LIMIT 100`, sub.SubscriberAccountID)
 	if err != nil {
@@ -129,9 +132,13 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 	var notes []DemoNotificationView
 	for noteRows.Next() {
 		var n DemoNotificationView
-		if err := noteRows.Scan(&n.Kind, &n.State, &n.CreatedAt, &n.SentAt); err != nil {
+		var nCreated time.Time
+		var nSent *time.Time
+		if err := noteRows.Scan(&n.Kind, &n.State, &nCreated, &nSent); err != nil {
 			return sub, advances, nil, nil, nil, err
 		}
+		n.CreatedAt = rfc3339(nCreated)
+		n.SentAt = rfc3339Ptr(nSent)
 		notes = append(notes, n)
 	}
 	if err := noteRows.Err(); err != nil {
@@ -140,8 +147,7 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 
 	cmpRows, err := pool.Query(ctx, `
 		SELECT complaint_id, COALESCE(advance_id,''), channel, category, narrative, state,
-		       COALESCE(resolution,''),
-		       to_char(opened_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')
+		       COALESCE(resolution,''), opened_at
 		FROM complaints WHERE subscriber_account_id = $1
 		ORDER BY opened_at DESC LIMIT 100`, sub.SubscriberAccountID)
 	if err != nil {
@@ -151,10 +157,12 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 	var complaints []TimelineComplaint
 	for cmpRows.Next() {
 		var c TimelineComplaint
+		var openedAt time.Time
 		if err := cmpRows.Scan(&c.ComplaintID, &c.AdvanceID, &c.Channel, &c.Category,
-			&c.Narrative, &c.State, &c.Resolution, &c.OpenedAt); err != nil {
+			&c.Narrative, &c.State, &c.Resolution, &openedAt); err != nil {
 			return sub, advances, notes, nil, nil, err
 		}
+		c.OpenedAt = rfc3339(openedAt)
 		complaints = append(complaints, c)
 	}
 	if err := cmpRows.Err(); err != nil {
@@ -162,8 +170,7 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 	}
 
 	saRows, err := pool.Query(ctx, `
-		SELECT action_id, from_status, to_status, reason, state,
-		       to_char(requested_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')
+		SELECT action_id, from_status, to_status, reason, state, requested_at
 		FROM subscriber_status_actions WHERE subscriber_account_id = $1
 		ORDER BY requested_at DESC LIMIT 100`, sub.SubscriberAccountID)
 	if err != nil {
@@ -173,9 +180,11 @@ func SubscriberTimeline(ctx context.Context, pool Querier, scope OperatorScope, 
 	var actions []TimelineStatusAction
 	for saRows.Next() {
 		var a TimelineStatusAction
-		if err := saRows.Scan(&a.ActionID, &a.FromStatus, &a.ToStatus, &a.Reason, &a.State, &a.RequestedAt); err != nil {
+		var requestedAt time.Time
+		if err := saRows.Scan(&a.ActionID, &a.FromStatus, &a.ToStatus, &a.Reason, &a.State, &requestedAt); err != nil {
 			return sub, advances, notes, complaints, nil, err
 		}
+		a.RequestedAt = rfc3339(requestedAt)
 		actions = append(actions, a)
 	}
 	return sub, advances, notes, complaints, actions, saRows.Err()
@@ -198,12 +207,14 @@ type ComplaintRow struct {
 
 const complaintCols = `c.complaint_id, c.telco_id, COALESCE(s.msisdn_token,''), COALESCE(c.advance_id,''),
 	c.channel, c.category, c.narrative, c.state, COALESCE(c.resolution,''),
-	to_char(c.opened_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')`
+	c.opened_at`
 
 func scanComplaintRow(row pgx.Row) (ComplaintRow, error) {
 	var c ComplaintRow
+	var openedAt time.Time
 	err := row.Scan(&c.ComplaintID, &c.TelcoID, &c.MSISDNToken, &c.AdvanceID,
-		&c.Channel, &c.Category, &c.Narrative, &c.State, &c.Resolution, &c.OpenedAt)
+		&c.Channel, &c.Category, &c.Narrative, &c.State, &c.Resolution, &openedAt)
+	c.OpenedAt = rfc3339(openedAt)
 	return c, err
 }
 

@@ -6,6 +6,7 @@
 // arithmetic — line amounts are server-formatted.
 
 import { useCallback, useEffect, useState } from "react";
+import { fmtDate } from "@/lib/datetime";
 import {
   ApiError,
   SettlementLine,
@@ -61,10 +62,6 @@ export default function SettlementsPage() {
     } finally {
       setBusy(false);
     }
-  }
-
-  function fmtDate(s: string) {
-    return new Date(s).toLocaleDateString();
   }
 
   return (

@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -42,12 +43,14 @@ type JournalDetail struct {
 }
 
 const journalCols = `journal_id, event_type, telco_id, programme_id, COALESCE(advance_id,''),
-	correlation_id, to_char(accounting_date,'YYYY-MM-DD'), to_char(posted_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')`
+	correlation_id, to_char(accounting_date,'YYYY-MM-DD'), posted_at`
 
 func scanJournalHeader(row pgx.Row) (JournalHeader, error) {
 	var h JournalHeader
+	var postedAt time.Time
 	err := row.Scan(&h.JournalID, &h.EventType, &h.TelcoID, &h.ProgrammeID, &h.AdvanceID,
-		&h.CorrelationID, &h.AccountingDate, &h.PostedAt)
+		&h.CorrelationID, &h.AccountingDate, &postedAt)
+	h.PostedAt = rfc3339(postedAt)
 	return h, err
 }
 
@@ -148,12 +151,14 @@ type BreakItem struct {
 
 const breakCols = `recon_item_id, run_id, telco_id, item_type, status,
 	COALESCE(platform_ref,''), COALESCE(telco_ref,''), COALESCE(assigned_to,''),
-	to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF')`
+	created_at`
 
 func scanBreak(row pgx.Row) (BreakItem, error) {
 	var b BreakItem
+	var createdAt time.Time
 	err := row.Scan(&b.ReconItemID, &b.RunID, &b.TelcoID, &b.ItemType, &b.Status,
-		&b.PlatformRef, &b.TelcoRef, &b.AssignedTo, &b.CreatedAt)
+		&b.PlatformRef, &b.TelcoRef, &b.AssignedTo, &createdAt)
+	b.CreatedAt = rfc3339(createdAt)
 	return b, err
 }
 
@@ -229,15 +234,18 @@ type SettlementDetail struct {
 }
 
 const settlementCols = `statement_id, telco_id, programme_id,
-	to_char(period_start,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-	to_char(period_end,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),
-	state, currency, terms_version_id,
-	COALESCE(to_char(finalised_at,'YYYY-MM-DD"T"HH24:MI:SS.USOF'),'')`
+	period_start, period_end,
+	state, currency, terms_version_id, finalised_at`
 
 func scanSettlement(row pgx.Row) (SettlementSummary, error) {
 	var s SettlementSummary
-	err := row.Scan(&s.StatementID, &s.TelcoID, &s.ProgrammeID, &s.PeriodStart, &s.PeriodEnd,
-		&s.State, &s.Currency, &s.TermsVersionID, &s.FinalisedAt)
+	var periodStart, periodEnd time.Time
+	var finalisedAt *time.Time
+	err := row.Scan(&s.StatementID, &s.TelcoID, &s.ProgrammeID, &periodStart, &periodEnd,
+		&s.State, &s.Currency, &s.TermsVersionID, &finalisedAt)
+	s.PeriodStart = rfc3339(periodStart)
+	s.PeriodEnd = rfc3339(periodEnd)
+	s.FinalisedAt = rfc3339Ptr(finalisedAt)
 	return s, err
 }
 
