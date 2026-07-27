@@ -1,6 +1,10 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import { ColorSchemeScript, mantineHtmlProps } from "@mantine/core";
+import "@mantine/core/styles.css";
+import "@mantine/notifications/styles.css";
 import "./globals.css";
+import Providers from "./providers";
 
 export const metadata: Metadata = {
   title: "BridgeXtra Portal",
@@ -16,8 +20,15 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   // that matters.
   const nonce = (await headers()).get("x-nonce") ?? undefined;
   return (
-    <html lang="en">
-      <body data-csp-nonce={nonce}>{children}</body>
+    <html lang="en" {...mantineHtmlProps}>
+      <head>
+        {/* Forced dark, but the script still carries the nonce so it satisfies the
+            strict-dynamic script-src CSP (VR-56-F1). */}
+        <ColorSchemeScript forceColorScheme="dark" nonce={nonce} />
+      </head>
+      <body data-csp-nonce={nonce}>
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

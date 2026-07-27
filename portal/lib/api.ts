@@ -206,6 +206,31 @@ export function financeBreakAction(
   return request("POST", `/v1/portal/finance/breaks/${id}/action`, { action, reason });
 }
 
+// --- held-recharge release queue (four-eyes; Phase 1 S2.3b backend) ------------
+export type HeldRecharge = {
+  held_id: string;
+  source_event_id: string;
+  msisdn_token: string;
+  amount_minor: number; // server-authoritative minor units; the UI never does money math
+  currency: string;
+  occurred_at: string;
+  reason: string;
+  requested_by: string; // the maker (for the Wave A safety-UX: disable Approve for the proposer)
+};
+
+export function heldRecharges(telco: string): Promise<{ held: HeldRecharge[] }> {
+  return request("GET", `/v1/portal/finance/held-recharges?telco=${encodeURIComponent(telco)}`);
+}
+export function heldRechargeRequestRelease(id: string, telco: string, reason: string): Promise<unknown> {
+  return request("POST", `/v1/portal/finance/held-recharges/${encodeURIComponent(id)}/request-release`, { telco, reason });
+}
+export function heldRechargeApproveRelease(id: string, telco: string, reason: string): Promise<unknown> {
+  return request("POST", `/v1/portal/finance/held-recharges/${encodeURIComponent(id)}/approve-release`, { telco, reason });
+}
+export function heldRechargeReject(id: string, telco: string, reason: string): Promise<unknown> {
+  return request("POST", `/v1/portal/finance/held-recharges/${encodeURIComponent(id)}/reject`, { telco, reason });
+}
+
 export type SettlementStatement = {
   statement_id: string;
   telco_id: string;

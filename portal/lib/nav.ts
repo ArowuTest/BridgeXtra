@@ -17,6 +17,7 @@ export const NAV: NavItem[] = [
   { href: "/finance", label: "Ledger", roles: ["ADMIN", "FINANCE"] },
   { href: "/breaks", label: "Breaks", roles: ["ADMIN", "FINANCE"] },
   { href: "/settlements", label: "Settlements", roles: ["ADMIN", "FINANCE"] },
+  { href: "/held-recharges", label: "Held recharges", roles: ["ADMIN", "FINANCE"] },
   { href: "/ops", label: "Ops", roles: ["ADMIN", "OPS", "FINANCE"] },
   { href: "/support", label: "Support", roles: ["ADMIN", "SUPPORT", "OPS", "RISK", "FINANCE"] },
 ];
