@@ -1,0 +1,105 @@
+# BridgeXtra local dev stack — one command to a browsable, seeded portal.
+#
+#   make dev          # bring the whole stack up (postgres -> seed -> api -> portal)
+#   make dev-down     # stop it (keeps the DB volume)
+#   make dev-clean    # stop it and wipe the DB + caches (fresh next time)
+#   make dev-seed     # re-run the seeder against the running DB
+#
+# It mirrors the proven portal-e2e CI job (Postgres -> migrate -> seed operators ->
+# api -> portal), plus the seed-dev engine drive that produces a varied loan
+# population. Everything runs from stock images with the repo bind-mounted — no
+# Dockerfiles to maintain. SYNTHETIC-ONLY: the seeder is fenced to the SIM_NG telco
+# and refuses any real DB (VerifySyntheticOnly + the simseed_loop build tag).
+#
+# Portal:   http://localhost:3090   (sign in with a seeded key below)
+# API:      http://localhost:8090/healthz
+# Postgres: localhost:5434
+#
+# Seeded dev logins (synthetic, NOT secrets — same idea as the CI roleKeys):
+#   ADMIN           e2e-key-admin-00000001
+#   RISK            e2e-key-risk-000000001
+#   FINANCE         e2e-key-fin-0000000001
+#   OPS             e2e-key-ops-0000000001
+#   SUPPORT         e2e-key-sup-0000000001
+#   FINANCE (scope telco:SIM_NG)   e2e-key-finscoped-0001
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: devlocal
+      POSTGRES_DB: telco_credit
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - tcp-dev-pgdata:/var/lib/postgresql/data
+
+  # One-shot: migrate (seeds all governed config) + operator logins + drive the real
+  # engine to a varied loan population. Exits when done; api/portal depend on it.
+  seed:
+    image: golang:1.25
+    working_dir: /src
+    environment:
+      TCP_SEED_ALLOW: "1"
+      TCP_ADMIN_DSN: postgres://postgres:devlocal@postgres:5432/telco_credit
+      TCP_SIMSEED_DSN: postgres://tcp_app:devlocal_app@postgres:5432/telco_credit
+      TCP_SEED_PROGRAMME: prg_sim_airtime01
+      # Dev logins (synthetic, not secrets) — one JSON list, mirrors CI E2E_OPERATORS.
+      TCP_SEED_OPERATORS: '[{"actor":"e2e_admin","key":"e2e-key-admin-00000001","role":"ADMIN","scope":"*"},{"actor":"e2e_risk","key":"e2e-key-risk-000000001","role":"RISK","scope":"*"},{"actor":"e2e_finance","key":"e2e-key-fin-0000000001","role":"FINANCE","scope":"*"},{"actor":"e2e_ops","key":"e2e-key-ops-0000000001","role":"OPS","scope":"*"},{"actor":"e2e_support","key":"e2e-key-sup-0000000001","role":"SUPPORT","scope":"*"},{"actor":"e2e_fin_scoped","key":"e2e-key-finscoped-0001","role":"FINANCE","scope":"telco:SIM_NG"}]'
+    command: ["go", "run", "-tags", "simseed_loop", "./backend/cmd/seed-dev"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/src
+      - tcp-gomodcache:/go/pkg/mod
+      - tcp-gobuildcache:/root/.cache/go-build
+
+  api:
+    image: golang:1.25
+    working_dir: /src
+    environment:
+      TCP_ADMIN_DSN: postgres://postgres:devlocal@postgres:5432/telco_credit
+      TCP_APP_DSN: postgres://tcp_app:devlocal_app@postgres:5432/telco_credit
+      TCP_WORKER_DSN: postgres://tcp_worker:devlocal_worker@postgres:5432/telco_credit
+      TCP_OPERATOR_DSN: postgres://tcp_operator:devlocal_operator@postgres:5432/telco_credit
+      TCP_API_ADDR: ":8090"
+      # Dev containers talk over the private compose network — do not block it.
+      TCP_EGRESS_BLOCK_PRIVATE: "false"
+    command: ["go", "run", "./backend/cmd/api"]
+    ports:
+      - "8090:8090"
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    volumes:
+      - .:/src
+      - tcp-gomodcache:/go/pkg/mod
+      - tcp-gobuildcache:/root/.cache/go-build
+
+  portal:
+    image: node:22
+    working_dir: /src/portal
+    environment:
+      BX_API_ORIGIN: http://api:8090
+    # Install deps into the node_modules volume once, then run the Next dev server.
+    command: ["sh", "-c", "test -d node_modules/next || npm ci; npm run dev"]
+    ports:
+      - "3090:3090"
+    depends_on:
+      api:
+        condition: service_started
+    volumes:
+      - .:/src
+      - tcp-dev-portal-nodemodules:/src/portal/node_modules
+
+volumes:
+  tcp-dev-pgdata:
+  tcp-gomodcache:
+  tcp-gobuildcache:
+  tcp-dev-portal-nodemodules:
