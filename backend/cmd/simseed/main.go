@@ -51,6 +51,10 @@ func main() {
 	subscribers := flag.Int("subscribers", 50, "number of synthetic subscribers to seed")
 	recoveryDay := flag.String("recovery-day", "", "if set (YYYY-MM-DD), also seed a clean RECOVERY day (wh: events + matching EOD feed) for this Lagos business day")
 	recoveryCount := flag.Int("recovery-count", 0, "cohort members that recovered on -recovery-day (0 => all seeded subscribers)")
+	loop := flag.Bool("loop", false, "varied-user loop mode: drive a mixed cohort through the REAL usecases (feature->score->originate->[recover]). Requires a build with -tags simseed_loop.")
+	businessDay := flag.String("business-day", "", "loop mode: the Lagos business day (YYYY-MM-DD) to run — use a recent day so profiles score FRESH")
+	programme := flag.String("programme", "prg_sim_airtime01", "loop mode: the programme to originate against")
+	repeat := flag.Int("repeat", 1, "loop mode: members per profile")
 	flag.Parse()
 
 	if !seedRe.MatchString(*seed) {
@@ -58,6 +62,14 @@ func main() {
 	}
 	if *recoveryDay != "" && !dateRe.MatchString(*recoveryDay) {
 		log.Fatalf("simseed: -recovery-day must be YYYY-MM-DD")
+	}
+	if *loop {
+		if !dateRe.MatchString(*businessDay) {
+			log.Fatal("simseed: -loop requires -business-day YYYY-MM-DD")
+		}
+		if !seedRe.MatchString(*programme) {
+			log.Fatalf("simseed: -programme must match %s", seedRe.String())
+		}
 	}
 	recCount := *recoveryCount
 	if recCount == 0 {
@@ -78,6 +90,14 @@ func main() {
 
 	if err := simseed.VerifySyntheticOnly(ctx, pool); err != nil {
 		log.Fatalf("%v", err)
+	}
+
+	// Loop mode is a distinct entrypoint (build-tag-split loopEntry: the real driver
+	// under -tags simseed_loop, a fatal stub otherwise — the synthetic always-CONFIRMED
+	// adapter is fenced out of normal builds).
+	if *loop {
+		loopEntry(ctx, pool, *seed, *businessDay, *programme, *repeat)
+		return
 	}
 
 	created, err := simseed.SeedCohort(ctx, pool, simseed.CohortPlan{Seed: *seed, Count: *subscribers})
