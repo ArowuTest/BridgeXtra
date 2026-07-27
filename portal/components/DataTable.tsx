@@ -22,6 +22,7 @@ export function DataTable<T>({
   loading,
   error,
   empty,
+  onRowClick,
 }: {
   columns: Column<T>[];
   rows: T[] | null;
@@ -29,6 +30,7 @@ export function DataTable<T>({
   loading?: boolean;
   error?: string | null;
   empty?: string;
+  onRowClick?: (row: T) => void; // Wave B: row → drill-down (decoration; data stays server-authorised)
 }) {
   if (error) {
     return (
@@ -64,7 +66,11 @@ export function DataTable<T>({
       </Table.Thead>
       <Table.Tbody>
         {rows.map((row) => (
-          <Table.Tr key={rowKey(row)}>
+          <Table.Tr
+            key={rowKey(row)}
+            onClick={onRowClick ? () => onRowClick(row) : undefined}
+            style={onRowClick ? { cursor: "pointer" } : undefined}
+          >
             {columns.map((c) => (
               <Table.Td key={c.key} ta={c.align}>
                 {c.render(row)}

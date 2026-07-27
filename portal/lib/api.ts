@@ -249,6 +249,79 @@ export function heldRechargeReject(id: string, telco: string, reason: string): P
   return request("POST", `/v1/portal/finance/held-recharges/${encodeURIComponent(id)}/reject`, { telco, reason });
 }
 
+// --- Wave B.1 loan book (ops read-model; scope + aggregates server-enforced) ----
+
+export type LoanBookRow = {
+  advance_id: string;
+  telco_id: string;
+  programme_id: string;
+  state: string;
+  delinquency_bucket: string; // "" when unclassified
+  fee_recognition: string;
+  msisdn_masked: string; // server-masked; the full token never reaches the client
+  face_value: MoneyView;
+  fee: MoneyView;
+  disbursed: MoneyView;
+  outstanding: MoneyView;
+  recovered: MoneyView; // net of reversals, server-computed
+  accepted_at: string;
+  bucket_as_of?: string; // when the delinquency bucket was last classified
+  activated_at?: string;
+  closed_at?: string;
+};
+
+export type LoanBookSummary = {
+  total_count: number;
+  by_status: Record<string, number>;
+  by_bucket: Record<string, number>;
+  disbursed: MoneyView;
+  recovered: MoneyView;
+  open_outstanding: MoneyView; // Σ outstanding over ACTIVE/PARTIALLY_RECOVERED (book side of INV-016)
+  ledger_receivable: MoneyView; // ledger SUBSCRIBER_RECEIVABLE — must equal open_outstanding
+  reconciled: boolean;
+};
+
+export type LoanBookFilters = {
+  state?: string;
+  bucket?: string;
+  programme?: string;
+  telco?: string;
+  msisdn_token?: string;
+  from?: string; // YYYY-MM-DD (activated_at >=)
+  to?: string; // YYYY-MM-DD (inclusive day)
+  cursor?: string; // keyset: last advance_id of the previous page
+  limit?: number;
+};
+
+export function loanBook(
+  f: LoanBookFilters,
+): Promise<{ advances: LoanBookRow[]; summary: LoanBookSummary; next_cursor: string }> {
+  const q = new URLSearchParams();
+  if (f.state) q.set("state", f.state);
+  if (f.bucket) q.set("bucket", f.bucket);
+  if (f.programme) q.set("programme", f.programme);
+  if (f.telco) q.set("telco", f.telco);
+  if (f.msisdn_token) q.set("msisdn_token", f.msisdn_token);
+  if (f.from) q.set("from", f.from);
+  if (f.to) q.set("to", f.to);
+  if (f.cursor) q.set("cursor", f.cursor);
+  if (f.limit) q.set("limit", String(f.limit));
+  return request("GET", `/v1/portal/ops/advances?${q}`);
+}
+
+export type LoanBookEvent = {
+  event_type: string;
+  posted_at: string;
+  receivable_movement: MoneyView; // signed: + at issue, − on recovery
+  running_outstanding: MoneyView; // ledger-anchored running balance after this event
+};
+
+export type LoanBookDetail = LoanBookRow & { events: LoanBookEvent[] };
+
+export function loanBookAdvance(id: string): Promise<LoanBookDetail> {
+  return request("GET", `/v1/portal/ops/advances/${encodeURIComponent(id)}`);
+}
+
 // --- operator provisioning (ADMIN-only, four-eyes create; portal.go:175-180) ----
 export type Operator = { actor: string; role: string; scope: string; status: string };
 export type OperatorRequest = {
