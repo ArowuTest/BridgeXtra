@@ -38,40 +38,48 @@ func advanceCount(t *testing.T, db *testutil.DB, where string, args ...any) int 
 	return n
 }
 
-// Slice 1: the loop drives one good-payer through the REAL usecases to an ACTIVE
-// advance, and a replay books no new money.
-func TestLoop_Slice1_GoodPayerToActive(t *testing.T) {
-	db := testutil.MustSetup(t, "simseed_loop_s1")
+// The loop drives the cohort through the REAL usecases: the good-payer reaches an
+// ACTIVE advance (real settlement via ResolveOutcome), every borrower originates, and
+// a replay books no new money.
+func TestLoop_GoodPayerActiveAndReplay(t *testing.T) {
+	db := testutil.MustSetup(t, "simseed_loop_replay")
 	ctx := context.Background()
-	day := recentBusinessDay()
-	plan := LoopPlan{Seed: "loop-test", BusinessDay: day, ProgrammeID: "prg_sim_airtime01", Repeat: 1}
+	plan := LoopPlan{Seed: "loop-replay", BusinessDay: recentBusinessDay(), ProgrammeID: "prg_sim_airtime01", Repeat: 1}
+
+	borrowers := 0
+	for _, p := range profiles {
+		if p.originates {
+			borrowers++
+		}
+	}
 
 	res, err := RunLoop(ctx, db.App, plan)
 	if err != nil {
 		t.Fatalf("RunLoop: %v", err)
 	}
-	if res.Subscribers != 1 || res.Advances != 1 || res.Declined != 0 {
-		t.Fatalf("want 1 subscriber / 1 advance / 0 declined, got %+v", res)
+	if res.Subscribers != len(profiles) || res.Advances != borrowers {
+		t.Fatalf("want %d subscribers / %d advances, got %+v", len(profiles), borrowers, res)
 	}
-	if len(res.Members) != 1 || res.Members[0].State != "ACTIVE" {
-		t.Fatalf("good-payer must reach ACTIVE, got %+v", res.Members)
+	var goodState string
+	for _, m := range res.Members {
+		if m.Profile == "good-payer" {
+			goodState = m.State
+		}
 	}
-	// Real settlement: the advance is genuinely ACTIVE in the DB (via ResolveOutcome).
-	if got := advanceCount(t, db, "WHERE state='ACTIVE'"); got != 1 {
-		t.Fatalf("want 1 ACTIVE advance in DB, got %d", got)
+	if goodState != "ACTIVE" {
+		t.Fatalf("good-payer must reach ACTIVE (real settlement), got %q", goodState)
+	}
+	if got := advanceCount(t, db, "WHERE state='ACTIVE'"); got != borrowers {
+		t.Fatalf("want %d ACTIVE advances in DB, got %d", borrowers, got)
 	}
 
-	// Replay: a second identical run reuses the booked advance (GetByIdemKey) and
+	// Replay: a second identical run reuses the booked advances (GetByIdemKey) and
 	// books NO new money.
-	res2, err := RunLoop(ctx, db.App, plan)
-	if err != nil {
+	if _, err := RunLoop(ctx, db.App, plan); err != nil {
 		t.Fatalf("RunLoop replay: %v", err)
 	}
-	if res2.Advances != 1 {
-		t.Fatalf("replay must report the same one advance, got %+v", res2)
-	}
-	if got := advanceCount(t, db, ""); got != 1 {
-		t.Fatalf("replay must not book a new advance — want 1 total, got %d", got)
+	if got := advanceCount(t, db, ""); got != borrowers {
+		t.Fatalf("replay must not book new advances — want %d total, got %d", borrowers, got)
 	}
 }
 
