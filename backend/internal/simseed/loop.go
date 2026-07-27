@@ -30,6 +30,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/featureingest"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/origination"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/scoringrun"
 )
 
@@ -55,6 +56,7 @@ type LoopResult struct {
 	Subscribers int
 	Advances    int
 	Declined    int
+	Recovered   int // borrowers who recovered on the business day (Slice 3)
 	Members     []MemberOutcome
 }
 
@@ -119,6 +121,10 @@ func RunLoop(ctx context.Context, appPool *pgxpool.Pool, plan LoopPlan) (LoopRes
 	orig := origination.New(appPool, appCfg, led, adapter, log)
 	fi := featureingest.New(appPool, appCfg, log)
 	sr := scoringrun.New(appPool, appCfg, log)
+	rec := recovery.New(appPool, appCfg, led, log)
+	// Recovery events occur mid-day (Lagos), whole-second, so both sides bucket into
+	// the same business day the EOD feed reports (recon parity, design §4.2).
+	recOccurredAt := time.Date(d.Year(), d.Month(), d.Day(), 12, 0, 0, 0, lagos).UTC()
 
 	// One feature file for the whole cohort; map each borrower's telco outcome.
 	file := fFile{TelcoID: SyntheticTelco, AsOf: asOf, Rows: make([]fRow, 0, count)}
@@ -191,9 +197,48 @@ func RunLoop(ctx context.Context, appPool *pgxpool.Pool, plan LoopPlan) (LoopRes
 		adapter.ByAdv[adv.AdvanceID] = p.telcoOutcome
 		mo.AdvanceID, mo.State = adv.AdvanceID, string(adv.State)
 		res.Advances++
+
+		// Slice 3: recover recoverBps of the booked face through the REAL recovery
+		// usecase (wh:loop- webhook channel; amount from the immutable FaceValue), and
+		// emit the matching EOD feed row (the telco SOURCE the loop stands in for) so
+		// the RECOVERY recon reconciles MATCHED. A full close creates the S3-C2
+		// re-origination hold; the recon (run by the test) clears it.
+		if p.recoverBps > 0 {
+			recMinor := adv.FaceValue.Amount() * p.recoverBps / 10000
+			amt, err := entity.NewMoney(recMinor, entity.Currency("NGN"))
+			if err != nil {
+				return res, err
+			}
+			src := "wh:loop-" + stableID("looprecev", loopSeed, fmt.Sprintf("%s|%06d", plan.BusinessDay, i))
+			if _, err := rec.Ingest(tctx, recovery.IngestCmd{
+				SourceEventID: src, MSISDNToken: token, Amount: amt,
+				OccurredAt: recOccurredAt, CorrelationID: stableID("corr", loopSeed, "rec|"+src),
+			}); err != nil {
+				return res, fmt.Errorf("simseed loop: recovery.Ingest %s: %w", token, err)
+			}
+			if err := writeLoopFeedRow(tctx, appPool, plan.BusinessDay, token, recMinor); err != nil {
+				return res, err
+			}
+			res.Recovered++
+		}
 		res.Members = append(res.Members, mo)
 	}
 	return res, nil
+}
+
+// writeLoopFeedRow emits the EOD recovery-feed row that MATCHES a loop recovery — the
+// telco SOURCE the loop stands in for. This is the ONLY direct table write besides
+// the cohort; the feed mints no money (the recovery itself went through
+// recovery.Ingest). RLS-scoped to SIM_NG; idempotent on the natural key.
+func writeLoopFeedRow(ctx context.Context, pool *pgxpool.Pool, businessDate, token string, minor int64) error {
+	return repo.WithTenantTx(ctx, pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO recovery_eod_feed (telco_id, business_date, msisdn_token, recovery_deducted_minor, currency)
+			VALUES ($1, $2::date, $3, $4, 'NGN')
+			ON CONFLICT (telco_id, business_date, msisdn_token) DO NOTHING`,
+			SyntheticTelco, businessDate, token, minor)
+		return err
+	})
 }
 
 // getAdvanceByIdem reads a booked advance by its deterministic idem key (replay

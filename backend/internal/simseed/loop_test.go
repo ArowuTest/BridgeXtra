@@ -66,11 +66,15 @@ func TestLoop_GoodPayerActiveAndReplay(t *testing.T) {
 			goodState = m.State
 		}
 	}
+	// The good-payer reaches ACTIVE at confirm (real settlement via ResolveOutcome) —
+	// captured in res.Members before Slice-3 recovery later closes the advance.
 	if goodState != "ACTIVE" {
 		t.Fatalf("good-payer must reach ACTIVE (real settlement), got %q", goodState)
 	}
-	if got := advanceCount(t, db, "WHERE state='ACTIVE'"); got != borrowers {
-		t.Fatalf("want %d ACTIVE advances in DB, got %d", borrowers, got)
+	// Every borrower has a booked advance (post-recovery some are CLOSED/partial — that
+	// is Slice 3's concern; here we prove origination + replay-idempotency on the count).
+	if got := advanceCount(t, db, ""); got != borrowers {
+		t.Fatalf("want %d advances booked, got %d", borrowers, got)
 	}
 
 	// Replay: a second identical run reuses the booked advances (GetByIdemKey) and

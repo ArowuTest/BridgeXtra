@@ -48,6 +48,11 @@ type profile struct {
 	expectEligible bool   // decision_doc->>'eligible'
 	expectMaxFace  int64  // decision_snapshots.max_face_value_minor (0 for ineligible)
 	expectReason   string // a reason code that must appear in reason_codes ("" = don't assert)
+
+	// recoverBps is how much of the booked FaceValue this profile recovers on the
+	// business day (Slice 3): 10000 = full (advance CLOSED + re-origination hold),
+	// 5000 = half (PARTIALLY_RECOVERED, no hold), 0 = none (stays ACTIVE — a defaulter).
+	recoverBps int64
 }
 
 func flat(v int64, n int) []int64 {
@@ -62,11 +67,11 @@ func flat(v int64, n int) []int64 {
 // single spike (200000 then flat 3000) so the anti-gaming WINSORISATION is exercised:
 // the raw sum would score a higher tier, but the winsorised total caps it.
 var profiles = []profile{
-	{name: "good-payer", tenureDays: 720, activity30: 30, active90: 90, weekly: flat(40000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 50000, expectReason: ""},
-	{name: "varied-limit", tenureDays: 365, activity30: 30, active90: 90, weekly: flat(10000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 10000, expectReason: ""},
-	{name: "thin-file", tenureDays: 90, activity30: 30, active90: 8, weekly: flat(5000, 13), qualityFlags: []string{"SHORT_HISTORY"}, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 5000, expectReason: "COLD_START_THIN_FILE"},
-	{name: "defaulter", tenureDays: 200, activity30: 30, active90: 90, weekly: append([]int64{200000}, flat(3000, 12)...), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 5000, expectReason: "SPIKE_PATTERN_DETECTED"},
-	{name: "declined", tenureDays: 400, activity30: 30, active90: 90, weekly: flat(20000, 13), qualityFlags: []string{"MISSING_FIELDS"}, originates: false, expectEligible: false, expectMaxFace: 0, expectReason: "MISSING_DATA_REJECTED"},
+	{name: "good-payer", tenureDays: 720, activity30: 30, active90: 90, weekly: flat(40000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 50000, expectReason: "", recoverBps: 10000},
+	{name: "varied-limit", tenureDays: 365, activity30: 30, active90: 90, weekly: flat(10000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 10000, expectReason: "", recoverBps: 5000},
+	{name: "thin-file", tenureDays: 90, activity30: 30, active90: 8, weekly: flat(5000, 13), qualityFlags: []string{"SHORT_HISTORY"}, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 5000, expectReason: "COLD_START_THIN_FILE", recoverBps: 10000},
+	{name: "defaulter", tenureDays: 200, activity30: 30, active90: 90, weekly: append([]int64{200000}, flat(3000, 12)...), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 5000, expectReason: "SPIKE_PATTERN_DETECTED", recoverBps: 0},
+	{name: "declined", tenureDays: 400, activity30: 30, active90: 90, weekly: flat(20000, 13), qualityFlags: []string{"MISSING_FIELDS"}, originates: false, expectEligible: false, expectMaxFace: 0, expectReason: "MISSING_DATA_REJECTED", recoverBps: 0},
 }
 
 // toRow renders a profile as a featureingest-valid row: exactly 13 weekly values,
