@@ -188,9 +188,19 @@ export function financeBreaks(): Promise<{ breaks: ReconBreak[] }> {
   return request("GET", "/v1/portal/finance/breaks");
 }
 
+// Break resolution is a two-actor decision (R-P0-6 Slice E1): PROPOSE_RESOLVE
+// (maker) then APPROVE_RESOLVE (a DISTINCT checker). Single-actor RESOLVE was
+// retired — the backend rejects it. ESCALATE/NOTE are single-actor.
+export type BreakAction =
+  | "ASSIGN"
+  | "ESCALATE"
+  | "NOTE"
+  | "PROPOSE_RESOLVE"
+  | "APPROVE_RESOLVE";
+
 export function financeBreakAction(
   id: string,
-  action: "ASSIGN" | "RESOLVE" | "ESCALATE" | "NOTE",
+  action: BreakAction,
   reason: string,
 ): Promise<unknown> {
   return request("POST", `/v1/portal/finance/breaks/${id}/action`, { action, reason });

@@ -5,7 +5,15 @@
 // breaks are never edited away). Authorization is server-side.
 
 import { useCallback, useEffect, useState } from "react";
-import { ApiError, ReconBreak, financeBreakAction, financeBreaks } from "@/lib/api";
+import { ApiError, BreakAction, ReconBreak, financeBreakAction, financeBreaks } from "@/lib/api";
+
+const ACTION_LABEL: Record<BreakAction, string> = {
+  ASSIGN: "assigned to self",
+  PROPOSE_RESOLVE: "resolution proposed",
+  APPROVE_RESOLVE: "resolution approved (break closed)",
+  ESCALATE: "escalated",
+  NOTE: "note added",
+};
 
 function fmtErr(err: unknown): string {
   if (err instanceof ApiError) return `${err.errorCode}: ${err.message}`;
@@ -34,13 +42,13 @@ export default function BreaksPage() {
     load();
   }, [load]);
 
-  async function act(id: string, action: "ASSIGN" | "RESOLVE", why: string) {
+  async function act(id: string, action: BreakAction, why: string) {
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
       await financeBreakAction(id, action, why);
-      setNotice(`${id}: ${action.toLowerCase()} recorded.`);
+      setNotice(`${id}: ${ACTION_LABEL[action]}.`);
       setResolveFor(null);
       setReason("");
       await load();
@@ -102,7 +110,7 @@ export default function BreaksPage() {
                       Assign me
                     </button>{" "}
                     <button className="small" disabled={busy} onClick={() => { setResolveFor(b.recon_item_id); setReason(""); }}>
-                      Resolve
+                      Work…
                     </button>
                   </td>
                 </tr>
@@ -115,21 +123,32 @@ export default function BreaksPage() {
       {resolveFor && (
         <div className="card" style={{ marginTop: 16 }}>
           <h2 style={{ marginTop: 0, fontSize: 16 }}>
-            Resolve break — <span className="mono">{resolveFor}</span>
+            Work break — <span className="mono">{resolveFor}</span>
           </h2>
           <p className="muted" style={{ marginTop: 0 }}>
-            State the reconciled explanation. This is recorded permanently; the
-            break is closed, not deleted.
+            A money break is closed under two-actor control: one operator{" "}
+            <strong>proposes</strong> a resolution, then a <strong>different</strong>{" "}
+            operator <strong>approves</strong> it. Escalate or add a note at any time.
+            Everything is recorded permanently; a break is never edited away.
           </p>
           <label>
-            <span className="muted">Resolution reason (required)</span>
+            <span className="muted">Reason (required)</span>
             <input value={reason} onChange={(e) => setReason(e.target.value)} required />
           </label>
-          <div style={{ marginTop: 12 }}>
-            <button disabled={busy || reason.trim() === ""} onClick={() => act(resolveFor, "RESOLVE", reason)}>
-              {busy ? "Resolving…" : "Resolve break"}
-            </button>{" "}
-            <button disabled={busy} onClick={() => setResolveFor(null)}>Cancel</button>
+          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button disabled={busy || reason.trim() === ""} onClick={() => act(resolveFor, "PROPOSE_RESOLVE", reason)}>
+              {busy ? "Working…" : "Propose resolution"}
+            </button>
+            <button className="small" disabled={busy || reason.trim() === ""} onClick={() => act(resolveFor, "APPROVE_RESOLVE", reason)}>
+              Approve resolution
+            </button>
+            <button className="small" disabled={busy || reason.trim() === ""} onClick={() => act(resolveFor, "ESCALATE", reason)}>
+              Escalate
+            </button>
+            <button className="small" disabled={busy || reason.trim() === ""} onClick={() => act(resolveFor, "NOTE", reason)}>
+              Add note
+            </button>
+            <button className="small" disabled={busy} onClick={() => setResolveFor(null)}>Cancel</button>
           </div>
         </div>
       )}
