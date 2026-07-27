@@ -118,6 +118,11 @@ var routeRoles = map[string][]string{
 	"GET /v1/portal/ops/reversals":                     {roleAdmin, roleOps, roleFinance},
 	"POST /v1/portal/ops/reversals/{id}/retry":         {roleAdmin, roleOps},
 
+	// Wave B.1 loan book: read-only advances view for daily ops + finance oversight
+	// (money-adjacent, mirrors the fulfilments/reversals read roles). Scope-bound.
+	"GET /v1/portal/ops/advances":      {roleAdmin, roleOps, roleFinance},
+	"GET /v1/portal/ops/advances/{id}": {roleAdmin, roleOps, roleFinance},
+
 	// M4e-2 subscriber status actions (VR-35-F1): reads for all oversight
 	// roles; request/decide for OPS and RISK (barring is a conduct/risk
 	// action) — the two-actor rule is schema-enforced regardless of role.
@@ -206,6 +211,8 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/ops/fulfilments/{id}/enquire-now", http.HandlerFunc(p.opsEnquireNow))
 	p.mountRBAC(mux, "GET /v1/portal/ops/reversals", http.HandlerFunc(p.opsReversals))
 	p.mountRBAC(mux, "POST /v1/portal/ops/reversals/{id}/retry", http.HandlerFunc(p.opsReversalRetry))
+	p.mountRBAC(mux, "GET /v1/portal/ops/advances", http.HandlerFunc(p.opsAdvances))
+	p.mountRBAC(mux, "GET /v1/portal/ops/advances/{id}", http.HandlerFunc(p.opsAdvance))
 
 	p.mountRBAC(mux, "GET /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActions))
 	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActionRequest))
