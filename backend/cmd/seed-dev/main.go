@@ -117,6 +117,13 @@ func main() {
 		log.Fatalf("seed-dev: population: %v", err)
 	}
 	log.Printf("seed-dev: %s", summary)
+
+	// 4. Drive loan-book states (delinquent + written-off) on the population via the real
+	// collections usecases. Deferred-fee is already the platform default (every advance).
+	if err := driveLoanStates(ctx, adminPool, appPool); err != nil {
+		log.Fatalf("seed-dev: loan-book states: %v", err)
+	}
+
 	log.Print("seed-dev: done — dev stack seeded. Sign in at the portal with a seeded operator key.")
 }
 
