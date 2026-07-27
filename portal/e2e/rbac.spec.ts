@@ -12,8 +12,8 @@ const KEYS: Record<string, string> = JSON.parse(process.env.PORTAL_E2E_KEYS || "
 // server RBAC map). Asserting the exact set proves the console shows a role only
 // the surfaces it is authorised for.
 const EXPECTED_NAV: Record<Role, string[]> = {
-  ADMIN: ["Overview", "Configuration", "Risk", "Ledger", "Breaks", "Settlements", "Ops", "Support"],
-  FINANCE: ["Overview", "Configuration", "Risk", "Ledger", "Breaks", "Settlements", "Ops", "Support"],
+  ADMIN: ["Overview", "Configuration", "Operators", "Risk", "Ledger", "Breaks", "Settlements", "Held recharges", "Ops", "Support"],
+  FINANCE: ["Overview", "Configuration", "Risk", "Ledger", "Breaks", "Settlements", "Held recharges", "Ops", "Support"],
   RISK: ["Overview", "Configuration", "Risk", "Support"],
   OPS: ["Overview", "Ops", "Support"],
   SUPPORT: ["Overview", "Support"],
