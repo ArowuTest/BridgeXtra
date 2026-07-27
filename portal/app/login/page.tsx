@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, login } from "@/lib/api";
 
@@ -9,6 +9,13 @@ export default function LoginPage() {
   const [apiKey, setApiKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [expired, setExpired] = useState(false);
+
+  // Set by the global 401 redirect (lib/api) when a session dies mid-use. Read from
+  // the URL directly (no useSearchParams → no Suspense boundary needed).
+  useEffect(() => {
+    setExpired(new URLSearchParams(window.location.search).get("expired") === "1");
+  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -37,6 +44,11 @@ export default function LoginPage() {
         <p className="muted" style={{ margin: 0 }}>
           Operator console — authorised personnel only.
         </p>
+        {expired && (
+          <p className="error" style={{ margin: 0 }} role="status">
+            Your session expired. Please sign in again.
+          </p>
+        )}
         <label>
           <span className="muted">Access key</span>
           <input

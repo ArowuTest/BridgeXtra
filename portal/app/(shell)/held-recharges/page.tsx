@@ -28,12 +28,6 @@ type Pending = { kind: ActionKind; hold: HeldRecharge };
 function telcoFromScope(scope: string): string {
   return scope.startsWith("telco:") ? scope.slice("telco:".length) : "";
 }
-// Display only — group the server's authoritative minor-unit integer; NEVER convert
-// or do money arithmetic client-side. A server-formatted display string is a small
-// backend follow-on for the money-column standard.
-function fmtMinor(minor: number, currency: string): string {
-  return `${new Intl.NumberFormat().format(minor)} ${currency} (minor)`;
-}
 function errMsg(e: unknown): string {
   return e instanceof ApiError ? `${e.errorCode}: ${e.message}` : "Request failed. Try again shortly.";
 }
@@ -91,7 +85,7 @@ export default function HeldRechargesPage() {
   const columns: Column<HeldRecharge>[] = [
     { key: "occurred", header: "Occurred", render: (h) => new Date(h.occurred_at).toLocaleString() },
     { key: "token", header: "Subscriber", render: (h) => <span style={{ fontFamily: "monospace" }}>{h.msisdn_token}</span> },
-    { key: "amount", header: "Amount", align: "right", render: (h) => fmtMinor(h.amount_minor, h.currency) },
+    { key: "amount", header: "Amount", align: "right", render: (h) => h.amount.display },
     { key: "reason", header: "Hold reason", render: (h) => h.reason || "—" },
     {
       key: "state",

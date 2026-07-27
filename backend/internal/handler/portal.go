@@ -30,13 +30,19 @@ import (
 
 const (
 	portalCookie = "bx_portal_session"
-	csrfHeader   = "X-CSRF-Token"
-	sessionTTL   = 8 * time.Hour
-	roleAdmin    = "ADMIN"
-	roleRisk     = "RISK"
-	roleFinance  = "FINANCE"
-	roleOps      = "OPS"
-	roleSupport  = "SUPPORT"
+	// csrfCookie is the double-submit TRANSPORT for the CSRF token: a readable
+	// (non-httpOnly) cookie so every same-origin tab reads the same token
+	// (sessionStorage is per-tab and would leave a second tab with no token).
+	// The server NEVER reads or trusts this cookie — withSession/VerifyCSRF check
+	// the X-CSRF-Token HEADER against the stored hash. Client-transport only.
+	csrfCookie  = "bx_csrf"
+	csrfHeader  = "X-CSRF-Token"
+	sessionTTL  = 8 * time.Hour
+	roleAdmin   = "ADMIN"
+	roleRisk    = "RISK"
+	roleFinance = "FINANCE"
+	roleOps     = "OPS"
+	roleSupport = "SUPPORT"
 )
 
 // Portal serves the operator console API.
@@ -352,6 +358,15 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 		MaxAge: int(sessionTTL.Seconds()),
 	})
+	// Double-submit CSRF transport: the SAME login-minted token (never a new mint),
+	// in a readable cookie at Path=/ so page JS reads it and all tabs share it. The
+	// server still verifies only the X-CSRF-Token header vs the stored hash — this
+	// cookie is transport, never read server-side. Secure unconditional (as above).
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookie, Value: csrf, Path: "/",
+		HttpOnly: false, Secure: true, SameSite: http.SameSiteStrictMode,
+		MaxAge: int(sessionTTL.Seconds()),
+	})
 	p.Log.Info("portal login", "actor", actor, "role", role)
 	writeJSON(w, http.StatusOK, loginResponse{
 		Actor: actor, Role: role, Scope: scope, CSRFToken: csrf,
@@ -366,6 +381,11 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: portalCookie, Value: "", Path: "/v1/portal",
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
+	})
+	// Clear the CSRF transport cookie too (same name/path/attrs as set at login).
+	http.SetCookie(w, &http.Cookie{
+		Name: csrfCookie, Value: "", Path: "/",
+		HttpOnly: false, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "signed_out"})
 }

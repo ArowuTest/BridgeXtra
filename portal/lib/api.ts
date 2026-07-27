@@ -3,7 +3,24 @@
 // per-tab, gone on close). NOTE: authorization lives on the SERVER (RBAC map
 // in backend/internal/handler/portal.go). Everything here is convenience.
 
-const CSRF_KEY = "bx_csrf";
+// The CSRF token lives in a readable (non-httpOnly) `bx_csrf` cookie the server
+// sets at login — SHARED across same-origin tabs, unlike sessionStorage which is
+// per-tab and would leave a second tab unable to mutate. We echo it in the
+// X-CSRF-Token header; the server verifies THAT header against the session's
+// stored hash. The cookie is transport only — the server never reads it (the
+// double-submit is the header, not a cookie==header comparison).
+const CSRF_COOKIE = "bx_csrf";
+function csrfToken(): string {
+  if (typeof document === "undefined") return "";
+  const m = document.cookie.match(new RegExp("(?:^|;\\s*)" + CSRF_COOKIE + "=([^;]*)"));
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+// Calls that own their own 401 handling and must NOT trip the global
+// session-expired redirect: /login (a 401 is a bad key → inline error), /me (the
+// shell redirects itself; a first-load 401 means "not signed in yet", not
+// "expired"), and /logout (the shell navigates to /login after).
+const NO_REAUTH_REDIRECT = new Set(["/v1/portal/login", "/v1/portal/me", "/v1/portal/logout"]);
 
 export type Session = {
   actor: string;
@@ -25,7 +42,7 @@ export class ApiError extends Error {
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (method !== "GET" && method !== "HEAD") {
-    headers["X-CSRF-Token"] = sessionStorage.getItem(CSRF_KEY) ?? "";
+    headers["X-CSRF-Token"] = csrfToken();
   }
   const resp = await fetch(path, {
     method,
@@ -35,25 +52,28 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   });
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
+    if (resp.status === 401 && typeof window !== "undefined" && !NO_REAUTH_REDIRECT.has(path.split("?")[0])) {
+      // Session died mid-use — bounce to login with a one-time notice.
+      window.location.assign("/login?expired=1");
+    }
     throw new ApiError(resp.status, data.error_code ?? "UNKNOWN", data.message ?? "request failed");
   }
   return data as T;
 }
 
 export async function login(apiKey: string): Promise<Session> {
+  // The server sets the httpOnly session cookie AND the readable bx_csrf cookie via
+  // Set-Cookie; nothing to persist client-side (the csrf_token is still in the body
+  // for backward compat but the cookie is the source of truth).
   const r = await request<Session & { csrf_token: string }>("POST", "/v1/portal/login", {
     api_key: apiKey,
   });
-  sessionStorage.setItem(CSRF_KEY, r.csrf_token);
   return { actor: r.actor, role: r.role, scope: r.scope, expires_at: r.expires_at };
 }
 
 export async function logout(): Promise<void> {
-  try {
-    await request("POST", "/v1/portal/logout");
-  } finally {
-    sessionStorage.removeItem(CSRF_KEY);
-  }
+  // The server clears both the session and bx_csrf cookies via Set-Cookie.
+  await request("POST", "/v1/portal/logout");
 }
 
 export function me(): Promise<Session> {
@@ -211,8 +231,7 @@ export type HeldRecharge = {
   held_id: string;
   source_event_id: string;
   msisdn_token: string;
-  amount_minor: number; // server-authoritative minor units; the UI never does money math
-  currency: string;
+  amount: MoneyView; // server-formatted money (amount_minor + currency + display); the UI never computes money
   occurred_at: string;
   reason: string;
   requested_by: string; // the maker (for the Wave A safety-UX: disable Approve for the proposer)

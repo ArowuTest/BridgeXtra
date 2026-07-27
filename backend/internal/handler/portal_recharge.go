@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/rechargehold"
 )
 
@@ -56,9 +57,19 @@ func (p *Portal) heldRechargesList(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, h := range rows {
+		// Server-formatted money (same moneyView the risk/finance surfaces emit) so
+		// the operator display string is computed server-side — the UI never does
+		// money arithmetic. The amount was validated at ingest; a bad currency here
+		// is a data-integrity fault, so fail loud rather than emit a broken row.
+		m, err := entity.NewMoney(h.AmountMinor, entity.Currency(h.Currency))
+		if err != nil {
+			p.Log.Error("held recharge money", "err", err, "held_id", h.HeldID)
+			writeErr(w, http.StatusInternalServerError, "SYSTEM_TEMPORARILY_UNAVAILABLE", "internal error")
+			return
+		}
 		out = append(out, map[string]any{
 			"held_id": h.HeldID, "source_event_id": h.SourceEventID,
-			"msisdn_token": h.MSISDNToken, "amount_minor": h.AmountMinor, "currency": h.Currency,
+			"msisdn_token": h.MSISDNToken, "amount": toMoneyView(m),
 			"occurred_at": h.OccurredAt, "reason": h.Reason, "requested_by": h.RequestedBy,
 		})
 	}
