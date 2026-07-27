@@ -362,6 +362,10 @@ func (p *Portal) login(w http.ResponseWriter, r *http.Request) {
 	// in a readable cookie at Path=/ so page JS reads it and all tabs share it. The
 	// server still verifies only the X-CSRF-Token header vs the stored hash — this
 	// cookie is transport, never read server-side. Secure unconditional (as above).
+	// #nosec G124 -- bx_csrf is the CSRF double-submit token, intentionally readable
+	// (HttpOnly:false) so page JS echoes it in the X-CSRF-Token header. The session
+	// cookie stays HttpOnly; this token is useless without it, and the server never
+	// reads this cookie (verifies the header vs the stored hash). Secure+SameSite set.
 	http.SetCookie(w, &http.Cookie{
 		Name: csrfCookie, Value: csrf, Path: "/",
 		HttpOnly: false, Secure: true, SameSite: http.SameSiteStrictMode,
@@ -383,6 +387,8 @@ func (p *Portal) logout(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
 	})
 	// Clear the CSRF transport cookie too (same name/path/attrs as set at login).
+	// #nosec G124 -- clears the intentionally-readable bx_csrf CSRF token cookie
+	// (HttpOnly:false by design; see login). Secure+SameSite set; MaxAge:-1 deletes it.
 	http.SetCookie(w, &http.Cookie{
 		Name: csrfCookie, Value: "", Path: "/",
 		HttpOnly: false, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1,
