@@ -5,9 +5,10 @@
 #   make dev-clean    # stop it and wipe the DB + caches (fresh next time)
 #   make dev-seed     # re-run the seeder against the running DB
 #
-# Flow: postgres -> seed (migrate + operators + loan population) -> api ->
-# seed-held (signed webhooks -> held-recharge queue) + portal. Everything runs from
-# stock images with the repo bind-mounted — no Dockerfiles to maintain. SYNTHETIC-ONLY:
+# Flow: postgres -> seed (migrate + operators + loan population + loan-book states) ->
+# api -> seed-held (signed webhooks -> held-recharge queue) -> seed-feed (recon break +
+# stale RECOVERY layer) -> portal. Everything runs from stock images with the repo
+# bind-mounted — no Dockerfiles to maintain. SYNTHETIC-ONLY:
 # the seeder is fenced to the SIM_NG telco and refuses any real DB (a synthetic/empty-DB
 # assertion + VerifySyntheticOnly + the simseed_loop build tag).
 #
@@ -111,6 +112,25 @@ services:
       - tcp-gomodcache:/go/pkg/mod
       - tcp-gobuildcache:/root/.cache/go-build
 
+  # One-shot (after held recharges): inject a reconciliation break the recon engine
+  # catches vs DB truth (the #70 path — perturb the raw ingest tables, never recon_items),
+  # and leave the RECOVERY layer STALE. Populates the feed/recon-health dashboard data.
+  seed-feed:
+    image: golang:1.25
+    working_dir: /src
+    environment:
+      TCP_SEED_ALLOW: "1"
+      TCP_ADMIN_DSN: postgres://postgres:devlocal@postgres:5432/telco_credit
+      TCP_SIMSEED_DSN: postgres://tcp_app:devlocal_app@postgres:5432/telco_credit
+    command: ["go", "run", "-tags", "simseed_loop", "./backend/cmd/seed-dev", "-feed-recon"]
+    depends_on:
+      seed-held:
+        condition: service_completed_successfully
+    volumes:
+      - .:/src
+      - tcp-gomodcache:/go/pkg/mod
+      - tcp-gobuildcache:/root/.cache/go-build
+
   portal:
     image: node:22
     working_dir: /src/portal
@@ -121,8 +141,8 @@ services:
     ports:
       - "3090:3090"
     depends_on:
-      api:
-        condition: service_healthy
+      seed-feed:
+        condition: service_completed_successfully
     volumes:
       - .:/src
       - tcp-dev-portal-nodemodules:/src/portal/node_modules

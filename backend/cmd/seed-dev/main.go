@@ -56,6 +56,8 @@ func main() {
 	log.SetFlags(0)
 	heldMode := flag.Bool("held-recharges", false,
 		"run only the held-recharge scenario (assumes a migrated DB + a running api)")
+	feedMode := flag.Bool("feed-recon", false,
+		"run only the feed/recon-health scenario (assumes a migrated + populated DB)")
 	flag.Parse()
 
 	// Guard against ACCIDENTAL runs — seeding operators and driving the engine is a
@@ -86,6 +88,18 @@ func main() {
 	if *heldMode {
 		if err := runHeldRecharges(ctx, adminPool); err != nil {
 			log.Fatalf("seed-dev: held recharges: %v", err)
+		}
+		return
+	}
+
+	if *feedMode {
+		appPool, err := platform.NewPool(ctx, mustEnv("TCP_SIMSEED_DSN")) // tcp_app for the RLS seed + recon
+		if err != nil {
+			log.Fatalf("seed-dev: app connect: %v", err)
+		}
+		defer appPool.Close()
+		if err := runFeedRecon(ctx, adminPool, appPool); err != nil {
+			log.Fatalf("seed-dev: feed-recon: %v", err)
 		}
 		return
 	}

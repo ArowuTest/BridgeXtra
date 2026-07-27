@@ -6,9 +6,10 @@ package main
 //   - Delinquent is a bucket overlay (advances.delinquency_bucket), not an FSM state.
 //     RunLoop originates fresh-today advances (dpd=0 => CURRENT), and the classification
 //     usecase hard-codes now() as the as-of, so the only lever is to age the origination
-//     INPUT: backdate advances.activated_at (a non-state, non-money, tcp_app-granted
-//     timestamp — the exact lever the collections tests use). The delinquency BUCKET is
-//     then stamped solely by the real collections.Classify usecase + the seeded ladder.
+//     INPUT: backdate advances.activated_at (a non-state, non-money origination
+//     timestamp — the exact lever the collections tests use, written here via the admin
+//     pool). The delinquency BUCKET is then stamped solely by the real collections.Classify
+//     usecase + the seeded ladder.
 //   - Written-off is produced only by the real maker-checker (RequestWriteOff by one
 //     actor, ApproveWriteOff by a DISTINCT actor) once an advance sits at DPD_90_PLUS.
 //   - Deferred-fee needs no work: the platform's global default fee_recognition is
