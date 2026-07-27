@@ -9,10 +9,45 @@
 //
 // The remaining static headers (HSTS, X-Frame-Options, nosniff, Referrer-Policy,
 // Permissions-Policy) carry no per-request value and live in next.config.mjs.
+//
+// DEVELOPMENT CAVEAT: `next dev` evaluates every webpack module through eval() and
+// does NOT attach the request nonce to its HMR/fast-refresh scripts. Under the
+// strict nonce + 'strict-dynamic' CSP those scripts are refused and the app never
+// hydrates (the login button stays dead, the shell never renders) — while a
+// production build (real bundles, correctly nonced) is fine. So in development we
+// serve a relaxed CSP scoped to localhost (not a threat surface) that permits the
+// dev server to run; PRODUCTION keeps the strict per-request nonce CSP unchanged.
 
 import { NextRequest, NextResponse } from "next/server";
 
+const isDev = process.env.NODE_ENV !== "production";
+
 export function middleware(request: NextRequest) {
+  // ---- Development: relax just enough for `next dev` to hydrate --------------
+  // No nonce is emitted here: if we set x-nonce, Next would nonce its scripts and
+  // the browser would then IGNORE 'unsafe-inline' for them (per the CSP spec, a
+  // nonced script requires a matching 'nonce-' source), re-breaking hydration.
+  // 'unsafe-eval' permits the dev module eval(); ws:/wss: permits the HMR socket.
+  // upgrade-insecure-requests is intentionally omitted (localhost is http/ws).
+  if (isDev) {
+    const devCsp = [
+      `default-src 'self'`,
+      `script-src 'self' 'unsafe-inline' 'unsafe-eval'`,
+      `style-src 'self' 'unsafe-inline'`,
+      `img-src 'self' data:`,
+      `font-src 'self'`,
+      `connect-src 'self' ws: wss:`,
+      `object-src 'none'`,
+      `base-uri 'none'`,
+      `form-action 'self'`,
+      `frame-ancestors 'none'`,
+    ].join("; ");
+    const res = NextResponse.next();
+    res.headers.set("Content-Security-Policy", devCsp);
+    return res;
+  }
+
+  // ---- Production: strict per-request nonce CSP (unchanged) ------------------
   const nonce = btoa(crypto.randomUUID());
 
   // script-src: nonce + 'strict-dynamic' — the nonced Next bootstrap loads the

@@ -3,6 +3,9 @@
 *.test
 /bin/
 /dist/
+# stray `go build` outputs at the repo root (build to a scratch dir with `-o`)
+/seed-dev
+/backend/seed-dev
 # env & secrets — never commit
 .env
 .env.*

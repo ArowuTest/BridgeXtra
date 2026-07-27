@@ -146,9 +146,16 @@ services:
     volumes:
       - .:/src
       - tcp-dev-portal-nodemodules:/src/portal/node_modules
+      # Isolate the dev build cache in a named volume. Without this, a host-side
+      # `next build` (which writes PRODUCTION artifacts into portal/.next) leaks
+      # through the bind-mount into the container's `next dev`, which then fails
+      # with "Cannot find module './NNN.js'" from .next/server/webpack-runtime.js.
+      # The volume gives `next dev` its own .next, immune to any host build.
+      - tcp-dev-portal-next:/src/portal/.next
 
 volumes:
   tcp-dev-pgdata:
   tcp-gomodcache:
   tcp-gobuildcache:
   tcp-dev-portal-nodemodules:
+  tcp-dev-portal-next:
