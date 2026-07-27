@@ -231,6 +231,37 @@ export function heldRechargeReject(id: string, telco: string, reason: string): P
   return request("POST", `/v1/portal/finance/held-recharges/${encodeURIComponent(id)}/reject`, { telco, reason });
 }
 
+// --- operator provisioning (ADMIN-only, four-eyes create; portal.go:175-180) ----
+export type Operator = { actor: string; role: string; scope: string; status: string };
+export type OperatorRequest = {
+  request_id: string;
+  actor: string;
+  role: string;
+  scope: string;
+  reason: string;
+  requested_by: string; // the maker — Approve is disabled in-UI for this actor (server also 409s)
+};
+
+export function operatorsList(): Promise<{ operators: Operator[] }> {
+  return request("GET", "/v1/portal/operators");
+}
+export function operatorRequests(): Promise<{ requests: OperatorRequest[] }> {
+  return request("GET", "/v1/portal/operators/requests");
+}
+export function operatorPropose(body: { actor: string; role: string; scope: string; reason: string }): Promise<{ request_id: string }> {
+  return request("POST", "/v1/portal/operators/requests", body);
+}
+// Approve returns the ONE-TIME plaintext access key — shown once, stored hash-only.
+export function operatorApprove(id: string): Promise<{ request_id: string; access_key: string; note: string }> {
+  return request("POST", `/v1/portal/operators/requests/${encodeURIComponent(id)}/approve`);
+}
+export function operatorReject(id: string, reason: string): Promise<unknown> {
+  return request("POST", `/v1/portal/operators/requests/${encodeURIComponent(id)}/reject`, { reason });
+}
+export function operatorRevoke(actor: string, reason: string): Promise<unknown> {
+  return request("POST", `/v1/portal/operators/${encodeURIComponent(actor)}/revoke`, { reason });
+}
+
 export type SettlementStatement = {
   statement_id: string;
   telco_id: string;
