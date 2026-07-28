@@ -24,8 +24,16 @@ func drivePopulation(ctx context.Context, appPool *pgxpool.Pool, programme strin
 
 	var subs, adv, dec, rec int
 	for _, s := range seeds {
+		// Day-scope the cohort seed so a re-up on a NEW Lagos day originates a FRESH
+		// cohort (new deterministic MSISDNs) rather than re-originating into an earlier
+		// day's subscribers — who by then hold open advances / unconfirmed recovery
+		// holds that origination correctly refuses (product is right; the seeder must
+		// not collide with it). Same-day re-up reuses the same (day-scoped) cohort and
+		// stays idempotent; BusinessDay itself stays *today*, so the ~40h fresh-scoring
+		// window is always satisfied. (This is the "fresh cohort per day" fix — the
+		// alternative, pinning a fixed past day, would eventually breach that window.)
 		res, err := simseed.RunLoop(ctx, appPool, simseed.LoopPlan{
-			Seed:        s,
+			Seed:        s + "|" + businessDay,
 			BusinessDay: businessDay,
 			Repeat:      repeat,
 			ProgrammeID: programme,
