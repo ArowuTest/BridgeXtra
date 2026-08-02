@@ -132,6 +132,26 @@ func MustSetup(t *testing.T, suffix string) *DB {
 		worker.Close()
 		operator.Close()
 		admin.Close()
+		// Drop the test database on teardown so runs don't accumulate hundreds of
+		// stale telco_credit_test_* DBs — that bloat balloons the server's cold-start
+		// fsync (a downed gate DB took ~180s to recover with ~300 test DBs) and starves
+		// the -race suite into 600s package timeouts that masquerade as gate failures
+		// (with zero assertion failures). A FRESH short-lived boot connection is needed
+		// (you can't drop the DB you're connected to); WITH (FORCE) terminates any
+		// lingering backend the pool closes above didn't. Best-effort: a cleanup failure
+		// must never fail an otherwise-passing test, and the setup-time DROP IF EXISTS
+		// still bounds accumulation to one-per-suffix if this ever no-ops.
+		dctx, dcancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer dcancel()
+		drop, err := platform.NewPool(dctx, dsn(adminUser, adminPass, "postgres"))
+		if err != nil {
+			t.Logf("testutil: could not open pool to drop %s (leaked): %v", name, err)
+			return
+		}
+		defer drop.Close()
+		if _, err := drop.Exec(dctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, name)); err != nil {
+			t.Logf("testutil: could not drop %s (leaked): %v", name, err)
+		}
 	})
 	return db
 }
