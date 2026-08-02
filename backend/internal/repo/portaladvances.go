@@ -184,7 +184,12 @@ type LoanBookSummaryResult struct {
 	Recovered        entity.Money
 	OpenOutstanding  entity.Money // Σ outstanding over ACTIVE/PARTIALLY_RECOVERED (the book side of INV-016)
 	LedgerReceivable entity.Money // ledger SUBSCRIBER_RECEIVABLE balance — must equal OpenOutstanding
-	Currency         string
+	// RevenueRecognized is the ledger FEE_INCOME balance (credit − debit): fee revenue
+	// EARNED to date, net of reversals. Under DEFERRED the fee sits in UNEARNED_FEE until
+	// recovery earns it, so this is revenue MADE — reported BESIDE outstanding, never
+	// inside it. Same journal_entries + telco scope as the receivable cross-foot (one truth).
+	RevenueRecognized entity.Money
+	Currency          string
 }
 
 // LoanBookSummary computes counts-by-status, counts-by-bucket, portfolio money totals,
@@ -198,6 +203,7 @@ func LoanBookSummary(ctx context.Context, q Querier, scope OperatorScope, f Adva
 		res.Recovered = res.Disbursed
 		res.OpenOutstanding = res.Disbursed
 		res.LedgerReceivable = res.Disbursed
+		res.RevenueRecognized = res.Disbursed
 		return res, nil
 	}
 
@@ -266,6 +272,21 @@ WHERE je.account_code = 'SUBSCRIBER_RECEIVABLE' AND ($1 = '' OR j.telco_id = $1)
 		return res, fmt.Errorf("ledger cross-foot: %w", err)
 	}
 
+	// Revenue recognized: the ledger FEE_INCOME balance. FEE_INCOME is credit-normal
+	// (revenue), so the balance is credit − debit, and recovery reversals that
+	// de-recognize fee (DR FEE_INCOME) reduce it — i.e. earned-to-date, net. SAME
+	// journal_entries and telco scope as the receivable cross-foot above (one ledger
+	// truth); reported beside OpenOutstanding, never mixed into it.
+	var revenueMinor int64
+	if err := q.QueryRow(ctx, `
+SELECT COALESCE(SUM(je.credit_minor - je.debit_minor), 0)
+FROM journal_entries je
+JOIN journals j ON j.journal_id = je.journal_id
+WHERE je.account_code = 'FEE_INCOME' AND ($1 = '' OR j.telco_id = $1)`,
+		f.Telco).Scan(&revenueMinor); err != nil {
+		return res, fmt.Errorf("revenue cross-foot: %w", err)
+	}
+
 	cur := entity.Currency(res.Currency)
 	var e error
 	if res.Disbursed, e = scanMoney(disbursed, string(cur)); e != nil {
@@ -278,6 +299,9 @@ WHERE je.account_code = 'SUBSCRIBER_RECEIVABLE' AND ($1 = '' OR j.telco_id = $1)
 		return res, e
 	}
 	if res.LedgerReceivable, e = scanMoney(ledgerMinor, string(cur)); e != nil {
+		return res, e
+	}
+	if res.RevenueRecognized, e = scanMoney(revenueMinor, string(cur)); e != nil {
 		return res, e
 	}
 	return res, nil

@@ -282,6 +282,7 @@ export type LoanBookSummary = {
   recovered: MoneyView;
   open_outstanding: MoneyView; // Σ outstanding over ACTIVE/PARTIALLY_RECOVERED (book side of INV-016)
   ledger_receivable: MoneyView; // ledger SUBSCRIBER_RECEIVABLE — must equal open_outstanding
+  revenue_recognized: MoneyView; // ledger FEE_INCOME earned to date — revenue MADE, beside (not inside) outstanding
   reconciled: boolean;
 };
 

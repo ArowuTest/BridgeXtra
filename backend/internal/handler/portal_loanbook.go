@@ -147,6 +147,8 @@ func loanBookSummaryJSON(s repo.LoanBookSummaryResult) map[string]any {
 		"recovered":         toMoneyView(s.Recovered),
 		"open_outstanding":  toMoneyView(s.OpenOutstanding),
 		"ledger_receivable": toMoneyView(s.LedgerReceivable),
+		// Revenue MADE (recognized fee income), distinct from money still owed.
+		"revenue_recognized": toMoneyView(s.RevenueRecognized),
 		// INV-016: the loan-book outstanding must equal the ledger SUBSCRIBER_RECEIVABLE.
 		"reconciled": s.OpenOutstanding.Amount() == s.LedgerReceivable.Amount(),
 	}
