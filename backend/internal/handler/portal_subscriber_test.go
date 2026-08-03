@@ -78,6 +78,7 @@ func seedReceivable(t *testing.T, f *portalFixture, n int, debitMinor int64) {
 type money struct {
 	AmountMinor int64  `json:"amount_minor"`
 	Currency    string `json:"currency"`
+	Display     string `json:"display"`
 }
 
 func TestB2_Subscriber360_ReconcileMaskAndReveal(t *testing.T) {
@@ -191,6 +192,11 @@ func TestB2_Subscriber360_ReconcileMaskAndReveal(t *testing.T) {
 	}
 	if prof.TotalOutstanding.AmountMinor != 8000 {
 		t.Fatalf("360 still-owed must be 8000 and reconcile to the ledger receivable (8000), got %d", prof.TotalOutstanding.AmountMinor)
+	}
+	// Governed money format end-to-end: 8000 minor NGN (governed decimals=2) renders as
+	// the major amount with the symbol — not "NGN 8,000 (minor)".
+	if prof.TotalOutstanding.Display != "₦80.00" {
+		t.Fatalf("money must render as governed major units (₦80.00), got %q", prof.TotalOutstanding.Display)
 	}
 	if len(prof.Loans) != 2 {
 		t.Fatalf("360 must list BOTH loans (open + closed), got %d", len(prof.Loans))

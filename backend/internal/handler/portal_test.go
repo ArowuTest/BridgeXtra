@@ -84,6 +84,15 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Limiter:    testLimiter(),
 		Log:        slog.Default(),
 	}
+	// Governed money formatting: load the display scale from the migrated `currencies`
+	// table so toMoneyView renders real amounts (₦50.00) in handler tests, exactly as at
+	// boot — no hardcoded fallback.
+	if formats, err := repo.LoadCurrencyFormats(context.Background(), db.App); err != nil {
+		t.Fatalf("load currency formats: %v", err)
+	} else {
+		handler.SetCurrencyFormats(formats)
+	}
+
 	mux := http.NewServeMux()
 	p.Mount(mux)
 	srv := httptest.NewServer(mux)

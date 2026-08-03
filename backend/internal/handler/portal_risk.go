@@ -59,7 +59,7 @@ func toMoneyView(m entity.Money) moneyView {
 	return moneyView{
 		AmountMinor: m.Amount(),
 		Currency:    string(m.Currency()),
-		Display:     string(m.Currency()) + " " + groupMinor(m.Amount()) + " (minor)",
+		Display:     formatMoney(m.Amount(), string(m.Currency())),
 	}
 }
 

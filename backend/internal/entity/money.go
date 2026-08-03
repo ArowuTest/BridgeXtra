@@ -24,6 +24,15 @@ type Currency string
 // NGN is the Release 1 operating currency (ASSUMPTIONS A-13).
 const NGN Currency = "NGN"
 
+// CurrencyFormat is the DISPLAY scale for a currency: how many minor units make one
+// major unit (Decimals) and the symbol to render (e.g. NGN -> 2, "₦"). It is sourced
+// from the governed `currencies` reference table, never hardcoded, and loaded once at
+// boot so the minor->major divisor is a governed value keyed by ISO code.
+type CurrencyFormat struct {
+	Decimals int
+	Symbol   string
+}
+
 var (
 	ErrCurrencyMismatch = errors.New("money: currency mismatch")
 	ErrInvalidCurrency  = errors.New("money: invalid currency code")

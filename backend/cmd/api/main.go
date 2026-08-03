@@ -106,6 +106,18 @@ func main() {
 	}
 	defer operatorPool.Close()
 
+	// Governed money formatting: load the currency display scale (decimals + symbol)
+	// ONCE from the seeded `currencies` table and hand it to the handler layer, so
+	// toMoneyView renders major units (₦50.00) from a governed source, not a hardcoded
+	// /100. Fail closed at boot — the reference table must be seeded (migration 0064).
+	if formats, err := repo.LoadCurrencyFormats(ctx, appPool); err != nil {
+		log.Error("load currency formats (required at boot)", "err", err)
+		os.Exit(1)
+	} else {
+		handler.SetCurrencyFormats(formats)
+		log.Info("currency formats loaded", "count", len(formats))
+	}
+
 	telcos := &repo.Telcos{Pool: appPool}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: appPool, Log: log}
 	programmes := repo.Programmes{}
