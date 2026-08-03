@@ -120,7 +120,7 @@ func activateRechargeFeed(ctx context.Context, adminPool *pgxpool.Pool, cfg *con
 	content := fmt.Sprintf(`{"enabled":true,"transport":"webhook_push","auth":"hmac_sha256",`+
 		`"key_id_header":"X-Bx-Key-Id","signature_header":"X-Bx-Signature","timestamp_header":"X-Bx-Timestamp",`+
 		`"replay_window_seconds":120,"future_skew_seconds":60,"max_body_bytes":65536,"expected_currency":"NGN",`+
-		`"per_event_amount_max_minor":%d,"per_telco_daily_ceiling_minor":50000000000,`+
+		`"per_event_amount_max_minor":%d,"per_telco_daily_ceiling_minor":500000000000,`+
 		`"recovery_max_backdate_seconds":1209600,"recovery_max_future_skew_seconds":60}`, devPerEventMax)
 	cv, err := cfg.CreateDraft(ctx, "telco.recharge_feed", scope, "seed-dev-maker", "seed-dev held-recharge scenario", json.RawMessage(content))
 	if err != nil {

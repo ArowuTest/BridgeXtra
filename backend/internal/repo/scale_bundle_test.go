@@ -31,8 +31,8 @@ ORDER BY version_no DESC LIMIT 1`, domain, scope).Scan(&content)
 	return content
 }
 
-func TestScoringPolicyBundle_RatioInvariant(t *testing.T) {
-	db := testutil.MustSetup(t, "scale_ratio")
+func assertScoringLadder(t *testing.T, db *testutil.DB, scope string) {
+	t.Helper()
 	var pol struct {
 		Tiers []struct {
 			Code                string `json:"code"`
@@ -40,29 +40,39 @@ func TestScoringPolicyBundle_RatioInvariant(t *testing.T) {
 			MinRecharge90dMinor int64  `json:"min_recharge_90d_minor"`
 		} `json:"tiers"`
 	}
-	if err := json.Unmarshal(activeContent(t, db, "scoring.policy", "programme:prg_sim_airtime01"), &pol); err != nil {
-		t.Fatalf("unmarshal scoring.policy: %v", err)
+	if err := json.Unmarshal(activeContent(t, db, "scoring.policy", scope), &pol); err != nil {
+		t.Fatalf("unmarshal scoring.policy[%s]: %v", scope, err)
 	}
 	// Corrected ₦-scale tier ladder: ₦500 / ₦1k / ₦5k / ₦10k.
 	wantFace := []int64{50000, 100000, 500000, 1000000}
 	if len(pol.Tiers) != len(wantFace) {
-		t.Fatalf("expected %d tiers, got %d", len(wantFace), len(pol.Tiers))
+		t.Fatalf("scope %s: expected %d tiers, got %d", scope, len(wantFace), len(pol.Tiers))
 	}
 	var prev int64
 	for i, tr := range pol.Tiers {
 		if tr.MaxFaceMinor != wantFace[i] {
-			t.Fatalf("tier %s max_face = %d, want %d (₦-scale ladder)", tr.Code, tr.MaxFaceMinor, wantFace[i])
+			t.Fatalf("scope %s tier %s max_face = %d, want %d (₦-scale ladder)", scope, tr.Code, tr.MaxFaceMinor, wantFace[i])
 		}
 		// THE underwriting invariant: 90-day affordability gate is exactly 10× the loan.
 		if tr.MinRecharge90dMinor != tr.MaxFaceMinor*10 {
-			t.Fatalf("tier %s: min_recharge_90d (%d) must be 10× max_face (%d) — the advance-to-recharge underwriting ratio is broken",
-				tr.Code, tr.MinRecharge90dMinor, tr.MaxFaceMinor)
+			t.Fatalf("scope %s tier %s: min_recharge_90d (%d) must be 10× max_face (%d) — the advance-to-recharge underwriting ratio is broken",
+				scope, tr.Code, tr.MinRecharge90dMinor, tr.MaxFaceMinor)
 		}
 		if tr.MaxFaceMinor <= prev {
-			t.Fatalf("tier %s max_face not ascending", tr.Code)
+			t.Fatalf("scope %s tier %s max_face not ascending", scope, tr.Code)
 		}
 		prev = tr.MaxFaceMinor
 	}
+}
+
+func TestScoringPolicyBundle_RatioInvariant(t *testing.T) {
+	db := testutil.MustSetup(t, "scale_ratio")
+	// BOTH scopes must carry the corrected ladder: the programme override AND the
+	// scope='global' fallback (0050), which any no-override programme resolves to —
+	// leaving global at the old 1/100th scale is a SILENT under-collateralisation, so
+	// it is asserted here explicitly (its absence is what let 0065 ship the defect).
+	assertScoringLadder(t, db, "programme:prg_sim_airtime01")
+	assertScoringLadder(t, db, "global")
 }
 
 func TestProductBundle_DenomFloorAndScale(t *testing.T) {

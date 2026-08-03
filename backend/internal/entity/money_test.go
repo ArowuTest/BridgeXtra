@@ -139,6 +139,37 @@ func TestMoney_PercentBps_HalfUp_SingleRoundingSite(t *testing.T) {
 	}
 }
 
+// TestMoney_PercentBps_VATRounding_HalfUpBoundary dedicates coverage to the settlement
+// VAT rounding path (settlement.go computes TAX_<code> = feeIncome.PercentBps(tax.Bps)).
+// At 750 bps (VAT 7.5%) a fee income of 500 minor is 37.5 → the HALF-UP boundary that
+// rounds to 38. The M3E settlement test used to exercise exactly this, but the loan-scale
+// rescale moved its fee income to 1000 (750 exact, no rounding), so this pins the boundary
+// directly and independently — a future scale change can't silently leave it untested.
+func TestMoney_PercentBps_VATRounding_HalfUpBoundary(t *testing.T) {
+	const vatBps = 750 // 7.5% VAT (settlement.terms tax bps)
+	cases := []struct {
+		feeIncome int64
+		want      int64
+		note      string
+	}{
+		{500, 38, "37.5 → 38 (HALF-UP boundary the settlement test lost)"},
+		{1000, 75, "75.0 exact (the post-rescale settlement value — no rounding)"},
+		{100, 8, "7.5 → 8 (half up)"},
+		{300, 23, "22.5 → 23 (half up)"},
+		{200, 15, "15.0 exact"},
+		{-500, -38, "-37.5 → -38 (half AWAY from zero)"},
+	}
+	for _, c := range cases {
+		got, err := MustMoney(c.feeIncome, NGN).PercentBps(vatBps)
+		if err != nil {
+			t.Fatalf("VAT PercentBps(%d): %v", c.feeIncome, err)
+		}
+		if got.Amount() != c.want {
+			t.Errorf("VAT %d bps of %d = %d, want %d — %s", vatBps, c.feeIncome, got.Amount(), c.want, c.note)
+		}
+	}
+}
+
 func TestMoney_AllocateByRatio_ExactAndDeterministic(t *testing.T) {
 	// Known case: 100 into 1:1:1 → 34,33,33 (largest remainder, lowest index ties).
 	parts, err := MustMoney(100, NGN).AllocateByRatio(1, 1, 1)
