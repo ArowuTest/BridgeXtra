@@ -672,6 +672,24 @@ export type RepaymentEvent = {
   applied_at: string;
 };
 
+// RepaymentOutlook is an HONEST projection (B.2b): every number is measured from the
+// subscriber's own repayments, the range comes from their week-to-week variation, and
+// the status degrades gracefully instead of inventing a date.
+export type RepaymentOutlook = {
+  status: "CLEARED" | "NO_HISTORY" | "STALLED" | "INSUFFICIENT" | "PROJECTED";
+  window_days: number;
+  owed: MoneyView;
+  recovered_in_window: MoneyView;
+  active_weeks: number;
+  typical_weekly: MoneyView; // median weekly repayment (the pace)
+  optimistic_weeks: number; // whole weeks to clear at the busier-week pace
+  pessimistic_weeks: number; // …at the quieter-week pace
+  recharge_count: number;
+  typical_recharge: MoneyView;
+  median_interval_days: number; // typical gap between recharges (0 if < 2)
+  note: string; // plain-language explanation / degradation reason
+};
+
 export type SubscriberProfile = {
   subscriber: {
     subscriber_account_id: string;
@@ -686,6 +704,7 @@ export type SubscriberProfile = {
   total_outstanding: MoneyView; // Σ over open loans — reconciles to this subscriber's receivable
   recharges: RechargeEvent[];
   repayments: RepaymentEvent[];
+  outlook: RepaymentOutlook;
 };
 
 export function subscriberProfile(id: string): Promise<SubscriberProfile> {

@@ -30,6 +30,7 @@ import {
   SubscriberLoan,
   RechargeEvent,
   RepaymentEvent,
+  RepaymentOutlook,
   subscriberProfile,
   subscriberReveal,
 } from "@/lib/api";
@@ -123,6 +124,7 @@ function Profile({ prof, accountId }: { prof: SubscriberProfile; accountId: stri
         <Tile label="Total loans" value={String(prof.loans.length)} />
       </SimpleGrid>
 
+      <OutlookCard o={prof.outlook} />
       <LimitHistory current={prof.current_limit} history={prof.limit_history} />
       <Loans loans={prof.loans} />
       <Recharges recharges={prof.recharges} />
@@ -325,6 +327,72 @@ function Repayments({ repayments }: { repayments: RepaymentEvent[] }) {
         <DataTable columns={cols} rows={rows} rowKey={(r) => String(r._i)} empty="No repayments recorded for this account." />
       </Card>
     </Stack>
+  );
+}
+
+// OutlookCard — the honest repayment projection. Every number is server-measured; the
+// range is the subscriber's own week-to-week variation; and non-PROJECTED states show a
+// plain reason, never a fabricated date.
+function OutlookCard({ o }: { o: RepaymentOutlook }) {
+  if (o.status === "PROJECTED") {
+    const range = o.pessimistic_weeks > 52 ? `${o.optimistic_weeks} weeks – a year+` : `${o.optimistic_weeks}–${o.pessimistic_weeks} weeks`;
+    const cadence =
+      o.recharge_count > 0
+        ? `, from ${o.recharge_count} recharge${o.recharge_count === 1 ? "" : "s"}${o.median_interval_days > 0 ? ` about every ${o.median_interval_days} days` : ""}`
+        : "";
+    return (
+      <Card withBorder padding="md">
+        <Group justify="space-between" align="center">
+          <Text fw={600} size="sm">
+            Repayment outlook
+          </Text>
+          <Badge variant="light" color="blue">
+            Estimate
+          </Badge>
+        </Group>
+        <Text fw={700} size="lg" mt={4}>
+          {range} to clear {o.owed.display}
+        </Text>
+        <Text size="sm" c="dimmed" mt={6}>
+          Based on {o.recovered_in_window.display} repaid over the last {o.window_days} days (typically{" "}
+          {o.typical_weekly.display}/week{cadence}).
+        </Text>
+        <Text size="xs" c="dimmed" mt={4}>
+          The range reflects week-to-week variation; actual timing depends on future recharges.
+        </Text>
+      </Card>
+    );
+  }
+  // Degraded / terminal states — honest, no invented date.
+  const tone = o.status === "CLEARED" ? "teal" : o.status === "STALLED" ? "orange" : "gray";
+  const label =
+    o.status === "CLEARED"
+      ? "Fully repaid"
+      : o.status === "STALLED"
+        ? "Not currently paying down"
+        : o.status === "NO_HISTORY"
+          ? "No repayments yet"
+          : "Not enough history to project";
+  return (
+    <Card withBorder padding="md">
+      <Text fw={600} size="sm">
+        Repayment outlook
+      </Text>
+      <Group gap="xs" mt={4}>
+        <Badge variant="light" color={tone}>
+          {label}
+        </Badge>
+      </Group>
+      <Text size="sm" c="dimmed" mt={6}>
+        {o.note}
+      </Text>
+      {o.recovered_in_window.amount_minor > 0 && (
+        <Text size="xs" c="dimmed" mt={4}>
+          Repaid in the last {o.window_days} days: {o.recovered_in_window.display} across {o.active_weeks} week
+          {o.active_weeks === 1 ? "" : "s"}.
+        </Text>
+      )}
+    </Card>
   );
 }
 

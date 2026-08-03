@@ -169,9 +169,25 @@ func TestB2_Subscriber360_ReconcileMaskAndReveal(t *testing.T) {
 			Component string `json:"component"`
 			Amount    money  `json:"amount"`
 		} `json:"repayments"`
+		Outlook struct {
+			Status            string `json:"status"`
+			RecoveredInWindow money  `json:"recovered_in_window"`
+			OptimisticWeeks   int    `json:"optimistic_weeks"`
+		} `json:"outlook"`
 	}
 	if err := json.Unmarshal(body, &prof); err != nil {
 		t.Fatalf("unmarshal profile: %v — %s", err, body)
+	}
+	// B.2b outlook is wired into the 360. This subscriber has ONE repayment (~now), so
+	// the projection must HONESTLY degrade to INSUFFICIENT — never invent a date/range.
+	if prof.Outlook.Status != "INSUFFICIENT" {
+		t.Fatalf("one repayment must degrade to INSUFFICIENT (no fabricated date), got %q", prof.Outlook.Status)
+	}
+	if prof.Outlook.OptimisticWeeks != 0 {
+		t.Fatalf("a non-projected outlook must not carry a week range, got %d", prof.Outlook.OptimisticWeeks)
+	}
+	if prof.Outlook.RecoveredInWindow.AmountMinor != 2000 {
+		t.Fatalf("outlook must still report the facts (2000 repaid in window), got %d", prof.Outlook.RecoveredInWindow.AmountMinor)
 	}
 	if prof.TotalOutstanding.AmountMinor != 8000 {
 		t.Fatalf("360 still-owed must be 8000 and reconcile to the ledger receivable (8000), got %d", prof.TotalOutstanding.AmountMinor)

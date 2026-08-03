@@ -14,6 +14,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -187,6 +188,11 @@ func subscriberProfileJSON(prof repo.SubscriberProfileResult) map[string]any {
 		})
 	}
 
+	// B.2b repayment outlook — an honest projection over the SAME rows already loaded
+	// (no extra query). time.Now() lives here in the handler layer; the computation
+	// itself is a pure, deterministic function of (owed, repayments, recharges, asOf).
+	outlook := repo.RepaymentOutlookFrom(prof.TotalOutstanding, prof.Repayments, prof.Recharges, time.Now())
+
 	return map[string]any{
 		"subscriber": map[string]any{
 			"subscriber_account_id": id.SubscriberAccountID,
@@ -201,5 +207,25 @@ func subscriberProfileJSON(prof repo.SubscriberProfileResult) map[string]any {
 		"total_outstanding": toMoneyView(prof.TotalOutstanding),
 		"recharges":         recharges,
 		"repayments":        repayments,
+		"outlook":           outlookJSON(outlook),
+	}
+}
+
+// outlookJSON renders the repayment outlook. All money is server-formatted; the client
+// only displays these numbers, never computes them.
+func outlookJSON(o repo.RepaymentOutlook) map[string]any {
+	return map[string]any{
+		"status":               o.Status,
+		"window_days":          o.WindowDays,
+		"owed":                 toMoneyView(o.Owed),
+		"recovered_in_window":  toMoneyView(o.RecoveredInWindow),
+		"active_weeks":         o.ActiveWeeks,
+		"typical_weekly":       toMoneyView(o.TypicalWeekly),
+		"optimistic_weeks":     o.OptimisticWeeks,
+		"pessimistic_weeks":    o.PessimisticWeeks,
+		"recharge_count":       o.RechargeCount,
+		"typical_recharge":     toMoneyView(o.TypicalRecharge),
+		"median_interval_days": o.MedianIntervalDays,
+		"note":                 o.Note,
 	}
 }
