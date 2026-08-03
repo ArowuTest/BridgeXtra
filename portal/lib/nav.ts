@@ -11,7 +11,7 @@ export type NavItem = {
 };
 
 export const NAV: NavItem[] = [
-  { href: "/dashboard", label: "Overview", roles: ["ADMIN", "RISK", "FINANCE", "OPS", "SUPPORT"] },
+  { href: "/dashboard", label: "Overview", roles: ["ADMIN", "RISK", "FINANCE", "OPS"] },
   { href: "/config", label: "Configuration", roles: ["ADMIN", "RISK", "FINANCE"] },
   { href: "/operators", label: "Operators", roles: ["ADMIN"] },
   { href: "/risk", label: "Risk", roles: ["ADMIN", "RISK", "FINANCE"] },

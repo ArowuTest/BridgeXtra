@@ -179,7 +179,8 @@ WHERE a.advance_id = $1`, advanceID)
 type LoanBookSummaryResult struct {
 	TotalCount       int64
 	ByStatus         map[string]int64
-	ByBucket         map[string]int64 // "UNCLASSIFIED" folds NULL bucket
+	ByBucket         map[string]int64        // "UNCLASSIFIED" folds NULL bucket
+	ByBucketValue    map[string]entity.Money // ₦ outstanding per bucket (arrears by bucket) — same FILTER as OpenOutstanding
 	Disbursed        entity.Money
 	Recovered        entity.Money
 	OpenOutstanding  entity.Money // Σ outstanding over ACTIVE/PARTIALLY_RECOVERED (the book side of INV-016)
@@ -197,7 +198,7 @@ type LoanBookSummaryResult struct {
 // per-bucket, and grand-total rows in one pass; the ledger receivable is a second
 // scoped query (journal_entries is telco-scoped through journals under the same tx).
 func LoanBookSummary(ctx context.Context, q Querier, scope OperatorScope, f AdvanceFilter) (LoanBookSummaryResult, error) {
-	res := LoanBookSummaryResult{ByStatus: map[string]int64{}, ByBucket: map[string]int64{}, Currency: "NGN"}
+	res := LoanBookSummaryResult{ByStatus: map[string]int64{}, ByBucket: map[string]int64{}, ByBucketValue: map[string]entity.Money{}, Currency: "NGN"}
 	if !scope.authority {
 		res.Disbursed = entity.MustMoney(0, entity.NGN)
 		res.Recovered = res.Disbursed
@@ -206,6 +207,7 @@ func LoanBookSummary(ctx context.Context, q Querier, scope OperatorScope, f Adva
 		res.RevenueRecognized = res.Disbursed
 		return res, nil
 	}
+	byBucketMinor := map[string]int64{}
 
 	rows, err := q.Query(ctx, `
 SELECT GROUPING(a.state) AS g_state, GROUPING(a.delinquency_bucket) AS g_bucket,
@@ -253,6 +255,7 @@ GROUP BY GROUPING SETS ((a.state), (a.delinquency_bucket), ())`,
 			res.ByStatus[state] = n
 		case gBucket == 0: // per-bucket row
 			res.ByBucket[bucket] = n
+			byBucketMinor[bucket] = open // ₦ arrears in this bucket (same FILTER as OpenOutstanding)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -303,6 +306,11 @@ WHERE je.account_code = 'FEE_INCOME' AND ($1 = '' OR j.telco_id = $1)`,
 	}
 	if res.RevenueRecognized, e = scanMoney(revenueMinor, string(cur)); e != nil {
 		return res, e
+	}
+	for bucket, minor := range byBucketMinor {
+		if res.ByBucketValue[bucket], e = scanMoney(minor, string(cur)); e != nil {
+			return res, e
+		}
 	}
 	return res, nil
 }

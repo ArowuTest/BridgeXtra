@@ -116,6 +116,40 @@ func (GuardrailTrips) CountOpenForProgramme(ctx context.Context, tx pgx.Tx, prog
 	return n, err
 }
 
+// LatestForProgramme returns the most recent guardrail breach for a programme
+// (the MI dashboard's "last breach line", C3), or found=false if the programme
+// has never tripped. Runs on the operator read tx: guardrail_trips is granted +
+// op_all (0044) so RLS scopes it; it also fails closed on a no-authority scope.
+// programmeID is scope-resolved (enumerated via ProgrammesInScope). Returns only
+// the display-relevant fields the tile shows.
+func (GuardrailTrips) LatestForProgramme(ctx context.Context, q Querier, scope OperatorScope, programmeID string) (GuardrailTrip, bool, error) {
+	if !scope.authority {
+		return GuardrailTrip{}, false, nil
+	}
+	var t GuardrailTrip
+	var measured, limit int64
+	var cur string
+	err := q.QueryRow(ctx, `
+		SELECT guardrail, measured_minor, limit_minor, currency, state, tripped_at
+		FROM guardrail_trips WHERE programme_id = $1
+		ORDER BY tripped_at DESC LIMIT 1`, programmeID).
+		Scan(&t.Guardrail, &measured, &limit, &cur, &t.State, &t.TrippedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return GuardrailTrip{}, false, nil
+	}
+	if err != nil {
+		return GuardrailTrip{}, false, fmt.Errorf("latest guardrail trip: %w", err)
+	}
+	t.ProgrammeID = programmeID
+	if t.Measured, err = scanMoney(measured, cur); err != nil {
+		return t, false, err
+	}
+	if t.Limit, err = scanMoney(limit, cur); err != nil {
+		return t, false, err
+	}
+	return t, true, nil
+}
+
 // SetStatus transitions a programme's lifecycle status with an explicit
 // from-guard (concurrent transitions converge instead of clobbering).
 func (Programmes) SetStatus(ctx context.Context, tx pgx.Tx, programmeID string, from, to entity.ProgrammeStatus) error {

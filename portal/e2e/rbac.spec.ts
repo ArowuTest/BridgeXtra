@@ -16,7 +16,10 @@ const EXPECTED_NAV: Record<Role, string[]> = {
   FINANCE: ["Overview", "Configuration", "Risk", "Ledger", "Accounting journals (audit)", "Breaks", "Settlements", "Held recharges", "Subscribers", "Loan book", "Ops", "Support"],
   RISK: ["Overview", "Configuration", "Risk", "Support"],
   OPS: ["Overview", "Subscribers", "Loan book", "Ops", "Support"],
-  SUPPORT: ["Overview", "Support"],
+  // SUPPORT is walled off from the financial-MI Overview (server RBAC + nav); its
+  // sole surface is Support. (Post-login it still lands on /dashboard, which renders
+  // a welcome panel for non-oversight roles — not the MI tiles.)
+  SUPPORT: ["Support"],
 };
 
 async function login(page: Page, key: string) {

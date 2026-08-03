@@ -327,6 +327,57 @@ export function loanBookAdvance(id: string): Promise<LoanBookDetail> {
   return request("GET", `/v1/portal/ops/advances/${encodeURIComponent(id)}`);
 }
 
+// --- Wave B MI Overview (operations dashboard; scope + aggregates server-enforced) --
+// Who owes us / how much · are they paying · is the machine healthy. Reuses the
+// loan-book summary spine and layers the add tiles. Every money figure is a
+// server-formatted MoneyView; the paydown ratio is an honest proportion, NOT a
+// due-based collections rate (no schedule exists in the data model).
+
+export type ProgrammeHealth = {
+  programme_id: string;
+  telco_id: string;
+  status: string; // ACTIVE / SUSPENDED
+  today_disbursed: MoneyView; // C1 — same measure the DAILY_DISBURSED guardrail trips on
+  cap_known: boolean; // false ⇒ no resolvable treasury.guardrails config (headroom omitted)
+  daily_cap?: MoneyView;
+  daily_headroom?: MoneyView; // cap − today (may be negative when over cap)
+  pool?: {
+    committed: MoneyView;
+    exposure?: MoneyView; // reserved + utilised (A10)
+    exposure_limit?: MoneyView; // committed × governed bps
+    exposure_headroom?: MoneyView; // limit − exposure
+    exposure_bps?: number; // the governed ceiling (read from config, not hardcoded)
+  };
+  last_breach?: {
+    guardrail: string;
+    measured: MoneyView;
+    limit: MoneyView;
+    state: string;
+    tripped_at: string;
+  };
+};
+
+export type OpsOverview = {
+  summary: LoanBookSummary; // A1–A7 + reconciled
+  by_bucket_value: Record<string, MoneyView>; // A9 — ₦ arrears per delinquency bucket
+  collected_today: MoneyView; // B3
+  written_off_principal: MoneyView;
+  paydown_ratio: number; // B4 — recovered / (recovered + open + written-off); 0..1
+  paydown_ratio_basis: {
+    recovered: MoneyView;
+    open_outstanding: MoneyView;
+    written_off: MoneyView;
+  };
+  programmes: ProgrammeHealth[]; // C1/C2/C3 + A10, per programme in scope
+};
+
+export function opsOverview(telco?: string): Promise<OpsOverview> {
+  const q = new URLSearchParams();
+  if (telco) q.set("telco", telco);
+  const qs = q.toString();
+  return request("GET", `/v1/portal/ops/overview${qs ? `?${qs}` : ""}`);
+}
+
 // --- operator provisioning (ADMIN-only, four-eyes create; portal.go:175-180) ----
 export type Operator = { actor: string; role: string; scope: string; status: string };
 export type OperatorRequest = {
