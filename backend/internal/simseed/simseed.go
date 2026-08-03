@@ -97,8 +97,26 @@ func stableHash64(s string) uint64 {
 func subscriberID(seed string, i int) string {
 	return stableID("subseed", seed, fmt.Sprintf("%06d", i))
 }
+
+// msisdnToken is the subscriber's phone number — the account number. It is a
+// deterministic, MSISDN-shaped Nigerian mobile number (0 + real network code + 7
+// digits) so the operator directory, masking (…last-4) and phone-number search behave
+// exactly as they will on real numbers, rather than on an opaque hex token. Distinct by
+// shape from the migration-seeded tok_sim_* fixtures; distinct per member by the per-i
+// hash (a collision is astronomically unlikely at cohort scale, and the live-identity
+// unique index (telco_id, msisdn_token) makes any collision a harmless no-op insert).
 func msisdnToken(seed string, i int) string {
-	return fmt.Sprintf("tok_seed_%016x", stableHash64(seed+"/tok/"+fmt.Sprintf("%06d", i)))
+	h := stableHash64(seed + "/tok/" + fmt.Sprintf("%06d", i))
+	// Real NG mobile network codes (MTN / Airtel / Glo / 9mobile).
+	codes := []string{
+		"803", "806", "703", "706", "813", "816", "810", "814", "906", "916",
+		"802", "808", "708", "812", "902", "901", "907", "911",
+		"805", "807", "705", "815", "811", "905", "915",
+		"809", "817", "818", "909", "908",
+	}
+	code := codes[h%uint64(len(codes))]
+	line := (h >> 8) % 10_000_000 // 7 digits
+	return fmt.Sprintf("0%s%07d", code, line)
 }
 
 // CohortPlan is a deterministic subscriber-cohort request.
@@ -108,11 +126,15 @@ type CohortPlan struct {
 }
 
 // SeedCohort creates Count synthetic subscriber accounts under SIM_NG in the
-// dedicated seed namespace, idempotently — the live-identity unique index
-// (telco_id, msisdn_token) WHERE effective_to IS NULL makes a re-run a no-op.
-// The write is tenant-scoped: RLS structurally binds every row to SIM_NG, so even
-// a coding slip cannot write another telco's data (defence in depth on top of the
-// VerifySyntheticOnly guard). Returns the number of NEW rows created.
+// dedicated seed namespace, idempotently — an unqualified ON CONFLICT DO NOTHING makes
+// a re-run a no-op on ANY unique conflict (the subscriber_account_id primary key OR the
+// live-identity index (telco_id, msisdn_token)). Deduping on the stable primary key (not
+// only the token) is what keeps the seed idempotent even if the deterministic msisdn_token
+// FUNCTION changes: member i keeps its id, so a re-seed on an existing volume is still a
+// clean no-op instead of a primary-key violation. The write is tenant-scoped: RLS
+// structurally binds every row to SIM_NG, so even a coding slip cannot write another
+// telco's data (defence in depth on top of the VerifySyntheticOnly guard). Returns the
+// number of NEW rows created.
 func SeedCohort(ctx context.Context, appPool *pgxpool.Pool, plan CohortPlan) (int, error) {
 	if plan.Count <= 0 {
 		return 0, fmt.Errorf("simseed: cohort count must be positive, got %d", plan.Count)
@@ -127,7 +149,7 @@ func SeedCohort(ctx context.Context, appPool *pgxpool.Pool, plan CohortPlan) (in
 			ct, err := tx.Exec(ctx, `
 				INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
 				VALUES ($1, $2, $3, 'ACTIVE')
-				ON CONFLICT (telco_id, msisdn_token) WHERE effective_to IS NULL DO NOTHING`,
+				ON CONFLICT DO NOTHING`,
 				subscriberID(plan.Seed, i), SyntheticTelco, msisdnToken(plan.Seed, i))
 			if err != nil {
 				return fmt.Errorf("simseed: insert cohort member %d: %w", i, err)

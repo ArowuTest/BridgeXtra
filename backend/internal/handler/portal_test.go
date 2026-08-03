@@ -77,6 +77,8 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Recovery:   recovery.New(db.App, appCfg, led, slog.Default()),
 		Demo:       ops.NewDemo(db.App, appCfg, orig, slog.Default()),
 		Operator:   repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker},
+		Audit:      repo.Audit{},
+		Pool:       db.App, // B.2a reveal audit (platform-scope row on the app pool)
 		Operators:  operatormgmt.New(db.App, slog.Default()),
 		Held:       rechargehold.New(db.App, recovery.New(db.App, appCfg, led, slog.Default()), slog.Default()),
 		Limiter:    testLimiter(),

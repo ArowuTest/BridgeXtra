@@ -148,6 +148,10 @@ func main() {
 		Recovery:   rec,
 		Demo:       ops.NewDemo(appPool, appCfg, orig, log),
 		Operator:   repo.OperatorReader{Pool: operatorPool, Resolve: workerPool},
+		// B.2a MSISDN reveal: append-only audit on the app pool (platform-scope row,
+		// telco in detail). The reveal fails closed if this write fails.
+		Audit: repo.Audit{},
+		Pool:  appPool,
 		// Governed operator provisioning runs on the app role: migration 0047
 		// grants it exactly INSERT + UPDATE(status) on admin_credentials (create
 		// + revoke), and nothing on role/scope — write-once is DB-enforced.

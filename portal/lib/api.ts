@@ -606,3 +606,97 @@ export function supportComplaintProgress(
 ): Promise<{ complaint_id: string; state: string }> {
   return request("POST", `/v1/portal/support/complaints/${id}/progress`, { to, resolution });
 }
+
+// --- Wave B.2a Subscriber-360 (the MSISDN is the account number) ------------------
+// Directory rows + the full 360 are scope-bound by the operator-read pool (RLS). The
+// MSISDN is masked everywhere; the full number is fetched separately via subscriberReveal,
+// which writes a real audit event server-side.
+
+export type SubscriberDirectoryRow = {
+  subscriber_account_id: string; // opaque internal key — drill target (not PII)
+  telco_id: string;
+  msisdn_masked: string; // server-masked; the full token never reaches a list
+  status: string;
+  open_loans: number;
+  total_outstanding: MoneyView; // loan-book basis; reconciles to SUBSCRIBER_RECEIVABLE
+  ever_borrowed: MoneyView; // Σ disbursed
+  ever_repaid: MoneyView; // Σ recovery allocations (fee + principal)
+  worst_bucket: string; // "" when none open
+  last_recharge_at?: string;
+};
+
+export function subscriberSearch(
+  q: string,
+  limit?: number,
+): Promise<{ subscribers: SubscriberDirectoryRow[] }> {
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (limit) p.set("limit", String(limit));
+  return request("GET", `/v1/portal/ops/subscribers?${p}`);
+}
+
+export type LimitPoint = {
+  limit: MoneyView;
+  tier: string;
+  prior_tier: string; // "" when no prior at scoring time
+  config_version: string; // pinned decision inputs (the "why")
+  is_current: boolean;
+  scored_at: string;
+  valid_until?: string;
+};
+
+export type SubscriberLoan = {
+  advance_id: string;
+  programme_id: string;
+  state: string;
+  delinquency_bucket: string; // "" when unclassified
+  disbursed: MoneyView;
+  outstanding: MoneyView;
+  recovered: MoneyView;
+  accepted_at: string;
+  activated_at?: string;
+  closed_at?: string;
+};
+
+export type RechargeEvent = {
+  amount: MoneyView;
+  state: string; // ALLOCATED / QUARANTINED / UNMATCHED / PENDING
+  applied: MoneyView; // how much of this recharge went to loans
+  occurred_at: string;
+};
+
+export type RepaymentEvent = {
+  advance_id: string;
+  component: string; // FEE | PRINCIPAL
+  amount: MoneyView;
+  applied_at: string;
+};
+
+export type SubscriberProfile = {
+  subscriber: {
+    subscriber_account_id: string;
+    telco_id: string;
+    msisdn_masked: string;
+    status: string;
+    effective_from: string;
+  };
+  current_limit: LimitPoint | null;
+  limit_history: LimitPoint[];
+  loans: SubscriberLoan[];
+  total_outstanding: MoneyView; // Σ over open loans — reconciles to this subscriber's receivable
+  recharges: RechargeEvent[];
+  repayments: RepaymentEvent[];
+};
+
+export function subscriberProfile(id: string): Promise<SubscriberProfile> {
+  return request("GET", `/v1/portal/ops/subscribers/${encodeURIComponent(id)}`);
+}
+
+// subscriberReveal returns the FULL MSISDN and writes an audit event server-side.
+// Fail-closed: if the audit write fails, the server returns an error and nothing is
+// disclosed. POST (a deliberate action, CSRF-protected), not a GET.
+export function subscriberReveal(
+  id: string,
+): Promise<{ subscriber_account_id: string; msisdn: string }> {
+  return request("POST", `/v1/portal/ops/subscribers/${encodeURIComponent(id)}/reveal`);
+}

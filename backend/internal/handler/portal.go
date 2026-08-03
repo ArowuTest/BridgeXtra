@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -56,6 +58,8 @@ type Portal struct {
 	Recovery          *recovery.Service     // M4e parked-reversal retry (tenant tx, reuses guarded apply)
 	Demo              *ops.Demo             // M4e-3 fault demo (real origination path, sim-only allowlist)
 	Operator          repo.OperatorReader   // Gate B #1 Slice 2: DB-enforced operator reads (tcp_operator + scoped tx)
+	Audit             repo.Audit            // B.2a: append-only audit for the MSISDN reveal (fail-closed)
+	Pool              *pgxpool.Pool         // B.2a: app-role pool for the reveal audit write (platform-scope row)
 	Operators         *operatormgmt.Service // governed operator provisioning (v1: four-eyes create + revoke)
 	Held              *rechargehold.Service // S2.3b HELD-recharge review queue (four-eyes release)
 	Limiter           *ratelimit.Limiter    // R-P0-8 inbound rate limit (login)
@@ -122,6 +126,13 @@ var routeRoles = map[string][]string{
 	// (money-adjacent, mirrors the fulfilments/reversals read roles). Scope-bound.
 	"GET /v1/portal/ops/advances":      {roleAdmin, roleOps, roleFinance},
 	"GET /v1/portal/ops/advances/{id}": {roleAdmin, roleOps, roleFinance},
+
+	// Wave B.2a Subscriber-360: the MSISDN directory + the per-subscriber 360.
+	// Same oversight roles as the loan book (money-adjacent, read-only, scope-bound).
+	// The reveal is a deliberate, audited step gated to ADMIN + OPS + FINANCE.
+	"GET /v1/portal/ops/subscribers":              {roleAdmin, roleOps, roleFinance},
+	"GET /v1/portal/ops/subscribers/{id}":         {roleAdmin, roleOps, roleFinance},
+	"POST /v1/portal/ops/subscribers/{id}/reveal": {roleAdmin, roleOps, roleFinance},
 
 	// M4e-2 subscriber status actions (VR-35-F1): reads for all oversight
 	// roles; request/decide for OPS and RISK (barring is a conduct/risk
@@ -213,6 +224,9 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "POST /v1/portal/ops/reversals/{id}/retry", http.HandlerFunc(p.opsReversalRetry))
 	p.mountRBAC(mux, "GET /v1/portal/ops/advances", http.HandlerFunc(p.opsAdvances))
 	p.mountRBAC(mux, "GET /v1/portal/ops/advances/{id}", http.HandlerFunc(p.opsAdvance))
+	p.mountRBAC(mux, "GET /v1/portal/ops/subscribers", http.HandlerFunc(p.opsSubscribers))
+	p.mountRBAC(mux, "GET /v1/portal/ops/subscribers/{id}", http.HandlerFunc(p.opsSubscriber))
+	p.mountRBAC(mux, "POST /v1/portal/ops/subscribers/{id}/reveal", http.HandlerFunc(p.opsSubscriberReveal))
 
 	p.mountRBAC(mux, "GET /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActions))
 	p.mountRBAC(mux, "POST /v1/portal/ops/status-actions", http.HandlerFunc(p.opsStatusActionRequest))
