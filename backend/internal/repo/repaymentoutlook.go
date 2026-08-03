@@ -53,9 +53,11 @@ type RepaymentOutlook struct {
 	ActiveWeeks       int          // distinct weeks with a repayment in the window
 	TypicalWeekly     entity.Money // median weekly repayment across active weeks (the pace)
 
-	// Range: whole weeks to clear the current balance, bracketed by the subscriber's
-	// own week-to-week variation (optimistic = at their busier weeks, pessimistic = at
-	// their quieter weeks). Zero unless Status == PROJECTED.
+	// Range: whole CALENDAR weeks to clear the current balance, bracketed by the
+	// subscriber's own week-to-week variation (optimistic = at their busier weeks,
+	// pessimistic = at their quieter weeks) and anchored to elapsed calendar time by
+	// their paying cadence, so it never reads faster than reality. Zero unless
+	// Status == PROJECTED.
 	OptimisticWeeks  int
 	PessimisticWeeks int
 
@@ -95,9 +97,11 @@ func RepaymentOutlookFrom(owed entity.Money, repayments []RepaymentEvent, rechar
 
 	cutoff := asOf.AddDate(0, 0, -outlookWindowDays)
 
-	// Bucket windowed repayments by 7-day week (week 0 = most recent).
+	// Bucket windowed repayments by 7-day week (week 0 = most recent); also track the
+	// earliest windowed repayment, so the paying weeks can be anchored to CALENDAR time.
 	weekMinor := map[int]int64{}
 	var recoveredMinor int64
+	var earliest time.Time
 	for _, r := range repayments {
 		if !r.AppliedAt.After(cutoff) {
 			continue
@@ -108,6 +112,9 @@ func RepaymentOutlookFrom(owed entity.Money, repayments []RepaymentEvent, rechar
 		}
 		weekMinor[wk] += r.Amount.Amount()
 		recoveredMinor += r.Amount.Amount()
+		if earliest.IsZero() || r.AppliedAt.Before(earliest) {
+			earliest = r.AppliedAt
+		}
 	}
 
 	if recoveredMinor == 0 {
@@ -142,11 +149,36 @@ func RepaymentOutlookFrom(owed entity.Money, repayments []RepaymentEvent, rechar
 	fast := percentile(weekly, 75) // busier weeks -> clears sooner
 	slow := percentile(weekly, 25) // quieter weeks -> clears later
 	owedMinor := owed.Amount()
-	out.OptimisticWeeks = ceilDivInt64(owedMinor, fast)
-	out.PessimisticWeeks = ceilDivInt64(owedMinor, slow)
+
+	// The p25/p75 above yield REPAYMENT weeks. Anchor them to CALENDAR time via the
+	// subscriber's paying cadence: their active repayment weeks fell across the elapsed
+	// span, so a subscriber who repays less than weekly clears in more calendar weeks
+	// than repayment weeks — the headline must never read faster than real elapsed time.
+	spanDays := int(asOf.Sub(earliest).Hours() / 24)
+	if spanDays < 7 {
+		spanDays = 7
+	}
+	out.OptimisticWeeks = toCalendarWeeks(ceilDivInt64(owedMinor, fast), spanDays, out.ActiveWeeks)
+	out.PessimisticWeeks = toCalendarWeeks(ceilDivInt64(owedMinor, slow), spanDays, out.ActiveWeeks)
 	out.Status = OutlookProjected
-	out.Note = "Estimate from the recent repayment pace; the range reflects week-to-week variation and actual timing depends on future recharges."
+	out.Note = "Estimate in calendar time at the recent repayment cadence; the range reflects week-to-week variation, and actual timing depends on future recharges."
 	return out
+}
+
+// toCalendarWeeks converts a count of REPAYMENT weeks into CALENDAR weeks using the
+// subscriber's paying cadence: activeWeeks repayment weeks fell across spanDays of
+// calendar time, so each repayment week represents spanDays/(7*activeWeeks) calendar
+// weeks. It never returns fewer than the repayment-week count — calendar time is always
+// >= paying time, so the estimate can never read faster than reality.
+func toCalendarWeeks(payingWeeks, spanDays, activeWeeks int) int {
+	if payingWeeks <= 0 || activeWeeks <= 0 {
+		return payingWeeks
+	}
+	cal := ceilDivInt64(int64(payingWeeks)*int64(spanDays), int64(7*activeWeeks))
+	if cal < payingWeeks {
+		cal = payingWeeks
+	}
+	return cal
 }
 
 // rechargeContext summarises the windowed recharges: count, median amount, and the

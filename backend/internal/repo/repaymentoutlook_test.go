@@ -107,6 +107,31 @@ func TestOutlook_Projected_RangeFromOwnVariation(t *testing.T) {
 	}
 }
 
+// Calendar anchoring: a subscriber who repays roughly every 3 weeks must clear in more
+// CALENDAR weeks than repayment weeks — the headline must never read faster than the
+// elapsed time. Three equal repayment weeks at 5/26/47 days ago (weeks 0/3/6, span 47d):
+// paying weeks to clear = ceil(6000/2000)=3, but calendar = ceil(3 * 47 / (7*3)) = 7.
+func TestOutlook_Projected_AnchoredToCalendarTime(t *testing.T) {
+	sparse := RepaymentOutlookFrom(ngn(t, 6000),
+		[]RepaymentEvent{repay(t, 2000, 5), repay(t, 2000, 26), repay(t, 2000, 47)}, nil, outlookAsOf)
+	if sparse.Status != OutlookProjected {
+		t.Fatalf("expected PROJECTED, got %s", sparse.Status)
+	}
+	// All weeks equal (2000) so p25=p50=p75 → paying weeks = 3; calendar must exceed that.
+	if sparse.OptimisticWeeks != 7 || sparse.PessimisticWeeks != 7 {
+		t.Fatalf("sparse (~3-weekly) repayer must be anchored to calendar time (7 weeks, not 3 paying weeks), got %d..%d",
+			sparse.OptimisticWeeks, sparse.PessimisticWeeks)
+	}
+	// A weekly repayer with the SAME per-week amounts clears in far fewer calendar weeks —
+	// proving the anchor tracks cadence, not just the amounts.
+	dense := RepaymentOutlookFrom(ngn(t, 6000),
+		[]RepaymentEvent{repay(t, 2000, 3), repay(t, 2000, 10), repay(t, 2000, 17)}, nil, outlookAsOf)
+	if dense.PessimisticWeeks >= sparse.PessimisticWeeks {
+		t.Fatalf("a weekly repayer (%d wks) must clear sooner in calendar time than a 3-weekly repayer (%d wks)",
+			dense.PessimisticWeeks, sparse.PessimisticWeeks)
+	}
+}
+
 // A future-dated repayment (clock skew) must not create a negative week bucket or crash.
 func TestOutlook_FutureDatedRepaymentIsSafe(t *testing.T) {
 	rs := []RepaymentEvent{

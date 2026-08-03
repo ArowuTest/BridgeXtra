@@ -355,10 +355,10 @@ function OutlookCard({ o }: { o: RepaymentOutlook }) {
         </Text>
         <Text size="sm" c="dimmed" mt={6}>
           Based on {o.recovered_in_window.display} repaid over the last {o.window_days} days (typically{" "}
-          {o.typical_weekly.display}/week{cadence}).
+          {o.typical_weekly.display} in a repayment week{cadence}).
         </Text>
         <Text size="xs" c="dimmed" mt={4}>
-          The range reflects week-to-week variation; actual timing depends on future recharges.
+          Calendar-time estimate at their recent cadence; actual timing depends on future recharges.
         </Text>
       </Card>
     );
