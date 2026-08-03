@@ -130,11 +130,11 @@ func acceptFor(ov origination.OfferView, token, idem, corr string) origination.C
 
 func TestWalkingSkeleton_SuccessPath_ActiveBalancedLedgerCorrelated(t *testing.T) {
 	f := newFixture(t, "orig_success", 0, 2_000)
-	offers := f.offersFor(t, "tok_sim_0001") // seeded subscriber, ₦500 cap
+	offers := f.offersFor(t, "tok_sim_0001") // seeded subscriber, ₦10,000 cap
 
-	// Ladder derives from config: 5000..50000 kobo, 10% upfront fee.
+	// Ladder derives from config: 10000..1000000 kobo, 10% upfront fee.
 	first := offers[0]
-	if first.Offer.FaceValue.Amount() != 5_000 || first.Offer.Fee.Amount() != 500 || first.Offer.Disbursed.Amount() != 4_500 {
+	if first.Offer.FaceValue.Amount() != 10_000 || first.Offer.Fee.Amount() != 1_000 || first.Offer.Disbursed.Amount() != 9_000 {
 		t.Fatalf("offer economics from config wrong: %+v", first.Offer)
 	}
 
@@ -145,14 +145,14 @@ func TestWalkingSkeleton_SuccessPath_ActiveBalancedLedgerCorrelated(t *testing.T
 	if res.Advance.State != entity.AdvActive {
 		t.Fatalf("want ACTIVE, got %s", res.Advance.State)
 	}
-	if res.Advance.Outstanding.Amount() != 5_000 {
-		t.Fatalf("outstanding = %d, want 5000 (repayment obligation)", res.Advance.Outstanding.Amount())
+	if res.Advance.Outstanding.Amount() != 10_000 {
+		t.Fatalf("outstanding = %d, want 10000 (repayment obligation)", res.Advance.Outstanding.Amount())
 	}
 
 	// Pool: reservation converted to utilisation.
 	reserved, utilised := f.poolState(t)
-	if reserved != 0 || utilised != 5_000 {
-		t.Fatalf("pool reserved=%d utilised=%d, want 0/5000", reserved, utilised)
+	if reserved != 0 || utilised != 10_000 {
+		t.Fatalf("pool reserved=%d utilised=%d, want 0/10000", reserved, utilised)
 	}
 
 	// Ledger: balanced journal, correlation lineage (BC-6).
@@ -304,7 +304,7 @@ func TestEDG005_TimeoutAfterSuccess_UnknownNoJournalReservationHeld(t *testing.T
 		t.Fatal("V2-LED-006: no journal while fulfilment is unknown")
 	}
 	reserved, _ := f.poolState(t)
-	if reserved != 5_000 {
+	if reserved != 10_000 {
 		t.Fatalf("reservation must be held during UNKNOWN, reserved=%d", reserved)
 	}
 	// Enquiry scheduled from governed config.
@@ -347,7 +347,7 @@ func TestEDG011_ExpiredOffer_SafeRejection(t *testing.T) {
 
 func TestVR7a_ConcurrentFirstEnquiries_SingleLadder(t *testing.T) {
 	f := newFixture(t, "orig_vr7a", 0, 2_000)
-	f.seedSubscriber(t, "sub_vr7a", "tok_vr7a_1", 50_000)
+	f.seedSubscriber(t, "sub_vr7a", "tok_vr7a_1", 1_000_000)
 
 	const n = 6
 	var wg sync.WaitGroup
@@ -360,14 +360,14 @@ func TestVR7a_ConcurrentFirstEnquiries_SingleLadder(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Exactly one ladder (4 config denominations, all under the ₦500 cap).
+	// Exactly one ladder (6 config denominations, all under the ₦10,000 cap).
 	var offers int
 	if err := f.db.Admin.QueryRow(context.Background(),
 		`SELECT count(*) FROM offers WHERE subscriber_account_id='sub_vr7a'`).Scan(&offers); err != nil {
 		t.Fatal(err)
 	}
-	if offers != 4 {
-		t.Fatalf("VR-7a: concurrent first enquiries must mint ONE ladder (4 offers), got %d", offers)
+	if offers != 6 {
+		t.Fatalf("VR-7a: concurrent first enquiries must mint ONE ladder (6 offers), got %d", offers)
 	}
 }
 

@@ -55,24 +55,24 @@ func (f *fixture) confirmFor(t *testing.T, token, idem string) (origination.Conf
 	})
 }
 
-// EDG-024: sequential mass approval — the third ₦50 confirm (disbursed 4500
-// each) pushes the day past a 12,000-kobo cap: trip, suspend, refuse-fast,
+// EDG-024: sequential mass approval — the third ₦100 confirm (disbursed 9000
+// each) pushes the day past a 24,000-kobo cap: trip, suspend, refuse-fast,
 // two-person re-arm, config-driven recovery.
 func TestEDG024_DailyCapSurge_TripSuspendRearm(t *testing.T) {
 	f := newFixture(t, "m3d_surge", 0, 2_000)
-	f.activateGuardrails(t, 12_000)
+	f.activateGuardrails(t, 24_000)
 	for i := 1; i <= 4; i++ {
 		f.seedSubscriber(t, fmt.Sprintf("sub_g%d", i), fmt.Sprintf("tok_g%d", i), 50_000)
 	}
 	ctx := context.Background()
 
-	// Two confirms land (9,000 disbursed today).
+	// Two confirms land (18,000 disbursed today).
 	for i := 1; i <= 2; i++ {
 		if _, err := f.confirmFor(t, fmt.Sprintf("tok_g%d", i), fmt.Sprintf("g-%d", i)); err != nil {
 			t.Fatalf("confirm %d: %v", i, err)
 		}
 	}
-	// The third breaches (13,500 > 12,000): declined customer-safe, trip
+	// The third breaches (27,000 > 24,000): declined customer-safe, trip
 	// recorded, programme suspended.
 	_, err := f.confirmFor(t, "tok_g3", "g-3")
 	if !errors.Is(err, treasury.ErrProgrammeSuspended) {
@@ -129,8 +129,8 @@ func TestEDG024_DailyCapSurge_TripSuspendRearm(t *testing.T) {
 
 	// The day's total still sits at the cap edge, so recovery is a GOVERNED
 	// LIMIT RAISE (no deploy — the no-hardcoding directive under fire):
-	// raise to 30,000 and the next confirm lands.
-	f.activateGuardrails(t, 30_000)
+	// raise to 60,000 and the next confirm lands.
+	f.activateGuardrails(t, 60_000)
 	if _, err := f.confirmFor(t, "tok_g3", "g-3-retry"); err != nil {
 		t.Fatalf("after governed limit raise, lending must resume: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestEDG024_DailyCapSurge_TripSuspendRearm(t *testing.T) {
 // stay clean.
 func TestEDG025_ConcurrentSurge_CapCannotBeRaced(t *testing.T) {
 	f := newFixture(t, "m3d_concurrent", 0, 2_000)
-	f.activateGuardrails(t, 12_000)
+	f.activateGuardrails(t, 24_000)
 	const n = 6
 	for i := 1; i <= n; i++ {
 		f.seedSubscriber(t, fmt.Sprintf("sub_c%d", i), fmt.Sprintf("tok_c%d", i), 50_000)
@@ -172,8 +172,8 @@ func TestEDG025_ConcurrentSurge_CapCannotBeRaced(t *testing.T) {
 		WHERE state NOT IN ('DECLINED','FULFILMENT_FAILED')`).Scan(&disbursedToday); err != nil {
 		t.Fatal(err)
 	}
-	if disbursedToday > 12_000 {
-		t.Fatalf("EDG-025: the cap was raced past — disbursed %d > 12000", disbursedToday)
+	if disbursedToday > 24_000 {
+		t.Fatalf("EDG-025: the cap was raced past — disbursed %d > 24000", disbursedToday)
 	}
 	if succeeded > 2 {
 		t.Fatalf("at most two confirms fit under the cap, %d succeeded", succeeded)
@@ -201,7 +201,7 @@ func TestEDG025_ConcurrentSurge_CapCannotBeRaced(t *testing.T) {
 		Scan(&reserved, &utilised); err != nil {
 		t.Fatal(err)
 	}
-	if reserved+utilised != int64(succeeded)*5_000 {
+	if reserved+utilised != int64(succeeded)*10_000 {
 		t.Fatalf("pool must fund exactly the survivors: reserved=%d utilised=%d succeeded=%d",
 			reserved, utilised, succeeded)
 	}

@@ -119,15 +119,15 @@ func TestLoop_Slice2_VariedPopulation(t *testing.T) {
 	}
 
 	// Winsorisation falsification (design §2): the defaulter's raw 13-week sum is
-	// 200000 + 12*3000 = 236000 (>=200000 -> TIER_03 -> 20000). The winsorised total
-	// caps the spike, so the ACTUAL limit is the starter 5000. The raw-sum expectation
-	// MUST NOT hold; the winsorised one MUST.
+	// 3000000 + 12*45000 = 3540000 (>=1000000 -> TIER_02 -> 100000). The winsorised total
+	// caps the spike week, so the ACTUAL limit is the starter 50000. The raw-sum
+	// expectation MUST NOT hold; the winsorised one MUST.
 	dft := decisionByToken(t, db, msisdnToken(loopSeed, 3)) // index 3 = defaulter
-	if dft.maxFace == 20000 {
-		t.Fatalf("defaulter scored the RAW-sum tier (20000) — winsorisation did not cap the spike")
+	if dft.maxFace == 100000 {
+		t.Fatalf("defaulter scored the RAW-sum tier (100000) — winsorisation did not cap the spike")
 	}
-	if dft.maxFace != 5000 {
-		t.Fatalf("defaulter must score the winsorised starter limit 5000, got %d (tier=%s)", dft.maxFace, dft.tier)
+	if dft.maxFace != 50000 {
+		t.Fatalf("defaulter must score the winsorised starter limit 50000, got %d (tier=%s)", dft.maxFace, dft.tier)
 	}
 
 	// Treasury floor is real but NOT tripped by the small default cohort: the

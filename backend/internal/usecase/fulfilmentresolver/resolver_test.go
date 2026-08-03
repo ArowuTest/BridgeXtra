@@ -128,7 +128,7 @@ func TestEDG005_Continuation_ResolverActivatesExactlyOnce(t *testing.T) {
 		Scan(&journals, &reserved, &utilised); err != nil {
 		t.Fatal(err)
 	}
-	if journals != 1 || reserved != 0 || utilised != 5_000 {
+	if journals != 1 || reserved != 0 || utilised != 10_000 {
 		t.Fatalf("exactly-once violated: journals=%d reserved=%d utilised=%d", journals, reserved, utilised)
 	}
 
@@ -151,7 +151,7 @@ func TestEDG007_CrashBetweenTx1AndTx2_StaleSentRecoveredOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	advID := f.manualTx1(t, offers[0].Offer, "tok_crash_r2")
-	f.sim.CreditDirect(advID, 5_000, "NGN") // telco succeeded; we never heard
+	f.sim.CreditDirect(advID, 10_000, "NGN") // telco succeeded; we never heard
 
 	// Stale-SENT threshold: backdate the attempt past delays[0]=10s.
 	if _, err := f.db.Admin.Exec(context.Background(),
@@ -275,7 +275,7 @@ func (f *fixture) seed(t *testing.T, subID, token string) {
 	if _, err := f.db.Admin.Exec(ctx, `
 		INSERT INTO decision_snapshots (decision_snapshot_id, telco_id, subscriber_account_id,
 		  max_face_value_minor, currency, config_version_id)
-		VALUES ('dec_'||$1,'SIM_NG',$1,50000,'NGN','cfg_seed_product_airtime_v1')`, subID); err != nil {
+		VALUES ('dec_'||$1,'SIM_NG',$1,1000000,'NGN','cfg_seed_product_airtime_v1')`, subID); err != nil {
 		t.Fatal(err)
 	}
 }

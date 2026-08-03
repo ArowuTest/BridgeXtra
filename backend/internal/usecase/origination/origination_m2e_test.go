@@ -209,7 +209,7 @@ func TestM2E_NotificationEvidence_SentViaCanonicalSMS(t *testing.T) {
 	if msgs[0].SenderID != "BridgeXtra" || msgs[0].MSISDNToken != "tok_sim_0001" {
 		t.Fatalf("sender/recipient from governed config: %+v", msgs[0])
 	}
-	if !strings.Contains(msgs[0].Body, "NGN 50.00") {
-		t.Fatalf("body must carry display amounts (face NGN 50.00): %q", msgs[0].Body)
+	if !strings.Contains(msgs[0].Body, "NGN 100.00") {
+		t.Fatalf("body must carry display amounts (face NGN 100.00): %q", msgs[0].Body)
 	}
 }

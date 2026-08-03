@@ -63,7 +63,7 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 	ctx := context.Background()
 	periodStart := time.Now().UTC().Add(-1 * time.Hour)
 
-	// The money story: ₦50 advance (fee 500, disbursed 4500) fully recovered.
+	// The money story: ₦100 advance (fee 1000, disbursed 9000) fully recovered.
 	offers, err := orig.GetOffers(tenantCtx(), "prg_sim_airtime01", "tok_sim_0001")
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +78,7 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 	}
 	if _, err := rec.Ingest(tenantCtx(), recovery.IngestCmd{
 		SourceEventID: "set-src-1", MSISDNToken: "tok_sim_0001",
-		Amount: entity.MustMoney(5_000, entity.NGN), OccurredAt: time.Now().UTC(),
+		Amount: entity.MustMoney(10_000, entity.NGN), OccurredAt: time.Now().UTC(),
 		CorrelationID: "cor-set-2",
 	}); err != nil {
 		t.Fatal(err)
@@ -93,15 +93,15 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 	}
 
 	want := map[string]int64{
-		"PRINCIPAL_DISBURSED":            4_500,
-		"FEE_INCOME_TOTAL":               500,
-		"RECOVERED_TOTAL":                5_000,
+		"PRINCIPAL_DISBURSED":            9_000,
+		"FEE_INCOME_TOTAL":               1_000,
+		"RECOVERED_TOTAL":                10_000,
 		"RECOVERY_REVERSED_TOTAL":        0,
 		"WRITEOFF_EXPENSE_TOTAL":         0,
 		"WRITEOFF_RECOVERY_INCOME_TOTAL": 0,
-		"TELCO_SHARE":                    125, // 25% of 500 (PercentBps, exact)
-		"PLATFORM_SHARE":                 375, // 500 - 125: exact partition
-		"TAX_VAT":                        38,  // 7.5% of 500 = 37.5 -> HALF-UP 38
+		"TELCO_SHARE":                    250, // 25% of 1000 (PercentBps, exact)
+		"PLATFORM_SHARE":                 750, // 1000 - 250: exact partition
+		"TAX_VAT":                        75,  // 7.5% of 1000 = 75 (exact)
 	}
 	got := map[string]int64{}
 	for _, l := range st.Lines {
@@ -146,7 +146,7 @@ func TestM3E_Settlement_LedgerDerived_Reproducible(t *testing.T) {
 	// journal entry (no runtime role can) breaks the hash equality.
 	if _, err := db.Admin.Exec(ctx, `
 		UPDATE journal_entries SET credit_minor = credit_minor + 1
-		WHERE account_code = 'FEE_INCOME' AND credit_minor = 500`); err != nil {
+		WHERE account_code = 'FEE_INCOME' AND credit_minor = 1000`); err != nil {
 		t.Fatal(err)
 	}
 	err = set.VerifyReproducible(ctx, "SIM_NG", st.StatementID)

@@ -129,7 +129,7 @@ func (s *stack) seedSubscriber(t *testing.T, subID, token string) {
 	if _, err := s.db.Admin.Exec(ctx, `
 		INSERT INTO decision_snapshots (decision_snapshot_id, telco_id, subscriber_account_id,
 		  max_face_value_minor, currency, config_version_id)
-		VALUES ('dec_'||$1,'SIM_NG',$1,50000,'NGN','cfg_seed_product_airtime_v1')`, subID); err != nil {
+		VALUES ('dec_'||$1,'SIM_NG',$1,1000000,'NGN','cfg_seed_product_airtime_v1')`, subID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -277,7 +277,7 @@ func TestWalkingSkeleton_E2E(t *testing.T) {
 	for i, tok := range []string{"tok_e2e_ok", "tok_TIMEOUT_e2e"} {
 		code, body = s.http(t, http.MethodPost, "/v1/recovery/events", "", map[string]any{
 			"source_event_id": fmt.Sprintf("e2e-src-%d", i), "msisdn_token": tok,
-			"amount":      map[string]any{"amount_minor": 5000, "currency": "NGN"},
+			"amount":      map[string]any{"amount_minor": 10000, "currency": "NGN"},
 			"occurred_at": time.Now().UTC().Format(time.RFC3339),
 		})
 		if code != http.StatusOK {

@@ -26,18 +26,18 @@ func (f *fixture) ingestCmd(t *testing.T, cmd recovery.IngestCmd) (recovery.Inge
 // — a partial recovery replay must report the same Applied and Excess.
 func TestRP02_Replay_ReturnsExactOriginalOutcome(t *testing.T) {
 	f := newFixture(t, "rp02_replay")
-	adv := f.activeAdvance(t) // ₦50 advance, outstanding 5000
+	adv := f.activeAdvance(t) // ₦100 advance, outstanding 10000
 
-	// Over-recovery: applied 5000, excess 2000 (quarantined), advance closed.
+	// Over-recovery: applied 10000, excess 4000 (quarantined), advance closed.
 	cmd := recovery.IngestCmd{
 		SourceEventID: "evt_rp02_over", MSISDNToken: "tok_sim_0001",
-		Amount: entity.MustMoney(7_000, entity.NGN), OccurredAt: time.Now().UTC(), CorrelationID: "cor-over",
+		Amount: entity.MustMoney(14_000, entity.NGN), OccurredAt: time.Now().UTC(), CorrelationID: "cor-over",
 	}
 	r1, err := f.ingestCmd(t, cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r1.Applied.Amount() != 5_000 || r1.Excess.Amount() != 2_000 || !r1.AdvanceClosed {
+	if r1.Applied.Amount() != 10_000 || r1.Excess.Amount() != 4_000 || !r1.AdvanceClosed {
 		t.Fatalf("baseline over-recovery outcome wrong: %+v", r1)
 	}
 	_ = adv
@@ -50,7 +50,7 @@ func TestRP02_Replay_ReturnsExactOriginalOutcome(t *testing.T) {
 	if !r2.Replayed {
 		t.Fatal("replay must be flagged")
 	}
-	if r2.Applied.Amount() != 5_000 || r2.Excess.Amount() != 2_000 || !r2.AdvanceClosed ||
+	if r2.Applied.Amount() != 10_000 || r2.Excess.Amount() != 4_000 || !r2.AdvanceClosed ||
 		r2.RecoveryEventID != r1.RecoveryEventID || r2.State != r1.State {
 		t.Fatalf("replay must reproduce the EXACT original outcome, got %+v want %+v", r2, r1)
 	}

@@ -63,8 +63,8 @@ func newFixture(t *testing.T, suffix string) *fixture {
 	return &fixture{db: db, orig: orig, rec: rec}
 }
 
-// activeAdvance originates a ₦50 advance for the seeded subscriber and
-// returns it ACTIVE (outstanding 5000 kobo: fee 500 + principal 4500).
+// activeAdvance originates a ₦100 advance for the seeded subscriber and
+// returns it ACTIVE (outstanding 10000 kobo: fee 1000 + principal 9000).
 func (f *fixture) activeAdvance(t *testing.T) entity.Advance {
 	t.Helper()
 	offers, err := f.orig.GetOffers(tenantCtx(), "prg_sim_airtime01", "tok_sim_0001")
@@ -108,12 +108,12 @@ func TestRecovery_PartialThenClose_FeeFirstWaterfall(t *testing.T) {
 	f := newFixture(t, "rec_partial")
 	adv := f.activeAdvance(t)
 
-	// Partial ₦3 (300 kobo... wait: 2000 kobo = ₦20): fee 500 first, rest principal.
-	r1 := f.ingest(t, "src-1", 2_000)
-	if r1.State != entity.RecoveryAllocated || r1.Applied.Amount() != 2_000 || r1.AdvanceClosed {
+	// Partial ₦40 (4000 kobo): fee 1000 first, rest principal.
+	r1 := f.ingest(t, "src-1", 4_000)
+	if r1.State != entity.RecoveryAllocated || r1.Applied.Amount() != 4_000 || r1.AdvanceClosed {
 		t.Fatalf("partial: %+v", r1)
 	}
-	// Waterfall: FEE 500 then PRINCIPAL 1500.
+	// Waterfall: FEE 1000 then PRINCIPAL 3000.
 	var feeSum, prinSum int64
 	if err := f.db.Admin.QueryRow(context.Background(), `
 		SELECT COALESCE(SUM(amount_minor) FILTER (WHERE component='FEE'),0),
@@ -121,7 +121,7 @@ func TestRecovery_PartialThenClose_FeeFirstWaterfall(t *testing.T) {
 		FROM recovery_allocations`).Scan(&feeSum, &prinSum); err != nil {
 		t.Fatal(err)
 	}
-	if feeSum != 500 || prinSum != 1_500 {
+	if feeSum != 1_000 || prinSum != 3_000 {
 		t.Fatalf("fee-first waterfall violated: fee=%d principal=%d", feeSum, prinSum)
 	}
 	// Advance state + outstanding.
@@ -132,13 +132,13 @@ func TestRecovery_PartialThenClose_FeeFirstWaterfall(t *testing.T) {
 		Scan(&state, &outstanding); err != nil {
 		t.Fatal(err)
 	}
-	if state != "PARTIALLY_RECOVERED" || outstanding != 3_000 {
+	if state != "PARTIALLY_RECOVERED" || outstanding != 6_000 {
 		t.Fatalf("after partial: state=%s outstanding=%d", state, outstanding)
 	}
 
 	// Close with the exact remainder.
-	r2 := f.ingest(t, "src-2", 3_000)
-	if !r2.AdvanceClosed || r2.Applied.Amount() != 3_000 {
+	r2 := f.ingest(t, "src-2", 6_000)
+	if !r2.AdvanceClosed || r2.Applied.Amount() != 6_000 {
 		t.Fatalf("close: %+v", r2)
 	}
 	// Pool fully released; receivable rebuilt to zero; all journals balanced.
@@ -166,9 +166,9 @@ func TestEDG020_OverRecovery_AppliedPlusSuspense(t *testing.T) {
 	f := newFixture(t, "rec_over")
 	f.activeAdvance(t)
 
-	// ₦70 against ₦50 outstanding: 5000 applied, 2000 suspense.
-	r := f.ingest(t, "src-over", 7_000)
-	if !r.AdvanceClosed || r.Applied.Amount() != 5_000 || r.Excess.Amount() != 2_000 {
+	// ₦140 against ₦100 outstanding: 10000 applied, 4000 suspense.
+	r := f.ingest(t, "src-over", 14_000)
+	if !r.AdvanceClosed || r.Applied.Amount() != 10_000 || r.Excess.Amount() != 4_000 {
 		t.Fatalf("over-recovery split wrong: %+v", r)
 	}
 	var suspense int64
@@ -176,7 +176,7 @@ func TestEDG020_OverRecovery_AppliedPlusSuspense(t *testing.T) {
 		`SELECT COALESCE(SUM(amount_minor),0) FROM suspense_items WHERE state='OPEN'`).Scan(&suspense); err != nil {
 		t.Fatal(err)
 	}
-	if suspense != 2_000 {
+	if suspense != 4_000 {
 		t.Fatalf("suspense must hold the excess: %d", suspense)
 	}
 	// Suspense liability on the books, balanced.
@@ -186,8 +186,8 @@ func TestEDG020_OverRecovery_AppliedPlusSuspense(t *testing.T) {
 		WHERE account_code='RECOVERY_SUSPENSE'`).Scan(&suspenseBal); err != nil {
 		t.Fatal(err)
 	}
-	if suspenseBal != 2_000 {
-		t.Fatalf("RECOVERY_SUSPENSE liability must be 2000, got %d", suspenseBal)
+	if suspenseBal != 4_000 {
+		t.Fatalf("RECOVERY_SUSPENSE liability must be 4000, got %d", suspenseBal)
 	}
 }
 
@@ -195,8 +195,8 @@ func TestEDG018_DuplicateSourceEvent_ReplaysUntouched(t *testing.T) {
 	f := newFixture(t, "rec_dup")
 	f.activeAdvance(t)
 
-	r1 := f.ingest(t, "src-dup", 2_000)
-	r2 := f.ingest(t, "src-dup", 2_000) // telco replay
+	r1 := f.ingest(t, "src-dup", 4_000)
+	r2 := f.ingest(t, "src-dup", 4_000) // telco replay
 	if !r2.Replayed || r2.RecoveryEventID != r1.RecoveryEventID {
 		t.Fatalf("duplicate must replay original: %+v", r2)
 	}
@@ -205,8 +205,8 @@ func TestEDG018_DuplicateSourceEvent_ReplaysUntouched(t *testing.T) {
 		`SELECT outstanding_minor FROM advances`).Scan(&outstanding); err != nil {
 		t.Fatal(err)
 	}
-	if outstanding != 3_000 {
-		t.Fatalf("duplicate must not double-recover: outstanding=%d want 3000", outstanding)
+	if outstanding != 6_000 {
+		t.Fatalf("duplicate must not double-recover: outstanding=%d want 6000", outstanding)
 	}
 	var allocations int
 	if err := f.db.Admin.QueryRow(context.Background(),

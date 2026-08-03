@@ -63,15 +63,21 @@ func flat(v int64, n int) []int64 {
 	return w
 }
 
-// profiles is the population the loop drives (design §2). The defaulter carries a
-// single spike (200000 then flat 3000) so the anti-gaming WINSORISATION is exercised:
-// the raw sum would score a higher tier, but the winsorised total caps it.
+// profiles is the population the loop drives (design §2). Recharge amounts are
+// calibrated to the MTN bundle's ₦-scale tier gates (min_recharge_90d = 10× max_face):
+// TIER_01 ₦5k/90d → ₦500, TIER_02 ₦10k → ₦1k, TIER_03 ₦50k → ₦5k, TIER_04 ₦100k → ₦10k
+// (kobo gates 500000/1000000/5000000/10000000; faces 50000/100000/500000/1000000).
+// The defaulter carries a single spike (3000000 then flat 45000) so the anti-gaming
+// WINSORISATION is exercised: the raw 90d sum (₦35,400 → clears the ₦10k/90d TIER_02
+// gate) would buy a higher tier, but the winsorised total (spike week capped) lands at
+// TIER_01. If a future scale change moves these, TestScoringPolicyBundle_RatioInvariant
+// (repo) still locks the underwriting ratio; these expectMaxFace values track the ladder.
 var profiles = []profile{
-	{name: "good-payer", tenureDays: 720, activity30: 30, active90: 90, weekly: flat(40000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 50000, expectReason: "", recoverBps: 10000},
-	{name: "varied-limit", tenureDays: 365, activity30: 30, active90: 90, weekly: flat(10000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 10000, expectReason: "", recoverBps: 5000},
-	{name: "thin-file", tenureDays: 90, activity30: 30, active90: 8, weekly: flat(5000, 13), qualityFlags: []string{"SHORT_HISTORY"}, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 5000, expectReason: "COLD_START_THIN_FILE", recoverBps: 10000},
-	{name: "defaulter", tenureDays: 200, activity30: 30, active90: 90, weekly: append([]int64{200000}, flat(3000, 12)...), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 5000, expectReason: "SPIKE_PATTERN_DETECTED", recoverBps: 0},
-	{name: "declined", tenureDays: 400, activity30: 30, active90: 90, weekly: flat(20000, 13), qualityFlags: []string{"MISSING_FIELDS"}, originates: false, expectEligible: false, expectMaxFace: 0, expectReason: "MISSING_DATA_REJECTED", recoverBps: 0},
+	{name: "good-payer", tenureDays: 720, activity30: 30, active90: 90, weekly: flat(800000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 1000000, expectReason: "", recoverBps: 10000},
+	{name: "varied-limit", tenureDays: 365, activity30: 30, active90: 90, weekly: flat(100000, 13), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 100000, expectReason: "", recoverBps: 5000},
+	{name: "thin-file", tenureDays: 90, activity30: 30, active90: 8, weekly: flat(50000, 13), qualityFlags: []string{"SHORT_HISTORY"}, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 50000, expectReason: "COLD_START_THIN_FILE", recoverBps: 10000},
+	{name: "defaulter", tenureDays: 200, activity30: 30, active90: 90, weekly: append([]int64{3000000}, flat(45000, 12)...), qualityFlags: nil, originates: true, telcoOutcome: mno.OutcomeConfirmed, expectEligible: true, expectMaxFace: 50000, expectReason: "SPIKE_PATTERN_DETECTED", recoverBps: 0},
+	{name: "declined", tenureDays: 400, activity30: 30, active90: 90, weekly: flat(200000, 13), qualityFlags: []string{"MISSING_FIELDS"}, originates: false, expectEligible: false, expectMaxFace: 0, expectReason: "MISSING_DATA_REJECTED", recoverBps: 0},
 }
 
 // toRow renders a profile as a featureingest-valid row: exactly 13 weekly values,

@@ -122,7 +122,7 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 	if err := json.Unmarshal(body, &offers); err != nil {
 		t.Fatal(err)
 	}
-	if len(offers) == 0 || offers[0].FaceValue.AmountMinor != 5_000 || offers[0].FaceValue.Currency != "NGN" {
+	if len(offers) == 0 || offers[0].FaceValue.AmountMinor != 10_000 || offers[0].FaceValue.Currency != "NGN" {
 		t.Fatalf("offer ladder wrong: %s", body)
 	}
 	// R-P0-7: the channel must receive a disclosure to render and a reference
@@ -158,7 +158,7 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 	if err := json.Unmarshal(body, &adv); err != nil {
 		t.Fatal(err)
 	}
-	if adv.Status != "ACTIVE" || adv.Outstanding.AmountMinor != 5_000 {
+	if adv.Status != "ACTIVE" || adv.Outstanding.AmountMinor != 10_000 {
 		t.Fatalf("advance: %s", body)
 	}
 
@@ -200,7 +200,7 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 		"X-Correlation-Id": "cor-wire-rec",
 	}, map[string]any{
 		"source_event_id": "wire-src-1", "msisdn_token": "tok_sim_0001",
-		"amount":      map[string]any{"amount_minor": 5_000, "currency": "NGN"},
+		"amount":      map[string]any{"amount_minor": 10_000, "currency": "NGN"},
 		"occurred_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if resp.StatusCode != http.StatusOK {

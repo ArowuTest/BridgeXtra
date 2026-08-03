@@ -61,9 +61,9 @@ func TestEDG019_ReversalBeforeOriginal_NetsExactly(t *testing.T) {
 		t.Fatalf("original must allocate: %+v", res)
 	}
 
-	// Net effect: outstanding back to the full 5000, advance still open.
+	// Net effect: outstanding back to the full 10000, advance still open.
 	state, outstanding := f.advanceRow(t, adv.AdvanceID)
-	if outstanding != 5_000 || state != string(entity.AdvPartiallyRecovered) {
+	if outstanding != 10_000 || state != string(entity.AdvPartiallyRecovered) {
 		t.Fatalf("pair must net to pre-pair book: state=%s outstanding=%d", state, outstanding)
 	}
 	// Parked row closed.
@@ -83,7 +83,7 @@ func TestEDG019_ReversalBeforeOriginal_NetsExactly(t *testing.T) {
 		`SELECT utilised_minor FROM funding_pools WHERE pool_id='pool_sim_01'`).Scan(&utilised); err != nil {
 		t.Fatal(err)
 	}
-	if utilised != 5_000 {
+	if utilised != 10_000 {
 		t.Fatalf("pool must fund the restored obligation: utilised=%d", utilised)
 	}
 }
@@ -94,16 +94,16 @@ func TestEDG019_ReversalAfterClose_ReopensBook(t *testing.T) {
 	f := newFixture(t, "rev_reopen")
 	adv := f.activeAdvance(t)
 
-	if res := f.ingest(t, "src-full-1", 5_000); !res.AdvanceClosed {
+	if res := f.ingest(t, "src-full-1", 10_000); !res.AdvanceClosed {
 		t.Fatalf("full recovery must close: %+v", res)
 	}
-	rev := f.reverse(t, "rvsl-2", "src-full-1", 5_000)
+	rev := f.reverse(t, "rvsl-2", "src-full-1", 10_000)
 	if rev.Parked || !rev.AdvanceReopened {
 		t.Fatalf("reversal after close must re-open, not park: %+v", rev)
 	}
 
 	state, outstanding := f.advanceRow(t, adv.AdvanceID)
-	if state != string(entity.AdvPartiallyRecovered) || outstanding != 5_000 {
+	if state != string(entity.AdvPartiallyRecovered) || outstanding != 10_000 {
 		t.Fatalf("book must re-open with restored outstanding: state=%s outstanding=%d", state, outstanding)
 	}
 	// Fully-reversed event is visible as REVERSED.
@@ -150,7 +150,7 @@ func TestEDG021_PostWriteoffRecovery_IsIncome(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := f.db.Admin.Exec(ctx, `
-		UPDATE funding_pools SET utilised_minor = utilised_minor - 5000 WHERE pool_id='pool_sim_01'`); err != nil {
+		UPDATE funding_pools SET utilised_minor = utilised_minor - 10000 WHERE pool_id='pool_sim_01'`); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,7 +222,7 @@ func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) 
 	advA := f.activeAdvance(t)
 
 	// A fully recovers and closes; the subscriber legally takes advance B.
-	if res := f.ingest(t, "src-A-full", 5_000); !res.AdvanceClosed {
+	if res := f.ingest(t, "src-A-full", 10_000); !res.AdvanceClosed {
 		t.Fatalf("A must close: %+v", res)
 	}
 	offers, err := f.orig.GetOffers(tenantCtx(), "prg_sim_airtime01", "tok_sim_0001")
@@ -241,7 +241,7 @@ func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) 
 
 	// The telco reverses a recovery on A: the reopen would collide with B's
 	// one-active slot — the reversal must PARK with the collision recorded.
-	rev := f.reverse(t, "rvsl-A", "src-A-full", 5_000)
+	rev := f.reverse(t, "rvsl-A", "src-A-full", 10_000)
 	if !rev.Parked || rev.AdvanceReopened {
 		t.Fatalf("collision must park, not apply: %+v", rev)
 	}
@@ -268,7 +268,7 @@ func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) 
 	if res := f.ingest(t, "src-B-full", resB.Advance.Outstanding.Amount()); !res.AdvanceClosed {
 		t.Fatalf("B must close: %+v", res)
 	}
-	rev2 := f.reverse(t, "rvsl-A", "src-A-full", 5_000)
+	rev2 := f.reverse(t, "rvsl-A", "src-A-full", 10_000)
 	if rev2.Parked || !rev2.AdvanceReopened {
 		t.Fatalf("retry after blocker clears must apply: %+v", rev2)
 	}
@@ -279,7 +279,7 @@ func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) 
 	if prState != "APPLIED" {
 		t.Fatalf("parked row must drain to APPLIED: %s", prState)
 	}
-	if state, outstanding := f.advanceRow(t, advA.AdvanceID); state != string(entity.AdvPartiallyRecovered) || outstanding != 5_000 {
+	if state, outstanding := f.advanceRow(t, advA.AdvanceID); state != string(entity.AdvPartiallyRecovered) || outstanding != 10_000 {
 		t.Fatalf("A must re-open with restored outstanding: %s/%d", state, outstanding)
 	}
 	assertBalancedBook(t, f)
@@ -290,7 +290,7 @@ func TestM3BF1_ReopenCollision_ParksThenAppliesAfterBlockerClears(t *testing.T) 
 func TestM3BF1_PoolHeadroomCollision_Parks(t *testing.T) {
 	f := newFixture(t, "rev_headroom")
 	f.activeAdvance(t)
-	if res := f.ingest(t, "src-H-full", 5_000); !res.AdvanceClosed {
+	if res := f.ingest(t, "src-H-full", 10_000); !res.AdvanceClosed {
 		t.Fatalf("must close: %+v", res)
 	}
 	// Shrink the pool so the reopen cannot be funded.
@@ -299,7 +299,7 @@ func TestM3BF1_PoolHeadroomCollision_Parks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rev := f.reverse(t, "rvsl-H", "src-H-full", 5_000)
+	rev := f.reverse(t, "rvsl-H", "src-H-full", 10_000)
 	if !rev.Parked {
 		t.Fatalf("headroom collision must park: %+v", rev)
 	}

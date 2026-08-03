@@ -172,7 +172,7 @@ func TestM3C_WriteOff_FullMakerCheckerJourney(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wo.Fee.Amount() != 500 || wo.Principal.Amount() != 4_500 {
+	if wo.Fee.Amount() != 1_000 || wo.Principal.Amount() != 9_000 {
 		t.Fatalf("split must itemise the obligation: fee=%d principal=%d", wo.Fee.Amount(), wo.Principal.Amount())
 	}
 	// Duplicate request refused (schema-arbitered).
@@ -206,7 +206,7 @@ func TestM3C_WriteOff_FullMakerCheckerJourney(t *testing.T) {
 		SELECT COALESCE(SUM(debit_minor),0) FROM journal_entries WHERE account_code='WRITE_OFF_EXPENSE'`).Scan(&expense); err != nil {
 		t.Fatal(err)
 	}
-	if expense != 5_000 {
+	if expense != 10_000 {
 		t.Fatalf("loss must be recognised in the books: %d", expense)
 	}
 	var woState string
