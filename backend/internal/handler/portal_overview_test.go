@@ -63,11 +63,11 @@ type ovResponse struct {
 		Recovered       ovMoney `json:"recovered"`
 		Reconciled      bool    `json:"reconciled"`
 	} `json:"summary"`
-	ByBucketValue       map[string]ovMoney `json:"by_bucket_value"`
-	CollectedToday      ovMoney            `json:"collected_today"`
-	WrittenOffPrincipal ovMoney            `json:"written_off_principal"`
-	PaydownRatio        float64            `json:"paydown_ratio"`
-	Programmes          []ovProgramme      `json:"programmes"`
+	ByBucketValue  map[string]ovMoney `json:"by_bucket_value"`
+	CollectedToday ovMoney            `json:"collected_today"`
+	WrittenOff     ovMoney            `json:"written_off"`
+	PaydownRatio   float64            `json:"paydown_ratio"`
+	Programmes     []ovProgramme      `json:"programmes"`
 }
 
 // seedReceivableCredit posts a RECOVERY_APPLIED journal dated today crediting
@@ -94,9 +94,13 @@ func seedReceivableCredit(t *testing.T, f *portalFixture, n int, creditMinor int
 	}
 }
 
-// seedWriteOff posts a WRITE_OFF_EXPENSE debit (a crystallised loss). B4's query
-// filters only on the account code, so any journal carrying the entry qualifies.
-func seedWriteOff(t *testing.T, f *portalFixture, n int, debitMinor int64) {
+// seedWriteOff posts a WRITE_OFF journal mirroring template 0049: DR WRITE_OFF_EXPENSE =
+// faceMinor (the full outstanding written off), and — under DEFERRED — a CR
+// WRITE_OFF_EXPENSE = unearnedFeeMinor that nets the unearned fee back out of the *expense*.
+// The paydown denominator must read the DR leg (full face), NOT the net (debit − credit), so
+// a DEFERRED write-off lowers the ratio by its full owed amount (D1). Pass unearnedFeeMinor=0
+// for the UPFRONT / no-deferred-fee case.
+func seedWriteOff(t *testing.T, f *portalFixture, n int, faceMinor, unearnedFeeMinor int64) {
 	t.Helper()
 	ctx := context.Background()
 	jid := fmt.Sprintf("jr_wo_%d", n)
@@ -108,7 +112,14 @@ func seedWriteOff(t *testing.T, f *portalFixture, n int, debitMinor int64) {
 		  VALUES ($1,$2,'WRITE_OFF','SIM_NG','prg_sim_airtime01',$3)`,
 			[]any{jid, fmt.Sprintf("bek_wo_%d", n), fmt.Sprintf("corr_wo_%d", n)}},
 		{`INSERT INTO journal_entries (entry_id, journal_id, account_code, debit_minor, currency)
-		  VALUES ($1,$2,'WRITE_OFF_EXPENSE',$3,'NGN')`, []any{jid + "_d", jid, debitMinor}},
+		  VALUES ($1,$2,'WRITE_OFF_EXPENSE',$3,'NGN')`, []any{jid + "_d", jid, faceMinor}},
+	}
+	if unearnedFeeMinor > 0 {
+		stmts = append(stmts, struct {
+			sql  string
+			args []any
+		}{`INSERT INTO journal_entries (entry_id, journal_id, account_code, credit_minor, currency)
+		  VALUES ($1,$2,'WRITE_OFF_EXPENSE',$3,'NGN')`, []any{jid + "_c", jid, unearnedFeeMinor}})
 	}
 	for _, q := range stmts {
 		if _, err := f.db.Admin.Exec(ctx, q.sql, q.args...); err != nil {
@@ -136,8 +147,8 @@ func TestOverview_AddTiles_B3_B4_A9_AndScopeFailClosed(t *testing.T) {
 
 	// One ACTIVE advance: outstanding 8000, recovered 2000. Bucket is NULL → UNCLASSIFIED.
 	seedLoanBookAdvance(t, f, 1, "ACTIVE", 10000, 1000, 9000, 8000, 2000)
-	seedReceivableCredit(t, f, 1, 1500) // B3: collected today = 1500
-	seedWriteOff(t, f, 1, 3000)         // B4 denominator: written off = 3000
+	seedReceivableCredit(t, f, 1, 1500) // B3: collected today = 1500 minor = ₦15.00
+	seedWriteOff(t, f, 1, 3000, 0)      // B4 denominator: written off face = 3000 minor = ₦30.00
 
 	r := overviewGET(t, f, &ops)
 
@@ -145,13 +156,19 @@ func TestOverview_AddTiles_B3_B4_A9_AndScopeFailClosed(t *testing.T) {
 	if r.CollectedToday.AmountMinor != 1500 {
 		t.Fatalf("collected_today must be today's SUBSCRIBER_RECEIVABLE credit (1500), got %d", r.CollectedToday.AmountMinor)
 	}
-	// The money is rendered through toMoneyView (governed decimals → major units with ₦).
-	if r.CollectedToday.Display == "" || r.CollectedToday.Currency != "NGN" {
-		t.Fatalf("collected_today must be server-formatted NGN money, got %+v", r.CollectedToday)
+	// The money is rendered through toMoneyView (governed decimals → major units with ₦). Pin
+	// the exact string: a decimal-scale regression (minor-as-major, or a stray /1000) would
+	// render ₦1,500.00 or ₦0.15 here and ship green against an amount_minor-only assertion —
+	// exactly the class the loan-scale fix was about.
+	if r.CollectedToday.Display != "₦15.00" {
+		t.Fatalf("collected_today must render ₦15.00 (1500 minor, NGN=2dp), got %q", r.CollectedToday.Display)
 	}
-	// B4 written-off crystallised loss.
-	if r.WrittenOffPrincipal.AmountMinor != 3000 {
-		t.Fatalf("written_off_principal must be the WRITE_OFF_EXPENSE balance (3000), got %d", r.WrittenOffPrincipal.AmountMinor)
+	if r.CollectedToday.Currency != "NGN" {
+		t.Fatalf("collected_today currency must be NGN, got %q", r.CollectedToday.Currency)
+	}
+	// B4 written-off face (full outstanding written off, fee-inclusive).
+	if r.WrittenOff.AmountMinor != 3000 || r.WrittenOff.Display != "₦30.00" {
+		t.Fatalf("written_off must be the WRITE_OFF face (3000 minor = ₦30.00), got %d / %q", r.WrittenOff.AmountMinor, r.WrittenOff.Display)
 	}
 	// B4 paydown ratio = recovered / (recovered + open + written-off) = 2000/(2000+8000+3000).
 	want := 2000.0 / 13000.0
@@ -174,9 +191,9 @@ func TestOverview_AddTiles_B3_B4_A9_AndScopeFailClosed(t *testing.T) {
 	}
 	g := f.login(t, "portal-key-ops-global-ov")
 	gr := overviewGET(t, f, &g)
-	if gr.Summary.TotalCount != 0 || gr.CollectedToday.AmountMinor != 0 || gr.WrittenOffPrincipal.AmountMinor != 0 {
+	if gr.Summary.TotalCount != 0 || gr.CollectedToday.AmountMinor != 0 || gr.WrittenOff.AmountMinor != 0 {
 		t.Fatalf("no-authority operator must see zeros, got count=%d collected=%d written=%d",
-			gr.Summary.TotalCount, gr.CollectedToday.AmountMinor, gr.WrittenOffPrincipal.AmountMinor)
+			gr.Summary.TotalCount, gr.CollectedToday.AmountMinor, gr.WrittenOff.AmountMinor)
 	}
 	if gr.PaydownRatio != 0 {
 		t.Fatalf("no-authority paydown_ratio must be 0 (denominator zero), got %.6f", gr.PaydownRatio)
@@ -265,8 +282,13 @@ func TestOverview_ProgrammeHealth_C1Excludes_A10Headroom_C3Latest(t *testing.T) 
 	if prog.Pool == nil {
 		t.Fatalf("pool must be present for the '*' admin — 0067 op_all_funding_pools missing?")
 	}
-	if prog.Pool.ExposureBps <= 0 || prog.Pool.ExposureBps > 10000 {
-		t.Fatalf("exposure_bps must be the governed ceiling in (0,10000], got %d", prog.Pool.ExposureBps)
+	// exposure_bps must come from the GOVERNED config, not a hardcoded constant. Read the
+	// effective treasury.guardrails ceiling (programme scope, else global — the same fallback
+	// configsvc.ActiveAt uses) and assert the response echoes it. A hardcoded 8000 would drift
+	// the instant the config is superseded to a new bps.
+	cfgBps := activeGuardrailBps(t, f, "prg_sim_airtime01")
+	if prog.Pool.ExposureBps != cfgBps {
+		t.Fatalf("exposure_bps must equal the governed config value %d, got %d (bps not read from config?)", cfgBps, prog.Pool.ExposureBps)
 	}
 	wantLimit := prog.Pool.Committed.AmountMinor * prog.Pool.ExposureBps / 10000
 	if prog.Pool.ExposureLimit.AmountMinor != wantLimit {
@@ -287,5 +309,97 @@ func TestOverview_ProgrammeHealth_C1Excludes_A10Headroom_C3Latest(t *testing.T) 
 	}
 	if prog.LastBreach.Measured.AmountMinor != 600000000 || prog.LastBreach.Limit.AmountMinor != 500000000 {
 		t.Fatalf("last_breach money mismatch: measured=%d limit=%d", prog.LastBreach.Measured.AmountMinor, prog.LastBreach.Limit.AmountMinor)
+	}
+}
+
+// End-to-end telco isolation for the overview: a telco-SIM_NG-scoped operator (not '*',
+// not global) must see its own programme in the health section but NEVER another telco's.
+// The handler tests otherwise only drive the '*' and no-authority extremes; this exercises
+// the scope-derivation → OperatorReader(app.telco_id) → ProgrammesInScope(RLS) path that
+// 0067's op_all_programmes must NOT widen for a telco operator.
+func TestOverview_TelcoScopedOperator_ExcludesOtherTelco(t *testing.T) {
+	f := newPortalFixture(t, "ov_telcoscope")
+	ctx := context.Background()
+	for _, s := range []string{
+		`INSERT INTO telcos (telco_id, name, country, status) VALUES ('OTHER_NG','Other','NG','ACTIVE') ON CONFLICT DO NOTHING`,
+		`INSERT INTO programmes (programme_id, telco_id, code, name, status)
+		   VALUES ('prg_other','OTHER_NG','OTHER_AIRTIME','Other Airtime','ACTIVE')`,
+	} {
+		if _, err := f.db.Admin.Exec(ctx, s); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := (&repo.Admins{Pool: f.db.Admin}).CreateWithRole(ctx, "adm_ov_ts", "ops_sim_ts", "portal-key-ops-sim-ts", "OPS", "telco:SIM_NG"); err != nil {
+		t.Fatal(err)
+	}
+	sess := f.login(t, "portal-key-ops-sim-ts")
+	r := overviewGET(t, f, &sess)
+
+	var sawSim, sawOther bool
+	for _, p := range r.Programmes {
+		switch p.ProgrammeID {
+		case "prg_sim_airtime01":
+			sawSim = true
+			if p.TelcoID != "SIM_NG" {
+				t.Fatalf("scoped programme must be SIM_NG, got %q", p.TelcoID)
+			}
+		case "prg_other":
+			sawOther = true
+		}
+	}
+	if !sawSim {
+		t.Fatalf("a SIM_NG-scoped operator must see its own programme; programmes=%+v", r.Programmes)
+	}
+	if sawOther {
+		t.Fatalf("a SIM_NG-scoped operator must NOT see OTHER_NG's programme (end-to-end telco isolation); programmes=%+v", r.Programmes)
+	}
+}
+
+// activeGuardrailBps reads the effective treasury.guardrails max_open_exposure_bps for a
+// programme (programme scope preferred, else global — mirroring configsvc.ActiveAt's
+// fallback), so the exposure_bps assertion's expected value comes from the governed config
+// itself, not a literal baked into the test.
+func activeGuardrailBps(t *testing.T, f *portalFixture, programmeID string) int64 {
+	t.Helper()
+	var bps int64
+	if err := f.db.Admin.QueryRow(context.Background(), `
+		SELECT (content->>'max_open_exposure_bps_of_committed')::bigint
+		FROM config_versions
+		WHERE domain = 'treasury.guardrails' AND state = 'ACTIVE'
+		  AND scope IN ('programme:' || $1, 'global')
+		ORDER BY (scope = 'programme:' || $1) DESC
+		LIMIT 1`, programmeID).Scan(&bps); err != nil {
+		t.Fatalf("read active guardrail bps: %v", err)
+	}
+	return bps
+}
+
+// D1 — the paydown denominator uses the FULL FACE written off, not the net WRITE_OFF_EXPENSE.
+// Under DEFERRED, a write-off posts DR WRITE_OFF_EXPENSE = face and CR WRITE_OFF_EXPENSE =
+// unearned fee, so the net (debit − credit) is principal-only while recovered/open are
+// fee-inclusive — the old net basis would UNDERSTATE the denominator and OVERSTATE the ratio.
+// This seeds a DEFERRED write-off (face 1000, unearned fee 300) and asserts written_off reads
+// the full 1000 and the ratio uses it.
+func TestOverview_PaydownDenominator_UsesFullFaceWrittenOff(t *testing.T) {
+	f := newPortalFixture(t, "ov_paydown_face")
+	ops := f.login(t, roleKeys["OPS"])
+
+	// An ACTIVE advance: open 4000, recovered 1000 (both fee-inclusive).
+	seedLoanBookAdvance(t, f, 30, "ACTIVE", 5000, 500, 4500, 4000, 1000)
+	// A DEFERRED write-off: full face 1000, of which 300 was unearned fee reversed out. The
+	// net expense (debit − credit) is 700; the face (debit) is 1000.
+	seedWriteOff(t, f, 30, 1000, 300)
+
+	r := overviewGET(t, f, &ops)
+
+	// written_off must be the full face (1000), NOT the net expense (700).
+	if r.WrittenOff.AmountMinor != 1000 {
+		t.Fatalf("written_off must be the FULL FACE written off (1000), got %d — a net (debit−credit) basis would read 700 and overstate the ratio", r.WrittenOff.AmountMinor)
+	}
+	// Denominator = recovered + open + written-off face = 1000 + 4000 + 1000 = 6000.
+	// The old net basis would give 1000/(1000+4000+700) = 0.1724 — higher (overstated).
+	want := 1000.0 / 6000.0
+	if diff := r.PaydownRatio - want; diff > 1e-9 || diff < -1e-9 {
+		t.Fatalf("paydown_ratio must use the full face in the denominator (= %.6f), got %.6f", want, r.PaydownRatio)
 	}
 }

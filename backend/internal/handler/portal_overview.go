@@ -78,12 +78,12 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			d.programmes = append(d.programmes, pr)
-			td, e := repo.TodayDisbursedForProgramme(ctx, tx, pr.ProgrammeID)
+			td, e := repo.TodayDisbursedForProgramme(ctx, tx, scope, pr.ProgrammeID)
 			if e != nil {
 				return d, e
 			}
 			d.today[pr.ProgrammeID] = td
-			pe, e := repo.PoolExposureForProgramme(ctx, tx, pr.ProgrammeID)
+			pe, e := repo.PoolExposureForProgramme(ctx, tx, scope, pr.ProgrammeID)
 			if e != nil {
 				return d, e
 			}
@@ -105,10 +105,13 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// B4 paydown ratio (a proportion, NOT money, NOT a due-based collections rate —
-	// see false-premise #1). recovered / (recovered + still-owed + crystallised loss).
+	// see false-premise #1). recovered / (recovered + still-owed + written-off face). All
+	// three terms are fee-inclusive: recovered = Σ recovery allocations, open_outstanding
+	// includes unpaid fee, and WrittenOff is the full face written off (D1) — so a
+	// written-off loan lowers the ratio by its full owed amount, not just principal.
 	recovered := data.summary.Recovered.Amount()
 	openOut := data.summary.OpenOutstanding.Amount()
-	writtenOff := data.extras.WrittenOffPrincipal.Amount()
+	writtenOff := data.extras.WrittenOff.Amount()
 	denom := recovered + openOut + writtenOff
 	var paydownRatio float64
 	if denom > 0 {
@@ -186,15 +189,15 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"summary":               loanBookSummaryJSON(data.summary),
-		"by_bucket_value":       byBucketValueJSON(data.summary.ByBucketValue), // A9
-		"collected_today":       toMoneyView(data.extras.CollectedToday),       // B3
-		"written_off_principal": toMoneyView(data.extras.WrittenOffPrincipal),
-		"paydown_ratio":         paydownRatio, // B4 — a proportion; labelled honestly on the client
+		"summary":         loanBookSummaryJSON(data.summary),
+		"by_bucket_value": byBucketValueJSON(data.summary.ByBucketValue), // A9
+		"collected_today": toMoneyView(data.extras.CollectedToday),       // B3
+		"written_off":     toMoneyView(data.extras.WrittenOff),           // B4 denominator term — full face
+		"paydown_ratio":   paydownRatio,                                  // B4 — a proportion; labelled honestly on the client
 		"paydown_ratio_basis": map[string]any{
 			"recovered":        toMoneyView(data.summary.Recovered),
 			"open_outstanding": toMoneyView(data.summary.OpenOutstanding),
-			"written_off":      toMoneyView(data.extras.WrittenOffPrincipal),
+			"written_off":      toMoneyView(data.extras.WrittenOff),
 		},
 		"programmes": programmes, // C1/C2/C3/A10
 	})

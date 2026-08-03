@@ -16,18 +16,24 @@ import (
 )
 
 // OverviewExtras are the telco-scoped money figures the dashboard adds beyond the loan
-// book: money collected today, and the crystallised write-off loss (the paydown ratio's
-// third denominator term). Zero on no-authority.
+// book: money collected today, and the face-value written off (the paydown ratio's third
+// denominator term). Zero on no-authority.
 type OverviewExtras struct {
-	CollectedToday      entity.Money // receivable reduction from RECOVERY_APPLIED postings dated today (money in)
-	WrittenOffPrincipal entity.Money // WRITE_OFF_EXPENSE balance (debit − credit) — crystallised loss
+	CollectedToday entity.Money // receivable reduction from RECOVERY_APPLIED postings dated today (money in)
+	// WrittenOff is the FULL FACE written off (fee-inclusive) — Σ of the WRITE_OFF DR leg
+	// (WRITE_OFF_EXPENSE side=DEBIT amount=AMOUNT, templates 0015/0049), the only event
+	// that debits WRITE_OFF_EXPENSE. NOT the net expense (debit − credit): under DEFERRED
+	// the WRITE_OFF CR FEE_UNEARNED_REVERSED leg nets the unearned fee back out, leaving a
+	// principal-only figure — but recovered and open_outstanding are fee-inclusive, so the
+	// paydown denominator must use the fee-inclusive face here for a consistent base (D1).
+	WrittenOff entity.Money
 }
 
 // OverviewExtrasFor computes the collected-today and written-off figures, telco-scoped by
 // the RLS tx plus the optional admin telco filter (mirrors the loan-book cross-foots).
 func OverviewExtrasFor(ctx context.Context, q Querier, scope OperatorScope, telcoFilter string) (OverviewExtras, error) {
 	zero := entity.MustMoney(0, entity.NGN)
-	out := OverviewExtras{CollectedToday: zero, WrittenOffPrincipal: zero}
+	out := OverviewExtras{CollectedToday: zero, WrittenOff: zero}
 	if !scope.authority {
 		return out, nil
 	}
@@ -42,12 +48,17 @@ WHERE je.account_code = 'SUBSCRIBER_RECEIVABLE' AND j.event_type = 'RECOVERY_APP
   AND j.accounting_date = CURRENT_DATE AND ($1 = '' OR j.telco_id = $1)`, telcoFilter).Scan(&collectedMinor); err != nil {
 		return out, fmt.Errorf("collected today: %w", err)
 	}
-	// Written-off loss: the WRITE_OFF_EXPENSE ledger balance (debit-normal expense), the
-	// principal crystallised as a loss — so writing off a bad loan lowers the paydown
-	// ratio rather than flattering it.
+	// Written off: the FULL FACE written off (fee-inclusive) — Σ of the WRITE_OFF DR leg
+	// only (SUM(debit_minor), NOT debit − credit). WRITE_OFF is the only event that debits
+	// WRITE_OFF_EXPENSE, and its DR leg is AMOUNT = full outstanding; the sole credit leg is
+	// the DEFERRED FEE_UNEARNED_REVERSED, which nets the unearned fee out of the *expense*
+	// but must NOT reduce the paydown denominator — recovered and open_outstanding are both
+	// fee-inclusive, so the write-off term must be the fee-inclusive face for a consistent
+	// base (D1). Post-write-off recoveries hit WRITEOFF_RECOVERY_INCOME, never this account,
+	// and there is no write-off-reversal event, so SUM(debit_minor) is exactly Σ AMOUNT.
 	var writtenOffMinor int64
 	if err := q.QueryRow(ctx, `
-SELECT COALESCE(SUM(je.debit_minor - je.credit_minor), 0)
+SELECT COALESCE(SUM(je.debit_minor), 0)
 FROM journal_entries je JOIN journals j ON j.journal_id = je.journal_id
 WHERE je.account_code = 'WRITE_OFF_EXPENSE' AND ($1 = '' OR j.telco_id = $1)`, telcoFilter).Scan(&writtenOffMinor); err != nil {
 		return out, fmt.Errorf("written off: %w", err)
@@ -56,7 +67,7 @@ WHERE je.account_code = 'WRITE_OFF_EXPENSE' AND ($1 = '' OR j.telco_id = $1)`, t
 	if out.CollectedToday, e = scanMoney(collectedMinor, "NGN"); e != nil {
 		return out, e
 	}
-	if out.WrittenOffPrincipal, e = scanMoney(writtenOffMinor, "NGN"); e != nil {
+	if out.WrittenOff, e = scanMoney(writtenOffMinor, "NGN"); e != nil {
 		return out, e
 	}
 	return out, nil
@@ -94,8 +105,13 @@ func ProgrammesInScope(ctx context.Context, q Querier, scope OperatorScope) ([]P
 // TodayDisbursedForProgramme is the guardrail's own DAILY_DISBURSED today-total — the
 // EXACT SQL treasury.EvaluateInTx uses (accepted_at-based, excludes declined/failed) so
 // the headroom tile can never disagree with the guardrail that would actually trip. The
-// programmeID comes from a scope-resolved enumeration, so no extra telco filter is needed.
-func TodayDisbursedForProgramme(ctx context.Context, q Querier, programmeID string) (entity.Money, error) {
+// programmeID comes from a scope-resolved enumeration; the RLS tx already bounds it by
+// telco, and the explicit no-authority guard fails closed as defense-in-depth (matching
+// the other operator reads) even if the caller ever runs it outside the programme loop.
+func TodayDisbursedForProgramme(ctx context.Context, q Querier, scope OperatorScope, programmeID string) (entity.Money, error) {
+	if !scope.authority {
+		return entity.MustMoney(0, entity.NGN), nil
+	}
 	var minor int64
 	if err := q.QueryRow(ctx, `
 SELECT COALESCE(SUM(disbursed_minor), 0) FROM advances
@@ -118,8 +134,13 @@ type PoolExposure struct {
 }
 
 // PoolExposureForProgramme sums the programme's funding pools (funding_pools granted to
-// the operator role in 0067). programmeID is scope-resolved.
-func PoolExposureForProgramme(ctx context.Context, q Querier, programmeID string) (PoolExposure, error) {
+// the operator role in 0067). programmeID is scope-resolved; the RLS tx bounds funding_pools
+// by telco, and the explicit no-authority guard fails closed as defense-in-depth (matching
+// the other operator reads).
+func PoolExposureForProgramme(ctx context.Context, q Querier, scope OperatorScope, programmeID string) (PoolExposure, error) {
+	if !scope.authority {
+		return PoolExposure{}, nil
+	}
 	var committed, reserved, utilised int64
 	var has bool
 	if err := q.QueryRow(ctx, `

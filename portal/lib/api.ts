@@ -361,7 +361,7 @@ export type OpsOverview = {
   summary: LoanBookSummary; // A1–A7 + reconciled
   by_bucket_value: Record<string, MoneyView>; // A9 — ₦ arrears per delinquency bucket
   collected_today: MoneyView; // B3
-  written_off_principal: MoneyView;
+  written_off: MoneyView; // B4 denominator term — full face written off (fee-inclusive)
   paydown_ratio: number; // B4 — recovered / (recovered + open + written-off); 0..1
   paydown_ratio_basis: {
     recovered: MoneyView;

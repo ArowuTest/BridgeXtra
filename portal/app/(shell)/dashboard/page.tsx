@@ -154,7 +154,7 @@ function Overview({ d }: { d: OpsOverview }) {
       <Section title="Are they paying">
         <SimpleGrid cols={{ base: 2, md: 4 }}>
           <Tile label="Collected today" value={d.collected_today.display} accent sub="receivable reduction, today" />
-          <PaydownTile ratio={d.paydown_ratio} basis={d.paydown_ratio_basis} writtenOff={d.written_off_principal} />
+          <PaydownTile ratio={d.paydown_ratio} basis={d.paydown_ratio_basis} writtenOff={d.written_off} />
         </SimpleGrid>
       </Section>
 
