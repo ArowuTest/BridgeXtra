@@ -438,6 +438,51 @@ export function feedHealth(): Promise<FeedHealth> {
   return request("GET", "/v1/portal/ops/feed-health");
 }
 
+// --- Wave B.3 Collections / delinquency queue (Phase A, read-only) ------------------
+// A severity-ranked work-view of advances that are behind. NOT a chase tool — recovery is
+// opportunistic and no outbound-contact capability exists; the actions (write-off, bar) are
+// Phase B. The stamped delinquency_bucket (+ bucket_as_of) is authoritative; live_dpd_advisory
+// is ADVISORY only (the classify batch may be stale). Compliance flags will GATE the Phase-B
+// actions.
+
+export type CollectionsRow = LoanBookRow & {
+  subscriber_account_id: string; // drill key
+  subscriber_status: string; // ACTIVE / BARRED / SELF_EXCLUDED / CLOSED
+  self_excluded: boolean;
+  open_complaint: boolean; // OPEN/IN_REVIEW complaint on this subscriber
+  live_dpd_advisory: number; // advisory only — bucket_as_of is the source of truth
+  bucket_rank: number; // governed ladder rank (higher = worse)
+  last_recharge_at?: string;
+  last_recovery_at?: string;
+};
+
+export type Collections = {
+  queue: CollectionsRow[];
+  next_cursor: string;
+  ladder: {
+    grace_days: number;
+    delinquent_buckets: string[]; // governed delinquent rungs, ascending rank
+    resolved: boolean; // false ⇒ no governed ladder resolved (queue degrades to empty)
+  };
+  rollup: {
+    by_status: Record<string, number>;
+    by_bucket: Record<string, number>;
+    by_bucket_value: Record<string, MoneyView>; // ₦ outstanding per bucket
+    writeoff_candidates: number; // governed: stamped bucket ≥ writeoff.policy.min_bucket
+  };
+};
+
+export function collections(
+  params: { telco?: string; cursor?: string; limit?: number } = {},
+): Promise<Collections> {
+  const q = new URLSearchParams();
+  if (params.telco) q.set("telco", params.telco);
+  if (params.cursor) q.set("cursor", params.cursor);
+  if (params.limit) q.set("limit", String(params.limit));
+  const qs = q.toString();
+  return request("GET", `/v1/portal/ops/collections${qs ? `?${qs}` : ""}`);
+}
+
 // --- operator provisioning (ADMIN-only, four-eyes create; portal.go:175-180) ----
 export type Operator = { actor: string; role: string; scope: string; status: string };
 export type OperatorRequest = {
