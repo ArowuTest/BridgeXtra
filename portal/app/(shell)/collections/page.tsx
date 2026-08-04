@@ -1,11 +1,13 @@
 "use client";
 
-// Wave B.3 — Collections / delinquency queue (Phase A, read-only work-view). Advances that
-// are behind, ranked worst-first by the governed bucket ladder. This is a WORK-VIEW, not a
-// chase tool: recovery is opportunistic and there is no outbound-contact capability, so there
-// are no "remind"/"call" buttons — the actions (write-off, bar) arrive in Phase B and will be
-// gated by the compliance flags shown here. The stamped bucket (+ "as of") is authoritative;
-// the live DPD is labelled ADVISORY because the classification batch may be stale.
+// Wave B.3 — Collections / delinquency queue. Phase A is the read-only work-view (advances that
+// are behind, ranked worst-first by the governed bucket ladder). Phase B adds the write-off
+// MONEY DOOR: a maker (OPS/ADMIN) opens a write-off from a row; a checker (FINANCE/ADMIN) decides
+// it in the approvals panel. Four-eyes is a SERVER control (a distinct approver, DB-enforced) —
+// the UI only makes the action deliberate and disables Approve for the requester. An open DEBT
+// dispute soft-blocks approval; the checker proceeds only with an audited override (reason +
+// complaint id). This is still a work-view, not a chase tool — no outbound-contact actions.
+// The stamped bucket (+ "as of") is authoritative; the live DPD is labelled ADVISORY.
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -16,18 +18,32 @@ import {
   Card,
   Text,
   SimpleGrid,
-  Badge,
   Alert,
-  Loader,
-  Center,
   Table,
   Button,
   Tooltip,
+  Modal,
+  TextInput,
+  Badge,
 } from "@mantine/core";
-import { collections, Collections, CollectionsRow, ApiError } from "@/lib/api";
+import { notifications } from "@mantine/notifications";
+import {
+  collections,
+  Collections,
+  CollectionsRow,
+  ApiError,
+  me,
+  Session,
+  requestWriteOff,
+  approveWriteOff,
+  rejectWriteOff,
+  writeOffInbox,
+  WriteOffInboxRow,
+} from "@/lib/api";
 import { fmtDate, fmtDateTime } from "@/lib/datetime";
 import { DataTable, Column } from "@/components/DataTable";
 import { StatusBadge, Tone } from "@/components/StatusBadge";
+import { MakerCheckerModal } from "@/components/MakerCheckerModal";
 
 function errMsg(e: unknown): string {
   return e instanceof ApiError ? `${e.errorCode}: ${e.message}` : "Request failed. Try again shortly.";
@@ -38,13 +54,24 @@ function bucketTone(b: string): Tone {
   return "info";
 }
 
+const CAN_REQUEST = new Set<Session["role"]>(["OPS", "ADMIN"]); // request-writeoff: {ADMIN,OPS}
+const CAN_DECIDE = new Set<Session["role"]>(["FINANCE", "ADMIN"]); // approve/reject: {ADMIN,FINANCE}
+
 export default function CollectionsPage() {
   const router = useRouter();
+  const [session, setSession] = useState<Session | null>(null);
   const [data, setData] = useState<Collections | null>(null);
   const [rows, setRows] = useState<CollectionsRow[] | null>(null);
   const [cursor, setCursor] = useState("");
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Phase B state.
+  const [inbox, setInbox] = useState<WriteOffInboxRow[] | null>(null);
+  const [requestFor, setRequestFor] = useState<CollectionsRow | null>(null);
+  const [rejectFor, setRejectFor] = useState<WriteOffInboxRow | null>(null);
+  const [override, setOverride] = useState<WriteOffInboxRow | null>(null);
+  const [busyId, setBusyId] = useState<string>(""); // write_off/advance id in flight
 
   const load = useCallback(async (cur: string, append: boolean) => {
     if (!append) {
@@ -61,9 +88,25 @@ export default function CollectionsPage() {
     }
   }, []);
 
+  const loadInbox = useCallback(async (role: Session["role"]) => {
+    if (!CAN_DECIDE.has(role)) return; // only the checker roles read the approvals queue
+    try {
+      const r = await writeOffInbox();
+      setInbox(r.pending);
+    } catch {
+      setInbox([]); // a blind/degraded inbox is empty, never a page-breaking error
+    }
+  }, []);
+
   useEffect(() => {
+    me()
+      .then((s) => {
+        setSession(s);
+        loadInbox(s.role);
+      })
+      .catch(() => {});
     load("", false);
-  }, [load]);
+  }, [load, loadInbox]);
 
   async function loadMore() {
     setLoadingMore(true);
@@ -71,6 +114,76 @@ export default function CollectionsPage() {
       await load(cursor, true);
     } finally {
       setLoadingMore(false);
+    }
+  }
+
+  const canRequest = !!session && CAN_REQUEST.has(session.role);
+  const canDecide = !!session && CAN_DECIDE.has(session.role);
+
+  // --- maker: open a write-off from a queue row -------------------------------------------
+  async function submitRequest(reason: string) {
+    if (!requestFor) return;
+    setBusyId(requestFor.advance_id);
+    try {
+      const r = await requestWriteOff(requestFor.advance_id, reason);
+      notifications.show({
+        color: r.disputed ? "orange" : "teal",
+        title: r.disputed ? "Write-off requested — open dispute" : "Write-off requested",
+        message: r.disputed
+          ? "This subscriber has an open debt dispute; approval will require an audited override by the checker."
+          : "Awaiting a checker's approval.",
+      });
+      setRequestFor(null);
+      if (session) await loadInbox(session.role);
+    } catch (e) {
+      notifications.show({ color: "red", title: "Refused", message: errMsg(e) });
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  // --- checker: approve (with dispute-override fallback) -----------------------------------
+  async function doApprove(wo: WriteOffInboxRow, ov?: { override_reason: string; complaint_id: string }) {
+    setBusyId(wo.write_off_id);
+    try {
+      await approveWriteOff(wo.write_off_id, ov);
+      notifications.show({ color: "teal", title: "Written off", message: `${wo.principal.display} loss crystallised.` });
+      setOverride(null);
+      if (session) {
+        await loadInbox(session.role);
+        await load("", false); // the advance leaves the delinquency queue
+      }
+    } catch (e) {
+      if (e instanceof ApiError && e.errorCode === "WRITEOFF_DISPUTE_OVERRIDE_REQUIRED") {
+        setOverride(wo); // open the override modal (debt dispute — needs reason + complaint id)
+        return;
+      }
+      if (e instanceof ApiError && e.errorCode === "WRITEOFF_DISPUTE_BLOCKED") {
+        notifications.show({
+          color: "red",
+          title: "Blocked by policy",
+          message: "An open debt dispute blocks this write-off and policy does not permit an override.",
+        });
+        return;
+      }
+      notifications.show({ color: "red", title: "Refused", message: errMsg(e) });
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function submitReject(reason: string) {
+    if (!rejectFor) return;
+    setBusyId(rejectFor.write_off_id);
+    try {
+      await rejectWriteOff(rejectFor.write_off_id, reason);
+      notifications.show({ color: "teal", message: "Write-off rejected." });
+      setRejectFor(null);
+      if (session) await loadInbox(session.role);
+    } catch (e) {
+      notifications.show({ color: "red", title: "Refused", message: errMsg(e) });
+    } finally {
+      setBusyId("");
     }
   }
 
@@ -126,14 +239,36 @@ export default function CollectionsPage() {
     },
   ];
 
+  if (canRequest) {
+    columns.push({
+      key: "action",
+      header: "",
+      align: "right",
+      render: (a) => (
+        <Button
+          size="xs"
+          variant="light"
+          color="red"
+          loading={busyId === a.advance_id}
+          onClick={(e) => {
+            e.stopPropagation(); // don't trigger the row's drill navigation
+            setRequestFor(a);
+          }}
+        >
+          Write off
+        </Button>
+      ),
+    });
+  }
+
   return (
     <Stack>
       <Title order={2}>Collections</Title>
       <Text c="dimmed" size="sm">
         Advances that are behind, ranked worst-first. Recovery is opportunistic (swept from
         recharges) — this is a work-view, not a chase tool. The stamped bucket and its &ldquo;as
-        of&rdquo; date are authoritative; the DPD figure is advisory. Actions (write-off, bar)
-        arrive next and will be gated by the compliance flags shown here.
+        of&rdquo; date are authoritative; the DPD figure is advisory. Write-off is a two-person
+        action: a maker requests it here, a checker (Finance) approves it below.
       </Text>
 
       {error && (
@@ -150,6 +285,16 @@ export default function CollectionsPage() {
       )}
 
       {data && <Rollup d={data} />}
+
+      {canDecide && (
+        <ApprovalsInbox
+          rows={inbox}
+          actor={session?.actor ?? ""}
+          busyId={busyId}
+          onApprove={(wo) => doApprove(wo)}
+          onReject={(wo) => setRejectFor(wo)}
+        />
+      )}
 
       <Card withBorder padding={0}>
         <DataTable
@@ -168,7 +313,202 @@ export default function CollectionsPage() {
           </Button>
         </Group>
       )}
+
+      {/* maker: request a write-off */}
+      <MakerCheckerModal
+        opened={!!requestFor}
+        title="Request write-off"
+        description={
+          requestFor
+            ? `Open a write-off for ${requestFor.msisdn_masked} — outstanding ${requestFor.outstanding.display}. This only requests it; a checker (Finance) must approve before any loss is crystallised.`
+            : undefined
+        }
+        actionLabel="Request write-off"
+        danger
+        busy={busyId === requestFor?.advance_id}
+        onConfirm={submitRequest}
+        onClose={() => setRequestFor(null)}
+      />
+
+      {/* checker: reject */}
+      <MakerCheckerModal
+        opened={!!rejectFor}
+        title="Reject write-off"
+        description={rejectFor ? `Reject the write-off requested by ${rejectFor.requested_by}.` : undefined}
+        actionLabel="Reject"
+        danger
+        busy={busyId === rejectFor?.write_off_id}
+        onConfirm={submitReject}
+        onClose={() => setRejectFor(null)}
+      />
+
+      {/* checker: dispute override (only reached when the server soft-blocks) */}
+      <OverrideModal
+        wo={override}
+        busy={!!override && busyId === override.write_off_id}
+        onConfirm={(override_reason, complaint_id) => override && doApprove(override, { override_reason, complaint_id })}
+        onClose={() => setOverride(null)}
+      />
     </Stack>
+  );
+}
+
+// ApprovalsInbox — the checker's pending write-offs. Approve is disabled for the requester (the
+// four-eyes rule made visible; the server enforces it regardless).
+function ApprovalsInbox({
+  rows,
+  actor,
+  busyId,
+  onApprove,
+  onReject,
+}: {
+  rows: WriteOffInboxRow[] | null;
+  actor: string;
+  busyId: string;
+  onApprove: (wo: WriteOffInboxRow) => void;
+  onReject: (wo: WriteOffInboxRow) => void;
+}) {
+  return (
+    <Card withBorder>
+      <Group justify="space-between" mb="xs">
+        <Text fw={600}>
+          Write-off approvals{" "}
+          {rows && rows.length > 0 && (
+            <Badge color="red" variant="light" ml={6}>
+              {rows.length} pending
+            </Badge>
+          )}
+        </Text>
+        <Text size="xs" c="dimmed">
+          Approving crystallises the loss — a distinct actor is required.
+        </Text>
+      </Group>
+      {rows === null ? (
+        <Text size="sm" c="dimmed">
+          Loading…
+        </Text>
+      ) : rows.length === 0 ? (
+        <Text size="sm" c="dimmed">
+          No write-offs awaiting approval.
+        </Text>
+      ) : (
+        <Table striped highlightOnHover>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Advance</Table.Th>
+              <Table.Th style={{ textAlign: "right" }}>Principal</Table.Th>
+              <Table.Th style={{ textAlign: "right" }}>Fee</Table.Th>
+              <Table.Th>Reason</Table.Th>
+              <Table.Th>Requested by</Table.Th>
+              <Table.Th />
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {rows.map((wo) => {
+              const isOwn = wo.requested_by === actor;
+              const busy = busyId === wo.write_off_id;
+              return (
+                <Table.Tr key={wo.write_off_id}>
+                  <Table.Td style={{ fontFamily: "monospace", fontSize: 12 }}>{wo.advance_id}</Table.Td>
+                  <Table.Td style={{ textAlign: "right" }}>
+                    <strong>{wo.principal.display}</strong>
+                  </Table.Td>
+                  <Table.Td style={{ textAlign: "right" }}>{wo.fee.display}</Table.Td>
+                  <Table.Td>
+                    <Text size="sm">{wo.reason}</Text>
+                    <Text size="xs" c="dimmed">
+                      {fmtDateTime(wo.requested_at)}
+                    </Text>
+                  </Table.Td>
+                  <Table.Td>{wo.requested_by}</Table.Td>
+                  <Table.Td>
+                    <Group gap="xs" justify="flex-end" wrap="nowrap">
+                      <Tooltip
+                        label="You requested this write-off — a different actor must approve it (two-person rule)."
+                        disabled={!isOwn}
+                      >
+                        <div>
+                          <Button size="xs" color="red" loading={busy} disabled={isOwn} onClick={() => onApprove(wo)}>
+                            Approve
+                          </Button>
+                        </div>
+                      </Tooltip>
+                      <Button size="xs" variant="default" disabled={busy} onClick={() => onReject(wo)}>
+                        Reject
+                      </Button>
+                    </Group>
+                  </Table.Td>
+                </Table.Tr>
+              );
+            })}
+          </Table.Tbody>
+        </Table>
+      )}
+    </Card>
+  );
+}
+
+// OverrideModal — captures the audited override for a write-off blocked by an open debt dispute:
+// both a reason and the complaint id are required (recorded on the checker before the loss posts).
+function OverrideModal({
+  wo,
+  busy,
+  onConfirm,
+  onClose,
+}: {
+  wo: WriteOffInboxRow | null;
+  busy: boolean;
+  onConfirm: (overrideReason: string, complaintId: string) => void;
+  onClose: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [complaintId, setComplaintId] = useState("");
+  useEffect(() => {
+    if (wo) {
+      setReason("");
+      setComplaintId("");
+    }
+  }, [wo]);
+  const canSubmit = !busy && reason.trim() !== "" && complaintId.trim() !== "";
+  return (
+    <Modal
+      opened={!!wo}
+      onClose={() => !busy && onClose()}
+      title="Override open dispute"
+      centered
+      closeOnClickOutside={!busy}
+      closeOnEscape={!busy}
+    >
+      <Stack gap="sm">
+        <Alert color="orange" variant="light">
+          This subscriber has an <strong>open debt dispute</strong>. Approving anyway is a deliberate,
+          audited override recorded against you. Confirm the debt is valid before proceeding.
+        </Alert>
+        <TextInput
+          label="Override reason"
+          description="Required — recorded permanently on the audit trail"
+          value={reason}
+          onChange={(e) => setReason(e.currentTarget.value)}
+          data-autofocus
+          required
+        />
+        <TextInput
+          label="Complaint id"
+          description="The open complaint you have reviewed"
+          value={complaintId}
+          onChange={(e) => setComplaintId(e.currentTarget.value)}
+          required
+        />
+        <Group justify="flex-end" mt="xs">
+          <Button variant="default" onClick={() => !busy && onClose()} disabled={busy}>
+            Cancel
+          </Button>
+          <Button color="red" loading={busy} disabled={!canSubmit} onClick={() => onConfirm(reason, complaintId)}>
+            Override &amp; write off
+          </Button>
+        </Group>
+      </Stack>
+    </Modal>
   );
 }
 

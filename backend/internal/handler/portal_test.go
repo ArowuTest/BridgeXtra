@@ -23,6 +23,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/collections"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
@@ -68,21 +69,22 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 	led := ledger.New(appCfg)
 	orig := origination.New(db.App, appCfg, led, mno.NewHTTPAdapter(appCfg), slog.Default())
 	p := &handler.Portal{
-		Admins:     &repo.Admins{Pool: db.App},
-		Sessions:   &repo.PortalSessions{Pool: db.App},
-		Config:     configsvc.New(db.Worker),
-		Treasury:   treasury.New(db.App, appCfg, slog.Default()),
-		Ops:        ops.New(db.App, appCfg, slog.Default()),
-		Settlement: settlement.New(db.App, appCfg, slog.Default()),
-		Recovery:   recovery.New(db.App, appCfg, led, slog.Default()),
-		Demo:       ops.NewDemo(db.App, appCfg, orig, slog.Default()),
-		Operator:   repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker},
-		Audit:      repo.Audit{},
-		Pool:       db.App, // B.2a reveal audit (platform-scope row on the app pool)
-		Operators:  operatormgmt.New(db.App, slog.Default()),
-		Held:       rechargehold.New(db.App, recovery.New(db.App, appCfg, led, slog.Default()), slog.Default()),
-		Limiter:    testLimiter(),
-		Log:        slog.Default(),
+		Admins:      &repo.Admins{Pool: db.App},
+		Sessions:    &repo.PortalSessions{Pool: db.App},
+		Config:      configsvc.New(db.Worker),
+		Treasury:    treasury.New(db.App, appCfg, slog.Default()),
+		Ops:         ops.New(db.App, appCfg, slog.Default()),
+		Settlement:  settlement.New(db.App, appCfg, slog.Default()),
+		Recovery:    recovery.New(db.App, appCfg, led, slog.Default()),
+		Collections: collections.New(db.App, appCfg, led, slog.Default()),
+		Demo:        ops.NewDemo(db.App, appCfg, orig, slog.Default()),
+		Operator:    repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker},
+		Audit:       repo.Audit{},
+		Pool:        db.App, // B.2a reveal audit (platform-scope row on the app pool)
+		Operators:   operatormgmt.New(db.App, slog.Default()),
+		Held:        rechargehold.New(db.App, recovery.New(db.App, appCfg, led, slog.Default()), slog.Default()),
+		Limiter:     testLimiter(),
+		Log:         slog.Default(),
 	}
 	// Governed money formatting: load the display scale from the migrated `currencies`
 	// table so toMoneyView renders real amounts (₦50.00) in handler tests, exactly as at

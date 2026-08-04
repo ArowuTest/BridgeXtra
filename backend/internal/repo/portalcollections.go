@@ -196,6 +196,27 @@ func NextDelinquentCursor(rows []DelinquentRow, limit int) string {
 	return encodeCollectionsCursor(rows[len(rows)-1])
 }
 
+// HasOpenDebtDispute reports whether the advance's subscriber has an OPEN/IN_REVIEW complaint
+// in one of the governed debt-dispute categories — the write-off DISPUTE GATE (Phase B). Runs
+// on the operatorRead RLS tx (advances + complaints both telco-scoped); fail-closed on
+// no-authority. The categories come from collections.policy (governed), so an unrelated
+// service complaint does not gate a write-off.
+func HasOpenDebtDispute(ctx context.Context, q Querier, scope OperatorScope, advanceID string, categories []string) (bool, error) {
+	if !scope.authority || len(categories) == 0 {
+		return false, nil
+	}
+	var exists bool
+	if err := q.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM advances a
+  JOIN complaints c ON c.subscriber_account_id = a.subscriber_account_id
+  WHERE a.advance_id = $1 AND c.state IN ('OPEN', 'IN_REVIEW') AND c.category = ANY($2::text[])
+)`, advanceID, categories).Scan(&exists); err != nil {
+		return false, fmt.Errorf("open debt dispute: %w", err)
+	}
+	return exists, nil
+}
+
 // WriteOffCandidateCount counts open advances whose STAMPED bucket is at/over the governed
 // write-off floor (writeoff.policy.min_bucket, resolved by the handler to the set of
 // candidate bucket codes). Fail-closed on no-authority. Uses the stamped bucket — the

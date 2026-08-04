@@ -282,3 +282,66 @@ func TestOperatorRLS_FeedHealthTables_CrossTelcoIsolation(t *testing.T) {
 		}
 	}
 }
+
+// The cross-telco isolation proof for write_offs, granted to tcp_operator in 0071 (the
+// checker's approvals inbox, Wave B.3 Phase B). write_offs ALREADY carried a role-agnostic
+// telco RLS policy (t_write_offs, 0011: USING telco_id = app.telco_id); 0071 adds
+// op_all_write_offs as the ONLY cross-telco path, firing solely for the '*' admin
+// (app.op_all='true'). This seeds a full OTHER_NG advance chain + its REQUESTED write-off and
+// drives all three scopes on the real operator pool. It is the mutation canary for 0071 and the
+// reviewer's landing check ("a telco-scoped operator sees only its own pending list"): flip
+// op_all_write_offs's USING clause to `true` and a SIM_NG operator starts seeing OTHER_NG's
+// pending write-off — turning the "must NEVER see" assertion red (the R1 lesson, applied to the
+// money-door's read grant).
+func TestOperatorRLS_WriteOffs_CrossTelcoIsolation(t *testing.T) {
+	db := testutil.MustSetup(t, "opwriteoffs")
+	ctx := context.Background()
+	// A full OTHER_NG advance (FK chain) so its write-off is a real row, then the REQUESTED
+	// write-off itself. fee_model DEDUCTED_UPFRONT satisfies offer_money_identity (1000=900+100).
+	for _, s := range []string{
+		`INSERT INTO telcos (telco_id, name, country, status) VALUES ('OTHER_NG','Other','NG','ACTIVE') ON CONFLICT DO NOTHING`,
+		`INSERT INTO programmes (programme_id, telco_id, code, name, status)
+		   VALUES ('prg_other','OTHER_NG','OTHER_AIRTIME','Other Airtime','ACTIVE')`,
+		`INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
+		   VALUES ('sub_other','OTHER_NG','tok_other','ACTIVE')`,
+		`INSERT INTO funding_pools (pool_id, programme_id, telco_id, currency, committed_minor)
+		   VALUES ('pool_other','prg_other','OTHER_NG','NGN',1000000)`,
+		`INSERT INTO decision_snapshots (decision_snapshot_id, telco_id, subscriber_account_id,
+		   max_face_value_minor, currency, config_version_id)
+		   VALUES ('ds_other','OTHER_NG','sub_other',100000,'NGN','cfgv_seed')`,
+		`INSERT INTO offers (offer_id, telco_id, programme_id, subscriber_account_id, decision_snapshot_id,
+		   face_value_minor, fee_minor, disbursed_minor, repayment_minor, currency, fee_model,
+		   product_config_version_id, expires_at)
+		   VALUES ('offer_other','OTHER_NG','prg_other','sub_other','ds_other',
+		   1000,100,900,1000,'NGN','DEDUCTED_UPFRONT','pcfgv_seed', now()+interval '1 day')`,
+		`INSERT INTO advances (advance_id, telco_id, programme_id, subscriber_account_id, offer_id,
+		   funding_pool_id, idempotency_key, correlation_id, state, face_value_minor, fee_minor,
+		   disbursed_minor, outstanding_minor, currency)
+		   VALUES ('adv_other','OTHER_NG','prg_other','sub_other','offer_other','pool_other',
+		   'idem_other','corr_other','ACTIVE',1000,100,900,1000,'NGN')`,
+		`INSERT INTO write_offs (write_off_id, telco_id, advance_id, principal_minor, fee_minor,
+		   currency, reason, requested_by, state)
+		   VALUES ('wof_other','OTHER_NG','adv_other',900,100,'NGN','uncollectable','maker_other','REQUESTED')`,
+	} {
+		if _, err := db.Admin.Exec(ctx, s); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	const woExists = `SELECT EXISTS (SELECT 1 FROM write_offs WHERE write_off_id=$1)`
+	sim := map[string]string{"app.telco_id": "SIM_NG"}
+	allEstate := map[string]string{"app.op_all": "true"}
+
+	// A SIM_NG operator must NEVER see OTHER_NG's pending write-off (op_all_write_offs fail-closed).
+	if opRowExists(t, db, sim, woExists, "wof_other") {
+		t.Fatal("a SIM_NG operator must NEVER see an OTHER_NG write-off — op_all_write_offs must fail closed (USING(true) regression?)")
+	}
+	// No scope set → sees nothing (fail-closed).
+	if opRowExists(t, db, nil, woExists, "wof_other") {
+		t.Fatal("with no scope the operator must not see the OTHER_NG write-off (fail-closed)")
+	}
+	// The '*' admin path MUST read the estate (else the admin approvals inbox is blank).
+	if !opRowExists(t, db, allEstate, woExists, "wof_other") {
+		t.Fatal("op_all='true' must read the OTHER_NG write-off (op_all_write_offs present + firing)")
+	}
+}

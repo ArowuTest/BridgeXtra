@@ -23,6 +23,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/rechargewebhook"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/collections"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
@@ -154,12 +155,13 @@ func main() {
 		// Re-arm actions run as the app role in a tenant tx; operator reads run on
 		// the RLS-enforced tcp_operator pool inside a scope-set tx (OperatorReader),
 		// with the worker pool as the trusted programme->telco resolver only.
-		Treasury:   treasury.New(appPool, configsvc.New(appPool), log),
-		Ops:        ops.New(appPool, configsvc.New(appPool), log),
-		Settlement: settlement.New(appPool, configsvc.New(appPool), log),
-		Recovery:   rec,
-		Demo:       ops.NewDemo(appPool, appCfg, orig, log),
-		Operator:   repo.OperatorReader{Pool: operatorPool, Resolve: workerPool},
+		Treasury:    treasury.New(appPool, configsvc.New(appPool), log),
+		Ops:         ops.New(appPool, configsvc.New(appPool), log),
+		Settlement:  settlement.New(appPool, configsvc.New(appPool), log),
+		Recovery:    rec,
+		Collections: collections.New(appPool, appCfg, led, log),
+		Demo:        ops.NewDemo(appPool, appCfg, orig, log),
+		Operator:    repo.OperatorReader{Pool: operatorPool, Resolve: workerPool},
 		// B.2a MSISDN reveal: append-only audit on the app pool (platform-scope row,
 		// telco in detail). The reveal fails closed if this write fails.
 		Audit: repo.Audit{},

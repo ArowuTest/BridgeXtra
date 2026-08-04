@@ -27,6 +27,8 @@ func TestConfigFence_CriticalDomainsValidated(t *testing.T) {
 		// Build 2 — the NIN identity-verification eligibility gate.
 		"origination.nin_gate",
 		"treasury.guardrails", "writeoff.policy", "settlement.terms",
+		// Wave B.3 Phase B — the write-off dispute gate.
+		"collections.policy",
 		"ledger.templates", "fee_recognition",
 		// Safety / compliance.
 		"disclosure.policy", "origination.self_exclusion",

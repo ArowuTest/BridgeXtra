@@ -155,7 +155,7 @@ func TestCollections_Severity_Compliance_Candidate_AndScope(t *testing.T) {
 		t.Fatalf("severity order must be worst-bucket-first [%s,%s,%s], got %v", adv90, adv31, adv1, ids)
 	}
 	// Rank strictly descends (governed ladder rank, not hardcoded).
-	if !(r.Queue[0].BucketRank > r.Queue[1].BucketRank && r.Queue[1].BucketRank > r.Queue[2].BucketRank) {
+	if r.Queue[0].BucketRank <= r.Queue[1].BucketRank || r.Queue[1].BucketRank <= r.Queue[2].BucketRank {
 		t.Fatalf("bucket_rank must strictly descend, got %d,%d,%d", r.Queue[0].BucketRank, r.Queue[1].BucketRank, r.Queue[2].BucketRank)
 	}
 	// (4) Honesty gate: bucket_as_of + advisory live DPD present.

@@ -137,6 +137,45 @@ func (WriteOffs) Get(ctx context.Context, tx pgx.Tx, writeOffID string) (WriteOf
 	return w, err
 }
 
+// ListPending returns the REQUESTED write-offs awaiting a checker decision — the approvals
+// inbox (Wave B.3 Phase B). Runs on the operatorRead RLS tx (write_offs granted 0071), so it
+// is telco-scoped; fail-closed on a no-authority scope.
+func (WriteOffs) ListPending(ctx context.Context, q Querier, scope OperatorScope, telcoFilter string) ([]WriteOff, error) {
+	telco, ok := scope.TelcoLevelBound()
+	if !ok {
+		return nil, nil
+	}
+	rows, err := q.Query(ctx, `
+		SELECT write_off_id, telco_id, advance_id, principal_minor, fee_minor, currency,
+		       reason, requested_by, COALESCE(approved_by,''), state, requested_at, decided_at, posted_at
+		FROM write_offs
+		WHERE state = 'REQUESTED' AND ($1 = '' OR telco_id = $1)
+		ORDER BY requested_at`, telco)
+	if err != nil {
+		return nil, fmt.Errorf("list pending write-offs: %w", err)
+	}
+	defer rows.Close()
+	var out []WriteOff
+	for rows.Next() {
+		var w WriteOff
+		var prin, fee int64
+		var cur string
+		if err := rows.Scan(&w.WriteOffID, &w.TelcoID, &w.AdvanceID, &prin, &fee, &cur,
+			&w.Reason, &w.RequestedBy, &w.ApprovedBy, &w.State, &w.RequestedAt, &w.DecidedAt, &w.PostedAt); err != nil {
+			return nil, fmt.Errorf("scan pending write-off: %w", err)
+		}
+		var e error
+		if w.Principal, e = scanMoney(prin, cur); e != nil {
+			return nil, e
+		}
+		if w.Fee, e = scanMoney(fee, cur); e != nil {
+			return nil, e
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // Decide moves REQUESTED -> APPROVED|REJECTED. The 0011 schema CHECK is the
 // maker-checker arbiter: a same-actor approval violates it and maps to
 // ErrSelfApproval — this layer cannot weaken that even by bug.

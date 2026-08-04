@@ -21,6 +21,7 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/collections"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/operatormgmt"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/ops"
@@ -56,6 +57,7 @@ type Portal struct {
 	Ops               *ops.Service          // M4d breaks-queue actions (tenant tx)
 	Settlement        *settlement.Service   // M4d settlement verification (tenant tx)
 	Recovery          *recovery.Service     // M4e parked-reversal retry (tenant tx, reuses guarded apply)
+	Collections       *collections.Service  // B.3 Phase B write-off maker-checker (tenant tx, money-mutating)
 	Demo              *ops.Demo             // M4e-3 fault demo (real origination path, sim-only allowlist)
 	Operator          repo.OperatorReader   // Gate B #1 Slice 2: DB-enforced operator reads (tcp_operator + scoped tx)
 	Audit             repo.Audit            // B.2a: append-only audit for the MSISDN reveal (fail-closed)
@@ -143,6 +145,15 @@ var routeRoles = map[string][]string{
 	// far, how much. Money-adjacent ops work-view — same oversight roles as the loan book
 	// + RISK; SUPPORT excluded. (Phase B write-off actions get their own routes + review.)
 	"GET /v1/portal/ops/collections": {roleAdmin, roleOps, roleFinance, roleRisk},
+
+	// Wave B.3 Phase B — the write-off MONEY DOOR (maker-checker; loss crystallisation).
+	// Owner decision (schema also enforces a distinct approver regardless): REQUEST (maker)
+	// = {ADMIN, OPS}; APPROVE/REJECT (checker) = {ADMIN, FINANCE} (money authority on the
+	// crystallising step). The pending-approvals inbox is a read for the oversight roles.
+	"GET /v1/portal/ops/collections/writeoffs":              {roleAdmin, roleOps, roleFinance, roleRisk},
+	"POST /v1/portal/ops/collections/{id}/request-writeoff": {roleAdmin, roleOps},
+	"POST /v1/portal/ops/collections/{id}/approve-writeoff": {roleAdmin, roleFinance},
+	"POST /v1/portal/ops/collections/{id}/reject-writeoff":  {roleAdmin, roleFinance},
 
 	// Wave B.2a Subscriber-360: the MSISDN directory + the per-subscriber 360.
 	// Same oversight roles as the loan book (money-adjacent, read-only, scope-bound).
@@ -242,6 +253,10 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/ops/overview", http.HandlerFunc(p.opsOverview))
 	p.mountRBAC(mux, "GET /v1/portal/ops/feed-health", http.HandlerFunc(p.opsFeedHealth))
 	p.mountRBAC(mux, "GET /v1/portal/ops/collections", http.HandlerFunc(p.opsCollections))
+	p.mountRBAC(mux, "GET /v1/portal/ops/collections/writeoffs", http.HandlerFunc(p.opsWriteOffInbox))
+	p.mountRBAC(mux, "POST /v1/portal/ops/collections/{id}/request-writeoff", http.HandlerFunc(p.opsWriteOffRequest))
+	p.mountRBAC(mux, "POST /v1/portal/ops/collections/{id}/approve-writeoff", http.HandlerFunc(p.opsWriteOffApprove))
+	p.mountRBAC(mux, "POST /v1/portal/ops/collections/{id}/reject-writeoff", http.HandlerFunc(p.opsWriteOffReject))
 	p.mountRBAC(mux, "GET /v1/portal/ops/advances", http.HandlerFunc(p.opsAdvances))
 	p.mountRBAC(mux, "GET /v1/portal/ops/advances/{id}", http.HandlerFunc(p.opsAdvance))
 	p.mountRBAC(mux, "GET /v1/portal/ops/subscribers", http.HandlerFunc(p.opsSubscribers))

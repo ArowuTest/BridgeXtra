@@ -483,6 +483,44 @@ export function collections(
   return request("GET", `/v1/portal/ops/collections${qs ? `?${qs}` : ""}`);
 }
 
+// --- Wave B.3 Collections Phase B: write-off maker-checker + approvals inbox --------
+// The ONLY path that crystallises a loss. Maker (OPS/ADMIN) opens a REQUESTED write-off;
+// checker (FINANCE/ADMIN) approves — a DISTINCT actor, enforced at the DB. When the subscriber
+// has an OPEN debt dispute the server soft-blocks approval (409) unless an audited override
+// (reason + complaint id) is supplied; the gating categories + whether an override is allowed
+// are governed (collections.policy). See portal_collections_writeoff.go.
+export type WriteOffRequestResult = { write_off_id: string; state: string; disputed: boolean };
+export type WriteOffInboxRow = {
+  write_off_id: string;
+  advance_id: string;
+  principal: MoneyView;
+  fee: MoneyView;
+  reason: string;
+  requested_by: string; // the maker — Approve is disabled in-UI for this actor (server also 409s)
+  requested_at: string;
+};
+
+// maker: open a REQUESTED write-off for an advance (request: {ADMIN,OPS}). disputed=true warns
+// that the subscriber has an open debt dispute (the override lands on the checker at approval).
+export function requestWriteOff(advanceId: string, reason: string): Promise<WriteOffRequestResult> {
+  return request("POST", `/v1/portal/ops/collections/${encodeURIComponent(advanceId)}/request-writeoff`, { reason });
+}
+// checker: approve (crystallises loss). Pass an override only when the server soft-blocks on a
+// debt dispute (error_code WRITEOFF_DISPUTE_OVERRIDE_REQUIRED).
+export function approveWriteOff(
+  writeOffId: string,
+  override?: { override_reason: string; complaint_id: string },
+): Promise<{ write_off_id: string; state: string }> {
+  return request("POST", `/v1/portal/ops/collections/${encodeURIComponent(writeOffId)}/approve-writeoff`, override ?? {});
+}
+export function rejectWriteOff(writeOffId: string, reason: string): Promise<{ write_off_id: string; state: string }> {
+  return request("POST", `/v1/portal/ops/collections/${encodeURIComponent(writeOffId)}/reject-writeoff`, { reason });
+}
+export function writeOffInbox(telco?: string): Promise<{ pending: WriteOffInboxRow[] }> {
+  const qs = telco ? `?telco=${encodeURIComponent(telco)}` : "";
+  return request("GET", `/v1/portal/ops/collections/writeoffs${qs}`);
+}
+
 // --- operator provisioning (ADMIN-only, four-eyes create; portal.go:175-180) ----
 export type Operator = { actor: string; role: string; scope: string; status: string };
 export type OperatorRequest = {
