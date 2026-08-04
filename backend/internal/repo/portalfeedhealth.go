@@ -320,8 +320,10 @@ type FeedDenialRow struct {
 // FeedDenials counts today's feed-denial audit events by action (audit_events, granted
 // 0068). These are written with telco_id NULL (platform scope), so a telco operator's
 // tenant RLS matches none — this is a '*'-ADMIN ESTATE view only, and the handler labels
-// it as such. The "recovery recon layer not live" denial is the key "arriving but
-// structurally rejected" signal. (B6)
+// it as such. The query pins `telco_id IS NULL` explicitly so B6's platform-scope intent
+// does not silently depend on the write-side NULL invariant holding forever (F3). The
+// "recovery recon layer not live" denial is the key "arriving but structurally rejected"
+// signal. (B6)
 func FeedDenials(ctx context.Context, q Querier, scope OperatorScope) ([]FeedDenialRow, error) {
 	if !scope.authority {
 		return nil, nil
@@ -330,6 +332,7 @@ func FeedDenials(ctx context.Context, q Querier, scope OperatorScope) ([]FeedDen
 SELECT action, COUNT(*)
 FROM audit_events
 WHERE action IN ('RECHARGE_FEED_DENIED', 'RECHARGE_EVENT_HELD', 'TENANT_CONTEXT_MISMATCH')
+  AND telco_id IS NULL
   AND occurred_at >= date_trunc('day', now())
 GROUP BY action
 ORDER BY action`)
