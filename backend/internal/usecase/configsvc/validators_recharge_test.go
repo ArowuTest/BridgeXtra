@@ -56,6 +56,9 @@ func TestS2_RechargeFeedValidator(t *testing.T) {
 		"future skew absent":      {"recovery_max_future_skew_seconds": nil},
 		"future skew too large":   {"recovery_max_future_skew_seconds": 400},
 		"unknown field":           {"foo": 1},
+		// Feed-Health silence alarm (optional, but bounded 300..86400 when present).
+		"silence alarm too small": {"silence_alarm_seconds": 100},
+		"silence alarm too big":   {"silence_alarm_seconds": 100000},
 	}
 	for label, ov := range reject {
 		mustReject(t, svc, "telco.recharge_feed", scope, label, rechargeCfg(ov))
@@ -72,6 +75,20 @@ func TestS2_RechargeFeedValidator(t *testing.T) {
 	}
 	if err := svc.Approve(ctx, c.ConfigVersionID, "bob"); err != nil {
 		t.Fatalf("valid recharge_feed must approve: %v", err)
+	}
+
+	// silence_alarm_seconds is OPTIONAL (the base config above omits it and approved),
+	// but a valid in-range value must also approve (feed-health silence threshold).
+	cs, err := svc.CreateDraft(ctx, "telco.recharge_feed", scope, "alice", "add silence alarm",
+		[]byte(rechargeCfg(map[string]any{"silence_alarm_seconds": 3600})))
+	if err != nil {
+		t.Fatalf("draft with silence alarm: %v", err)
+	}
+	if err := svc.Submit(ctx, cs.ConfigVersionID, "alice"); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if err := svc.Approve(ctx, cs.ConfigVersionID, "bob"); err != nil {
+		t.Fatalf("recharge_feed with silence_alarm_seconds=3600 must approve: %v", err)
 	}
 }
 

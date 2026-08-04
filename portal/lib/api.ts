@@ -378,6 +378,66 @@ export function opsOverview(telco?: string): Promise<OpsOverview> {
   return request("GET", `/v1/portal/ops/overview${qs ? `?${qs}` : ""}`);
 }
 
+// --- Wave B.4 Feed-Health monitor (arriving / clean / stuck; scope-enforced) --------
+// Governed thresholds with a zero-config floor: an alarm verdict field (`silent`,
+// `aging_breached`) is present ONLY when a governed threshold resolved — absent means the
+// server refused to assert an all-clear, and the client shows the raw figure without a colour.
+
+export type RechargeFreshnessRow = {
+  telco_id: string;
+  last_received?: string; // RFC3339; absent if the telco has never received a recharge
+  events_today: number;
+  silence_threshold_seconds?: number; // present only when governed silence config resolved
+  silent?: boolean; // present only alongside the threshold (zero-config floor)
+};
+export type LayerLiveRow = { telco_id: string; live: boolean };
+export type ReconRunRow = {
+  telco_id: string;
+  source_count: number;
+  matched_count: number;
+  break_count: number;
+  created_at: string; // last recon ATTEMPT (vs `live` = last CONFIRMED)
+};
+export type HeldCountRow = { status: string; reason: string; count: number };
+export type FeedDenialRow = { action: string; count: number };
+export type DuplicateHoldRow = {
+  telco_id: string;
+  msisdn_masked: string;
+  amount: MoneyView;
+  occurred_at: string;
+  distinct_event_ids: number;
+};
+export type AgingTile = {
+  open_count: number;
+  oldest_created_at?: string;
+  aging_alert_hours?: number; // present only when governed break-aging config resolved
+  aging_breached?: boolean; // present only alongside the threshold (zero-config floor)
+};
+export type FeedHealth = {
+  arriving: {
+    recharge_by_telco: RechargeFreshnessRow[]; // A1 + A3
+    recovery_layer_by_telco: LayerLiveRow[]; // A2
+    recon_runs_by_telco: ReconRunRow[]; // B4 (latest active)
+    rejected_recovery_runs: number; // B4
+  };
+  clean: {
+    held_open_count: number; // B1
+    held_by_status_reason: HeldCountRow[]; // B2
+    recharge_state_mix: Record<string, number>; // B3
+    open_suspense: { count: number; total: MoneyView }; // B5
+    feed_denials_today: FeedDenialRow[]; // B6 — platform/estate scope ('*' admin)
+  };
+  stuck: {
+    recovery_break_backlog: AgingTile; // C1
+    unconfirmed_closes: AgingTile; // C2
+    duplicate_holds: DuplicateHoldRow[]; // C3
+  };
+};
+
+export function feedHealth(): Promise<FeedHealth> {
+  return request("GET", "/v1/portal/ops/feed-health");
+}
+
 // --- operator provisioning (ADMIN-only, four-eyes create; portal.go:175-180) ----
 export type Operator = { actor: string; role: string; scope: string; status: string };
 export type OperatorRequest = {

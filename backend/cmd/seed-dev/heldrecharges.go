@@ -121,7 +121,10 @@ func activateRechargeFeed(ctx context.Context, adminPool *pgxpool.Pool, cfg *con
 		`"key_id_header":"X-Bx-Key-Id","signature_header":"X-Bx-Signature","timestamp_header":"X-Bx-Timestamp",`+
 		`"replay_window_seconds":120,"future_skew_seconds":60,"max_body_bytes":65536,"expected_currency":"NGN",`+
 		`"per_event_amount_max_minor":%d,"per_telco_daily_ceiling_minor":500000000000,`+
-		`"recovery_max_backdate_seconds":1209600,"recovery_max_future_skew_seconds":60}`, devPerEventMax)
+		// carry the governed recharge silence threshold (0069) into the dev feed so the
+		// feed-health monitor's silence tile is demonstrable — this re-activation would
+		// otherwise supersede the migration default and drop the key.
+		`"recovery_max_backdate_seconds":1209600,"recovery_max_future_skew_seconds":60,"silence_alarm_seconds":3600}`, devPerEventMax)
 	cv, err := cfg.CreateDraft(ctx, "telco.recharge_feed", scope, "seed-dev-maker", "seed-dev held-recharge scenario", json.RawMessage(content))
 	if err != nil {
 		return fmt.Errorf("draft: %w", err)

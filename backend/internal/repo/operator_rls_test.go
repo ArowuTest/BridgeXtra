@@ -218,3 +218,67 @@ func TestOperatorRLS_ProgrammesAndPools_CrossTelcoIsolation(t *testing.T) {
 		t.Fatal("op_all='true' must read the OTHER_NG funding pool (op_all_funding_pools present + firing)")
 	}
 }
+
+// The same cross-telco isolation proof for the FOUR feed-health tables granted in 0068
+// (recon_runs, suspense_items, recovery_unconfirmed_closes, audit_events). Each carries a
+// role-agnostic telco RLS policy; op_all is the only cross-telco path and fires only for the
+// '*' admin. Seeds an OTHER_NG row in every table and drives all three scopes. This is the
+// mutation canary for 0068: flip ANY of the four op_all_* USING clauses to `true` and a
+// telco-scoped operator starts seeing OTHER_NG — turning a "must NEVER see" assertion red
+// (the R1 lesson from the MI dashboard, applied to the four new doors).
+func TestOperatorRLS_FeedHealthTables_CrossTelcoIsolation(t *testing.T) {
+	db := testutil.MustSetup(t, "opfeedhealth")
+	ctx := context.Background()
+	for _, s := range []string{
+		`INSERT INTO telcos (telco_id, name, country, status) VALUES ('OTHER_NG','Other','NG','ACTIVE') ON CONFLICT DO NOTHING`,
+		`INSERT INTO programmes (programme_id, telco_id, code, name, status)
+		   VALUES ('prg_other','OTHER_NG','OTHER_AIRTIME','Other Airtime','ACTIVE')`,
+		// a recovery_event to satisfy the suspense / unconfirmed-close FKs
+		`INSERT INTO recovery_events (recovery_event_id, telco_id, source_event_id, amount_minor, currency, occurred_at)
+		   VALUES ('ev_other','OTHER_NG','wh:ev_other',1000,'NGN', now())`,
+		`INSERT INTO recon_runs (run_id, telco_id, programme_id, layer, period_start, period_end,
+		   source_record_count, source_control_total_minor, source_hash,
+		   platform_record_count, platform_control_total_minor, created_by)
+		   VALUES ('run_other','OTHER_NG','prg_other','RECOVERY', now()-interval '1 day', now(),
+		   1, 1000, 'hash_other', 1, 1000, 'seed:test')`,
+		`INSERT INTO suspense_items (suspense_id, telco_id, recovery_event_id, amount_minor, currency, reason)
+		   VALUES ('susp_other','OTHER_NG','ev_other',1000,'NGN','over-recovery')`,
+		`INSERT INTO recovery_unconfirmed_closes (id, telco_id, subscriber_account_id, advance_id, recovery_event_id)
+		   VALUES ('uc_other','OTHER_NG','sub_other','adv_other','ev_other')`,
+		// audit row stamped with a telco (real feed-denials are telco_id NULL; a non-NULL telco
+		// row is what lets us prove the op_all_audit_events isolation directly)
+		`INSERT INTO audit_events (id, telco_id, actor, action, target_type, target_id)
+		   VALUES ('aud_other','OTHER_NG','system','RECHARGE_FEED_DENIED','telco','OTHER_NG')`,
+	} {
+		if _, err := db.Admin.Exec(ctx, s); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	sim := map[string]string{"app.telco_id": "SIM_NG"}
+	allEstate := map[string]string{"app.op_all": "true"}
+	checks := []struct {
+		name string
+		sql  string
+		id   string
+	}{
+		{"recon_runs", `SELECT EXISTS (SELECT 1 FROM recon_runs WHERE run_id=$1)`, "run_other"},
+		{"suspense_items", `SELECT EXISTS (SELECT 1 FROM suspense_items WHERE suspense_id=$1)`, "susp_other"},
+		{"recovery_unconfirmed_closes", `SELECT EXISTS (SELECT 1 FROM recovery_unconfirmed_closes WHERE id=$1)`, "uc_other"},
+		{"audit_events", `SELECT EXISTS (SELECT 1 FROM audit_events WHERE id=$1)`, "aud_other"},
+	}
+	for _, c := range checks {
+		// A SIM_NG operator must NEVER see the OTHER_NG row (op_all_* fails closed).
+		if opRowExists(t, db, sim, c.sql, c.id) {
+			t.Fatalf("a SIM_NG operator must NEVER see an OTHER_NG %s row — op_all_%s must fail closed (USING(true) regression?)", c.name, c.name)
+		}
+		// No scope → sees nothing (fail-closed).
+		if opRowExists(t, db, nil, c.sql, c.id) {
+			t.Fatalf("with no scope the operator must not see the OTHER_NG %s row (fail-closed)", c.name)
+		}
+		// The '*' admin path MUST read the estate (else the monitor is blank for admin).
+		if !opRowExists(t, db, allEstate, c.sql, c.id) {
+			t.Fatalf("op_all='true' must read the OTHER_NG %s row (op_all_%s present + firing)", c.name, c.name)
+		}
+	}
+}

@@ -134,6 +134,11 @@ var routeRoles = map[string][]string{
 	// masked timeline + complaints, never financial truth (see support routes below).
 	"GET /v1/portal/ops/overview": {roleAdmin, roleOps, roleFinance, roleRisk},
 
+	// Wave B.4 Feed-Health monitor: is the MNO data feed arriving / clean / stuck. A
+	// "machine healthy" operations concern — same oversight roles as the overview
+	// (ADMIN/OPS/FINANCE/RISK), SUPPORT excluded (no financial/feed truth).
+	"GET /v1/portal/ops/feed-health": {roleAdmin, roleOps, roleFinance, roleRisk},
+
 	// Wave B.2a Subscriber-360: the MSISDN directory + the per-subscriber 360.
 	// Same oversight roles as the loan book (money-adjacent, read-only, scope-bound).
 	// The reveal is a deliberate, audited step gated to ADMIN + OPS + FINANCE.
@@ -230,6 +235,7 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/ops/reversals", http.HandlerFunc(p.opsReversals))
 	p.mountRBAC(mux, "POST /v1/portal/ops/reversals/{id}/retry", http.HandlerFunc(p.opsReversalRetry))
 	p.mountRBAC(mux, "GET /v1/portal/ops/overview", http.HandlerFunc(p.opsOverview))
+	p.mountRBAC(mux, "GET /v1/portal/ops/feed-health", http.HandlerFunc(p.opsFeedHealth))
 	p.mountRBAC(mux, "GET /v1/portal/ops/advances", http.HandlerFunc(p.opsAdvances))
 	p.mountRBAC(mux, "GET /v1/portal/ops/advances/{id}", http.HandlerFunc(p.opsAdvance))
 	p.mountRBAC(mux, "GET /v1/portal/ops/subscribers", http.HandlerFunc(p.opsSubscribers))

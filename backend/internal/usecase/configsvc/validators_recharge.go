@@ -36,6 +36,7 @@ func validateRechargeFeed(_ context.Context, _ pgx.Tx, content json.RawMessage) 
 		PerTelcoDailyCeilingMinor    *int64  `json:"per_telco_daily_ceiling_minor"`
 		RecoveryMaxBackdateSeconds   *int    `json:"recovery_max_backdate_seconds"`
 		RecoveryMaxFutureSkewSeconds *int    `json:"recovery_max_future_skew_seconds"`
+		SilenceAlarmSeconds          *int    `json:"silence_alarm_seconds"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
 		return fmt.Errorf("parse: %w", err)
@@ -91,6 +92,15 @@ func validateRechargeFeed(_ context.Context, _ pgx.Tx, content json.RawMessage) 
 	}
 	if v.RecoveryMaxFutureSkewSeconds == nil || *v.RecoveryMaxFutureSkewSeconds < 0 || *v.RecoveryMaxFutureSkewSeconds > 300 {
 		return fmt.Errorf("telco.recharge_feed: recovery_max_future_skew_seconds must be 0..300")
+	}
+	// Recharge silence alarm (feed-health monitor): the horizon after which no
+	// received recharge is treated as an alarm. OPTIONAL — unlike replay_window this
+	// governs monitoring, not ingest, so a config predating the key stays valid and the
+	// monitor degrades (shows the raw last-received timestamp, never "never silent" —
+	// the zero-config floor). When set it is bounded so it can't be 0 (which the tile
+	// treats as "no threshold" → refuse the alarm) nor absurdly long.
+	if v.SilenceAlarmSeconds != nil && (*v.SilenceAlarmSeconds < 300 || *v.SilenceAlarmSeconds > 86400) {
+		return fmt.Errorf("telco.recharge_feed: silence_alarm_seconds, when set, must be 300..86400 (5m..24h)")
 	}
 	return nil
 }
