@@ -163,7 +163,7 @@ func TestDeferredFee_WrittenOff_ZeroPhantomFee_FreshSplit(t *testing.T) {
 
 	// Checker approves: must reverse the FRESH remaining unearned (fee-part), not
 	// the stale request-time full fee.
-	if err := col.ApproveWriteOff(ctx, "SIM_NG", wo.WriteOffID, "checker", "corr-wo"); err != nil {
+	if err := col.ApproveWriteOff(ctx, "SIM_NG", wo.WriteOffID, "checker", "corr-wo", false); err != nil {
 		t.Fatalf("approve write-off: %v", err)
 	}
 

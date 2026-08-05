@@ -46,6 +46,10 @@ func writeOffErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, "WRITEOFF_NOT_WRITABLE", "advance is not in a write-off-able state")
 	case errors.Is(err, collections.ErrSelfApproval):
 		writeErr(w, http.StatusConflict, "WRITEOFF_SELF_APPROVAL", "the approver must differ from the requester (two-person rule)")
+	case errors.Is(err, collections.ErrDisputeBlocked):
+		// The usecase defense-in-depth gate fired. From the portal this is unreachable (the handler
+		// gates first), so surfacing it means a governed-config/timing edge — fail closed, 409.
+		writeErr(w, http.StatusConflict, "WRITEOFF_DISPUTE_BLOCKED", "subscriber has an open debt dispute; write-off is blocked by policy")
 	case errors.Is(err, repo.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "PORTAL_NOT_FOUND", "not found")
 	default:
@@ -148,14 +152,18 @@ func (p *Portal) opsWriteOffApprove(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := p.Collections.ApproveWriteOff(r.Context(), c.wo.TelcoID, writeOffID, sess.Actor, newCorrelationID()); err != nil {
+	// `disputed` is true here only if the override above was authorized + audited (a disputed
+	// advance without a valid override already returned 409). Pass it as the override signal so the
+	// usecase's defense-in-depth gate lets an authorized override through and blocks anything else.
+	if err := p.Collections.ApproveWriteOff(r.Context(), c.wo.TelcoID, writeOffID, sess.Actor, newCorrelationID(), disputed); err != nil {
 		writeOffErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"write_off_id": writeOffID, "state": "POSTED"})
 }
 
-// opsWriteOffReject — checker refusal (distinct actor still enforced).
+// opsWriteOffReject — checker refusal. Four-eyes applies to a rejection too (it is a decision):
+// a self-reject trips the 0072 schema CHECK → ErrSelfApproval → 409, symmetric with approve.
 func (p *Portal) opsWriteOffReject(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
 	scope := sess.OperatorScope()

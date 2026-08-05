@@ -139,7 +139,9 @@ func (WriteOffs) Get(ctx context.Context, tx pgx.Tx, writeOffID string) (WriteOf
 
 // ListPending returns the REQUESTED write-offs awaiting a checker decision — the approvals
 // inbox (Wave B.3 Phase B). Runs on the operatorRead RLS tx (write_offs granted 0071), so it
-// is telco-scoped; fail-closed on a no-authority scope.
+// is telco-scoped; fail-closed on a no-authority scope. telcoFilter is the OPTIONAL admin
+// narrowing (?telco=): it can only further narrow the result — for a telco-bounded operator the
+// scope's own telco already filters, and RLS is the boundary regardless — so it never widens.
 func (WriteOffs) ListPending(ctx context.Context, q Querier, scope OperatorScope, telcoFilter string) ([]WriteOff, error) {
 	telco, ok := scope.TelcoLevelBound()
 	if !ok {
@@ -149,8 +151,8 @@ func (WriteOffs) ListPending(ctx context.Context, q Querier, scope OperatorScope
 		SELECT write_off_id, telco_id, advance_id, principal_minor, fee_minor, currency,
 		       reason, requested_by, COALESCE(approved_by,''), state, requested_at, decided_at, posted_at
 		FROM write_offs
-		WHERE state = 'REQUESTED' AND ($1 = '' OR telco_id = $1)
-		ORDER BY requested_at`, telco)
+		WHERE state = 'REQUESTED' AND ($1 = '' OR telco_id = $1) AND ($2 = '' OR telco_id = $2)
+		ORDER BY requested_at`, telco, telcoFilter)
 	if err != nil {
 		return nil, fmt.Errorf("list pending write-offs: %w", err)
 	}
@@ -176,16 +178,18 @@ func (WriteOffs) ListPending(ctx context.Context, q Querier, scope OperatorScope
 	return out, rows.Err()
 }
 
-// Decide moves REQUESTED -> APPROVED|REJECTED. The 0011 schema CHECK is the
-// maker-checker arbiter: a same-actor approval violates it and maps to
-// ErrSelfApproval — this layer cannot weaken that even by bug.
+// Decide moves REQUESTED -> APPROVED|REJECTED. The schema CHECKs are the
+// maker-checker arbiter — a same-actor DECISION violates them and maps to
+// ErrSelfApproval — this layer cannot weaken that even by bug. Both the
+// APPROVED/POSTED CHECK (0011) and the REJECTED CHECK (0072) require a distinct
+// approved_by, so approve AND reject are symmetric: neither can be self-decided.
 func (WriteOffs) Decide(ctx context.Context, tx pgx.Tx, writeOffID, approver, toState string) error {
 	ct, err := tx.Exec(ctx, `
 		UPDATE write_offs SET state = $3, approved_by = $2, decided_at = now()
 		WHERE write_off_id = $1 AND state = 'REQUESTED'`, writeOffID, approver, toState)
 	if err != nil {
-		// The only CHECK this UPDATE can trip is the maker-checker one
-		// (amounts are untouched): 23514 here means self-approval.
+		// The only CHECKs this UPDATE can trip are the maker-checker ones (amounts
+		// are untouched): 23514 here means a self-decision (self-approve or self-reject).
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23514" {
 			return ErrSelfApproval

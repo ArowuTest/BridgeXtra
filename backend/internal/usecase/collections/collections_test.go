@@ -181,12 +181,12 @@ func TestM3C_WriteOff_FullMakerCheckerJourney(t *testing.T) {
 	}
 
 	// Maker cannot approve their own request — the SCHEMA says no.
-	if err := f.col.ApproveWriteOff(tenantCtx(), "SIM_NG", wo.WriteOffID, "alice", "cor-wo-1"); !errors.Is(err, collections.ErrSelfApproval) {
+	if err := f.col.ApproveWriteOff(tenantCtx(), "SIM_NG", wo.WriteOffID, "alice", "cor-wo-1", false); !errors.Is(err, collections.ErrSelfApproval) {
 		t.Fatalf("self-approval must be refused by the schema: %v", err)
 	}
 
 	// Distinct approver: the loss crystallises atomically.
-	if err := f.col.ApproveWriteOff(tenantCtx(), "SIM_NG", wo.WriteOffID, "bob", "cor-wo-1"); err != nil {
+	if err := f.col.ApproveWriteOff(tenantCtx(), "SIM_NG", wo.WriteOffID, "bob", "cor-wo-1", false); err != nil {
 		t.Fatal(err)
 	}
 
@@ -262,5 +262,64 @@ func TestM3C_WriteOff_FullMakerCheckerJourney(t *testing.T) {
 	}
 	if unbalanced != 0 {
 		t.Fatal("INV-004 violated across the write-off journey")
+	}
+}
+
+// Defense-in-depth dispute gate (review F5a): the usecase itself refuses to crystallise a loss on
+// a subscriber with an OPEN debt dispute unless the caller authorized an override — the
+// un-bypassable backstop for any future DIRECT caller that skips the portal's governed gate.
+// Mutation canary: remove the `if !overrideAuthorized` block in ApproveWriteOff (or make
+// debtDisputeCategories return nil) and the un-overridden approve succeeds → this goes red.
+func TestM3C_WriteOff_DisputeGate_DefenseInDepth(t *testing.T) {
+	f := newFixture(t, "col_wo_dispute")
+	adv := f.activeAdvance(t)
+	ctx := context.Background()
+
+	// Make it write-off-eligible (DPD_90_PLUS).
+	f.backdate(t, adv.AdvanceID, 95)
+	if _, err := f.col.Classify(tenantCtx(), "SIM_NG", "prg_sim_airtime01"); err != nil {
+		t.Fatal(err)
+	}
+	// Open a DEBT dispute (a governed collections.policy category, seeded by 0070) on the subscriber.
+	var sub string
+	if err := f.db.Admin.QueryRow(ctx, `SELECT subscriber_account_id FROM advances WHERE advance_id=$1`, adv.AdvanceID).Scan(&sub); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO complaints (complaint_id, telco_id, subscriber_account_id, channel, category, narrative, state)
+		VALUES ('cmp_dd','SIM_NG',$1,'IVR','DISPUTED_ADVANCE','disputes the advance','OPEN')`, sub); err != nil {
+		t.Fatal(err)
+	}
+
+	wo, err := f.col.RequestWriteOff(tenantCtx(), "SIM_NG", adv.AdvanceID, "alice", "uncollectable")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A DIRECT approve with a DISTINCT actor (bob != alice, so four-eyes is satisfied) but NO
+	// authorized override must be blocked — the disputed loss must not crystallise.
+	if err := f.col.ApproveWriteOff(ctx, "SIM_NG", wo.WriteOffID, "bob", "cor-dd-1", false); !errors.Is(err, collections.ErrDisputeBlocked) {
+		t.Fatalf("un-overridden approve on a disputed advance must be ErrDisputeBlocked, got %v", err)
+	}
+	// Nothing crystallised — the Decide rolled back, advance untouched, write-off still REQUESTED.
+	var state, woState string
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT a.state, w.state FROM advances a JOIN write_offs w ON w.advance_id = a.advance_id WHERE a.advance_id = $1`,
+		adv.AdvanceID).Scan(&state, &woState); err != nil {
+		t.Fatal(err)
+	}
+	if state == "WRITTEN_OFF" || woState != "REQUESTED" {
+		t.Fatalf("a blocked approve must not mutate: advance=%s write_off=%s", state, woState)
+	}
+
+	// With the override authorized, the same distinct-actor approve crystallises the loss.
+	if err := f.col.ApproveWriteOff(ctx, "SIM_NG", wo.WriteOffID, "bob", "cor-dd-2", true); err != nil {
+		t.Fatalf("override-authorized approve must succeed: %v", err)
+	}
+	if err := f.db.Admin.QueryRow(ctx, `SELECT state FROM advances WHERE advance_id=$1`, adv.AdvanceID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != "WRITTEN_OFF" {
+		t.Fatalf("override-authorized approve must crystallise; advance state=%s", state)
 	}
 }

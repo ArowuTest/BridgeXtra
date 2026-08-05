@@ -34,6 +34,9 @@ var (
 	ErrNotWritable   = errors.New("collections: advance not in a write-off-able state")
 	ErrSelfApproval  = repo.ErrSelfApproval
 	ErrAlreadyExists = repo.ErrWriteOffExists
+	// ErrDisputeBlocked: the usecase-layer defense-in-depth gate refused to crystallise a loss on
+	// a subscriber with an OPEN debt dispute and no caller-authorized override (review F5a).
+	ErrDisputeBlocked = errors.New("collections: write-off blocked — open debt dispute, no authorized override")
 )
 
 type Service struct {
@@ -142,7 +145,13 @@ func (s *Service) RequestWriteOff(ctx context.Context, telcoID, advanceID, actor
 // and in the SAME transaction the loss crystallises — advance to
 // WRITTEN_OFF, outstanding to zero, pool utilisation released, balanced
 // WRITE_OFF journal posted, evidence stamped POSTED.
-func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, approver, correlationID string) error {
+//
+// overrideAuthorized: the caller AFFIRMATIVELY signals it authorized an override of an open debt
+// dispute (the portal handler does this only after its governed gate + audit). When false, the
+// usecase applies its own DEFENSE-IN-DEPTH dispute gate (review F5a): it refuses to crystallise a
+// loss on a subscriber with an open debt dispute — the un-bypassable backstop for any future
+// direct caller (cron/batch/new endpoint) that would otherwise crystallise a disputed loss ungated.
+func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, approver, correlationID string, overrideAuthorized bool) error {
 	if approver == "" || correlationID == "" {
 		return fmt.Errorf("approver and correlation id are required")
 	}
@@ -161,6 +170,19 @@ func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, appr
 		}
 		if adv.State != entity.AdvActive && adv.State != entity.AdvPartiallyRecovered {
 			return fmt.Errorf("%w: state %s changed since request", ErrNotWritable, adv.State)
+		}
+		// Defense-in-depth dispute gate: never crystallise a loss on a subscriber with an OPEN debt
+		// dispute unless the caller authorized an override. The governed categories are resolved
+		// here too (fail-safe to the strict debt set), so this holds even if a future caller skips
+		// the handler's gate. Rolls back the Decide above on block — the write-off stays REQUESTED.
+		if !overrideAuthorized {
+			disputed, derr := repo.HasOpenDebtDisputeTx(ctx, tx, adv.AdvanceID, s.debtDisputeCategories(ctx, adv.ProgrammeID))
+			if derr != nil {
+				return derr
+			}
+			if disputed {
+				return ErrDisputeBlocked
+			}
 		}
 
 		// Loss crystallises: state + outstanding zero under the optimistic
@@ -214,8 +236,9 @@ func (s *Service) ApproveWriteOff(ctx context.Context, telcoID, writeOffID, appr
 	})
 }
 
-// RejectWriteOff is the checker's refusal (distinct actor still enforced —
-// a rejection is a decision too).
+// RejectWriteOff is the checker's refusal. A rejection is a DECISION, so it requires a distinct
+// actor exactly like an approval — enforced at the schema (0072 write_offs_reject_distinct_actor,
+// review R1), surfaced here as ErrSelfApproval (→ 409): a maker cannot reject their own request.
 func (s *Service) RejectWriteOff(ctx context.Context, telcoID, writeOffID, approver, reason string) error {
 	tctx := platform.WithTenant(ctx, telcoID)
 	return repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
@@ -268,6 +291,26 @@ func (s *Service) checkBucketEligibility(ctx context.Context, tx pgx.Tx, adv ent
 		return fmt.Errorf("%w: bucket %q, policy minimum %q", ErrNotEligible, bucket, wc.MinBucket)
 	}
 	return nil
+}
+
+// debtDisputeCategories resolves the governed collections.policy debt-dispute categories for the
+// programme (the set that gates a write-off). FAIL-SAFE: on any config gap it returns the strict
+// default set so the defense-in-depth gate still fires — a config gap can never silently disarm
+// it (mirrors the handler's disputePolicy). Kept minimal (categories only): whether an override
+// is ALLOWED is the handler's governed decision; the usecase gate only blocks the un-overridden.
+func (s *Service) debtDisputeCategories(ctx context.Context, programmeID string) []string {
+	strict := []string{"DISPUTED_ADVANCE", "DISPUTED_RECOVERY"}
+	cv, err := s.Config.ActiveAt(ctx, "collections.policy", "programme:"+programmeID, time.Now().UTC())
+	if err != nil {
+		return strict
+	}
+	var c struct {
+		DebtDisputeCategories []string `json:"debt_dispute_categories"`
+	}
+	if json.Unmarshal(cv.Content, &c) != nil || len(c.DebtDisputeCategories) == 0 {
+		return strict
+	}
+	return c.DebtDisputeCategories
 }
 
 // auditRow appends the append-only audit record for a write-off action.

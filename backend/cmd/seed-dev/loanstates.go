@@ -133,7 +133,7 @@ func writeOffOne(ctx context.Context, adminPool *pgxpool.Pool, col *collections.
 	if err != nil {
 		return fmt.Errorf("request write-off %s: %w", advID, err)
 	}
-	if err := col.ApproveWriteOff(ctx, telco, wo.WriteOffID, "seed-dev-checker", "corr-seed-writeoff-"+advID); err != nil {
+	if err := col.ApproveWriteOff(ctx, telco, wo.WriteOffID, "seed-dev-checker", "corr-seed-writeoff-"+advID, false); err != nil {
 		return fmt.Errorf("approve write-off %s: %w", advID, err)
 	}
 	log.Printf("seed-dev: wrote off advance %s (WRITTEN_OFF via maker-checker)", advID)

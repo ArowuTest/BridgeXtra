@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
 // --- helpers -------------------------------------------------------------------------------
@@ -121,6 +123,20 @@ func booksBalanced(t *testing.T, f *portalFixture) {
 	}
 }
 
+// writeOffExpenseFor returns the WRITE_OFF_EXPENSE debit posted against a specific advance — the
+// exact leg (amount + account), so a balanced-but-MISACCOUNTED journal can't pass (review F7).
+func writeOffExpenseFor(t *testing.T, f *portalFixture, advID string) int64 {
+	t.Helper()
+	var n int64
+	if err := f.db.Admin.QueryRow(context.Background(), `
+		SELECT COALESCE(SUM(je.debit_minor),0)
+		FROM journal_entries je JOIN journals j ON j.journal_id = je.journal_id
+		WHERE j.advance_id = $1 AND je.account_code = 'WRITE_OFF_EXPENSE'`, advID).Scan(&n); err != nil {
+		t.Fatalf("write-off expense leg: %v", err)
+	}
+	return n
+}
+
 // --- 1–4: four-eyes, session-approver, FSM ------------------------------------------------
 
 func TestWriteOff_MoneyDoor_FourEyes_SessionApprover_FSM(t *testing.T) {
@@ -151,6 +167,11 @@ func TestWriteOff_MoneyDoor_FourEyes_SessionApprover_FSM(t *testing.T) {
 		t.Fatalf("approved write-off must crystallise: state=%s outstanding=%d", st, out)
 	}
 	booksBalanced(t, f)
+	// Exact-leg (F7): the loss is booked to WRITE_OFF_EXPENSE for the FULL outstanding (₦90.00 =
+	// 9000 minor). Global balance alone would pass a misaccounted journal; this pins the account.
+	if exp := writeOffExpenseFor(t, f, advHappy); exp != 9000 {
+		t.Fatalf("WRITE_OFF_EXPENSE debit must equal the outstanding (9000), got %d", exp)
+	}
 	// The approver recorded is the FINANCE SESSION identity.
 	if ab, st := writeOffApprovedBy(t, f, rr.WriteOffID); ab != finance.actor || st != "POSTED" {
 		t.Fatalf("approved_by must be the session actor %q (POSTED), got %q (%s)", finance.actor, ab, st)
@@ -204,6 +225,49 @@ func TestWriteOff_MoneyDoor_CSRF(t *testing.T) {
 	}
 	if code, ec := approveWriteOff(t, f, &finance, rr.WriteOffID, "", "", ""); code != http.StatusOK {
 		t.Fatalf("CSRF'd approve must succeed: %d %s", code, ec)
+	}
+}
+
+// --- R1: reject-path four-eyes ------------------------------------------------------------
+
+// A rejection is a DECISION, so four-eyes applies to it too: the requester cannot reject their
+// own write-off (schema-enforced, 0072), a distinct actor can. Mutation canary: drop the 0072
+// CHECK (write_offs_reject_distinct_actor) and the self-reject 409 assertion goes green-through.
+func TestWriteOff_Reject_FourEyes(t *testing.T) {
+	f := newPortalFixture(t, "wo_reject")
+	admin1 := f.login(t, roleKeys["ADMIN"]) // maker (request+decide both need ADMIN to be the SAME actor)
+	finance := f.login(t, roleKeys["FINANCE"])
+	adv, _ := seedWriteOffCandidate(t, f, 95, 9000, 120)
+
+	code, rr := requestWriteOff(t, f, &admin1, adv, "uncollectable")
+	if code != http.StatusOK || rr.WriteOffID == "" {
+		t.Fatalf("request: %d %+v", code, rr)
+	}
+	rejectPath := "/v1/portal/ops/collections/" + rr.WriteOffID + "/reject-writeoff"
+
+	// The MAKER rejecting their OWN request is refused — four-eyes on a decision (409), same as
+	// approve, and it changes nothing (the write-off stays REQUESTED).
+	code, body := f.callBody(t, &admin1, "POST", rejectPath, `{"reason":"changed my mind"}`)
+	if code != http.StatusConflict {
+		t.Fatalf("self-reject must be 409 (four-eyes on a decision), got %d %s", code, body)
+	}
+	var e struct {
+		ErrorCode string `json:"error_code"`
+	}
+	_ = json.Unmarshal(body, &e)
+	if e.ErrorCode != "WRITEOFF_SELF_APPROVAL" {
+		t.Fatalf("self-reject error_code must be WRITEOFF_SELF_APPROVAL, got %q", e.ErrorCode)
+	}
+	if _, st := writeOffApprovedBy(t, f, rr.WriteOffID); st != "REQUESTED" {
+		t.Fatalf("a refused self-reject must not mutate; write-off state=%s", st)
+	}
+
+	// A DISTINCT actor (Finance) can reject.
+	if code, body := f.callBody(t, &finance, "POST", rejectPath, `{"reason":"advance recovering, keep it live"}`); code != http.StatusOK {
+		t.Fatalf("distinct-actor reject must succeed: %d %s", code, body)
+	}
+	if _, st := writeOffApprovedBy(t, f, rr.WriteOffID); st != "REJECTED" {
+		t.Fatalf("write-off must be REJECTED after a distinct-actor reject; state=%s", st)
 	}
 }
 
@@ -295,6 +359,70 @@ func TestWriteOff_DisputeGate_ZeroConfigFloor_HardBlocks(t *testing.T) {
 	// The advance is untouched — no crystallisation slipped through.
 	if st, _ := advanceStateOutstanding(t, f, advDebt); st == "WRITTEN_OFF" {
 		t.Fatalf("a blocked write-off must NOT crystallise; advance state=%s", st)
+	}
+}
+
+// --- R2: bounded (telco-scoped) operator path -----------------------------------------------
+
+// Every roleKeys fixture operator is scope '*' (the op_all admin), so the other money-door tests
+// exercise only the admin path. This proves the ORDINARY telco-scoped operator's full money door
+// end to end: a telco:SIM_NG-bounded OPS maker requests, a telco:SIM_NG-bounded FINANCE checker
+// sees it in their inbox (own-telco visibility, not just the admin op_all path) and approves it,
+// crystallising the loss — all with app.telco_id=SIM_NG and NO op_all. Mirrors the feed-health F1
+// / MI-dashboard R1 bounded-operator lesson, on the money door.
+func TestWriteOff_MoneyDoor_TelcoScopedOperator(t *testing.T) {
+	f := newPortalFixture(t, "wo_scoped")
+	ctx := context.Background()
+	admins := &repo.Admins{Pool: f.db.Admin}
+	if err := admins.CreateWithRole(ctx, "adm_wo_ops", "ops_sim_wo", "portal-key-ops-sim-wo", "OPS", "telco:SIM_NG"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admins.CreateWithRole(ctx, "adm_wo_fin", "fin_sim_wo", "portal-key-fin-sim-wo", "FINANCE", "telco:SIM_NG"); err != nil {
+		t.Fatal(err)
+	}
+	ops := f.login(t, "portal-key-ops-sim-wo") // maker, bounded to SIM_NG
+	fin := f.login(t, "portal-key-fin-sim-wo") // checker, bounded to SIM_NG (distinct actor)
+	adv, _ := seedWriteOffCandidate(t, f, 96, 9000, 120)
+
+	// A bounded OPS operator can open a write-off on its own telco's advance.
+	code, rr := requestWriteOff(t, f, &ops, adv, "uncollectable — bounded operator")
+	if code != http.StatusOK || rr.WriteOffID == "" {
+		t.Fatalf("scoped OPS request: %d %+v", code, rr)
+	}
+
+	// A bounded FINANCE checker SEES its own telco's pending write-off in the inbox (proves the
+	// telco-grained read path, not just op_all='true').
+	var inbox struct {
+		Pending []struct {
+			WriteOffID string `json:"write_off_id"`
+		} `json:"pending"`
+	}
+	code, raw := f.callBody(t, &fin, "GET", "/v1/portal/ops/collections/writeoffs", "")
+	if code != http.StatusOK {
+		t.Fatalf("scoped FINANCE inbox: %d %s", code, raw)
+	}
+	if err := json.Unmarshal(raw, &inbox); err != nil {
+		t.Fatalf("unmarshal inbox: %v — %s", err, raw)
+	}
+	found := false
+	for _, p := range inbox.Pending {
+		if p.WriteOffID == rr.WriteOffID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("a telco-scoped checker must see its OWN telco's pending write-off in the inbox (got %d rows, none matched)", len(inbox.Pending))
+	}
+
+	// …and can approve it — the loss crystallises through the bounded path.
+	if code, ec := approveWriteOff(t, f, &fin, rr.WriteOffID, "", "", ""); code != http.StatusOK {
+		t.Fatalf("scoped FINANCE approve must succeed: %d %s", code, ec)
+	}
+	if st, out := advanceStateOutstanding(t, f, adv); st != "WRITTEN_OFF" || out != 0 {
+		t.Fatalf("bounded-operator approve must crystallise: state=%s outstanding=%d", st, out)
+	}
+	if ab, st := writeOffApprovedBy(t, f, rr.WriteOffID); ab != fin.actor || st != "POSTED" {
+		t.Fatalf("approved_by must be the bounded checker's session actor %q (POSTED), got %q (%s)", fin.actor, ab, st)
 	}
 }
 

@@ -217,6 +217,26 @@ SELECT EXISTS (
 	return exists, nil
 }
 
+// HasOpenDebtDisputeTx is the tenant-tx (tcp_app) variant of HasOpenDebtDispute, for the write-off
+// usecase's DEFENSE-IN-DEPTH dispute gate (review F5a): no OperatorScope — it runs inside the
+// crystallisation tx where RLS is applied via app.telco_id (WithTenant) — with the same
+// OPEN/IN_REVIEW + governed-category predicate. Empty categories ⇒ no gate.
+func HasOpenDebtDisputeTx(ctx context.Context, q Querier, advanceID string, categories []string) (bool, error) {
+	if len(categories) == 0 {
+		return false, nil
+	}
+	var exists bool
+	if err := q.QueryRow(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM advances a
+  JOIN complaints c ON c.subscriber_account_id = a.subscriber_account_id
+  WHERE a.advance_id = $1 AND c.state IN ('OPEN', 'IN_REVIEW') AND c.category = ANY($2::text[])
+)`, advanceID, categories).Scan(&exists); err != nil {
+		return false, fmt.Errorf("open debt dispute (tx): %w", err)
+	}
+	return exists, nil
+}
+
 // WriteOffCandidateCount counts open advances whose STAMPED bucket is at/over the governed
 // write-off floor (writeoff.policy.min_bucket, resolved by the handler to the set of
 // candidate bucket codes). Fail-closed on no-authority. Uses the stamped bucket — the

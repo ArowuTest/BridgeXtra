@@ -322,6 +322,26 @@ func TestOperatorRLS_WriteOffs_CrossTelcoIsolation(t *testing.T) {
 		`INSERT INTO write_offs (write_off_id, telco_id, advance_id, principal_minor, fee_minor,
 		   currency, reason, requested_by, state)
 		   VALUES ('wof_other','OTHER_NG','adv_other',900,100,'NGN','uncollectable','maker_other','REQUESTED')`,
+		// …and a SIM_NG write-off (its own telco) so the POSITIVE own-telco visibility case can be
+		// asserted, not only the negative. prg_sim_airtime01 + pool_sim_01 exist from the migrations.
+		`INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status)
+		   VALUES ('sub_sim_wo','SIM_NG','tok_sim_wo','ACTIVE')`,
+		`INSERT INTO decision_snapshots (decision_snapshot_id, telco_id, subscriber_account_id,
+		   max_face_value_minor, currency, config_version_id)
+		   VALUES ('ds_sim_wo','SIM_NG','sub_sim_wo',100000,'NGN','cfgv_seed')`,
+		`INSERT INTO offers (offer_id, telco_id, programme_id, subscriber_account_id, decision_snapshot_id,
+		   face_value_minor, fee_minor, disbursed_minor, repayment_minor, currency, fee_model,
+		   product_config_version_id, expires_at)
+		   VALUES ('offer_sim_wo','SIM_NG','prg_sim_airtime01','sub_sim_wo','ds_sim_wo',
+		   1000,100,900,1000,'NGN','DEDUCTED_UPFRONT','pcfgv_seed', now()+interval '1 day')`,
+		`INSERT INTO advances (advance_id, telco_id, programme_id, subscriber_account_id, offer_id,
+		   funding_pool_id, idempotency_key, correlation_id, state, face_value_minor, fee_minor,
+		   disbursed_minor, outstanding_minor, currency)
+		   VALUES ('adv_sim_wo','SIM_NG','prg_sim_airtime01','sub_sim_wo','offer_sim_wo','pool_sim_01',
+		   'idem_sim_wo','corr_sim_wo','ACTIVE',1000,100,900,1000,'NGN')`,
+		`INSERT INTO write_offs (write_off_id, telco_id, advance_id, principal_minor, fee_minor,
+		   currency, reason, requested_by, state)
+		   VALUES ('wof_sim','SIM_NG','adv_sim_wo',900,100,'NGN','uncollectable','maker_sim','REQUESTED')`,
 	} {
 		if _, err := db.Admin.Exec(ctx, s); err != nil {
 			t.Fatalf("seed: %v", err)
@@ -332,6 +352,12 @@ func TestOperatorRLS_WriteOffs_CrossTelcoIsolation(t *testing.T) {
 	sim := map[string]string{"app.telco_id": "SIM_NG"}
 	allEstate := map[string]string{"app.op_all": "true"}
 
+	// POSITIVE own-telco visibility: a SIM_NG operator MUST see its OWN pending write-off. Without
+	// this, a regression that dropped or narrowed t_write_offs (empty inbox forever for every
+	// real-telco checker) would ship green — the negative-only assertion can't catch it (review R2).
+	if !opRowExists(t, db, sim, woExists, "wof_sim") {
+		t.Fatal("a SIM_NG operator must see its OWN write-off — t_write_offs own-telco visibility (dropped/narrowed policy?)")
+	}
 	// A SIM_NG operator must NEVER see OTHER_NG's pending write-off (op_all_write_offs fail-closed).
 	if opRowExists(t, db, sim, woExists, "wof_other") {
 		t.Fatal("a SIM_NG operator must NEVER see an OTHER_NG write-off — op_all_write_offs must fail closed (USING(true) regression?)")

@@ -159,7 +159,7 @@ func TestDeferredSettlement_FullWriteOff_NeverRecognisesFee(t *testing.T) {
 	if err != nil {
 		t.Fatalf("request write-off: %v", err)
 	}
-	if err := col.ApproveWriteOff(ctx, dfTelco, wo.WriteOffID, "checker", "corr-wo"); err != nil {
+	if err := col.ApproveWriteOff(ctx, dfTelco, wo.WriteOffID, "checker", "corr-wo", false); err != nil {
 		t.Fatalf("approve write-off: %v", err)
 	}
 
