@@ -323,3 +323,94 @@ func TestM3C_WriteOff_DisputeGate_DefenseInDepth(t *testing.T) {
 		t.Fatalf("override-authorized approve must crystallise; advance state=%s", state)
 	}
 }
+
+// Re-request after rejection (owner-approved money-model change, migration 0073). A rejection is a
+// "not now", not a permanent bar. Proves the three guarantees at the INDEX level, directly on the
+// partial unique index write_offs_one_live_per_advance: (a) at most one LIVE write-off per advance,
+// (b) a REJECTED one no longer blocks a re-request, (c) a POSTED one STILL bars one. Mutation
+// canary: drop the index's `WHERE state <> 'REJECTED'` predicate → (b) collides → red.
+func TestM3C_WriteOff_PartialUniqueIndex(t *testing.T) {
+	f := newFixture(t, "col_wo_partialidx")
+	adv := f.activeAdvance(t)
+	ctx := context.Background()
+
+	ins := func(id string) error {
+		_, err := f.db.Admin.Exec(ctx, `
+			INSERT INTO write_offs (write_off_id, telco_id, advance_id, principal_minor, fee_minor, currency, reason, requested_by)
+			VALUES ($1,'SIM_NG',$2,900,100,'NGN','t','maker')`, id, adv.AdvanceID)
+		return err
+	}
+	// decide moves a write-off's state with a DISTINCT approver (satisfies the 0011/0072 four-eyes
+	// CHECKs); OLD.state=REQUESTED so the 0021 immutability trigger allows it.
+	decide := func(id, toState string) {
+		if _, err := f.db.Admin.Exec(ctx,
+			`UPDATE write_offs SET state=$2, approved_by='checker', decided_at=now() WHERE write_off_id=$1`, id, toState); err != nil {
+			t.Fatalf("decide %s -> %s: %v", id, toState, err)
+		}
+	}
+	liveConflict := func(err error) bool {
+		return err != nil && strings.Contains(err.Error(), "write_offs_one_live_per_advance")
+	}
+
+	// (a) One LIVE write-off per advance — the second collides on the partial index.
+	if err := ins("wof_idx_1"); err != nil {
+		t.Fatalf("first write-off must insert: %v", err)
+	}
+	if err := ins("wof_idx_2"); !liveConflict(err) {
+		t.Fatalf("a second LIVE write-off must collide on write_offs_one_live_per_advance, got %v", err)
+	}
+	// (b) After a REJECTION the slot frees — a re-request inserts (REJECTED is excluded from the index).
+	decide("wof_idx_1", "REJECTED")
+	if err := ins("wof_idx_3"); err != nil {
+		t.Fatalf("re-request after a REJECTED write-off must insert, got %v", err)
+	}
+	// (c) A POSTED write-off is non-REJECTED, so it STILL bars a re-request via the index.
+	decide("wof_idx_3", "POSTED")
+	if err := ins("wof_idx_4"); !liveConflict(err) {
+		t.Fatalf("re-request after a POSTED write-off must collide (POSTED is non-REJECTED), got %v", err)
+	}
+}
+
+// The same guarantee through the REAL flow (RequestWriteOff → RejectWriteOff → RequestWriteOff):
+// a rejected advance can be written off later. (c) here is blocked by the FSM (the advance is
+// WRITTEN_OFF after POSTED) — the index test above proves the index-level POSTED bar.
+func TestM3C_WriteOff_ReRequestAfterRejection(t *testing.T) {
+	f := newFixture(t, "col_wo_rerequest")
+	adv := f.activeAdvance(t)
+	ctx := context.Background()
+	f.backdate(t, adv.AdvanceID, 95)
+	if _, err := f.col.Classify(tenantCtx(), "SIM_NG", "prg_sim_airtime01"); err != nil {
+		t.Fatal(err)
+	}
+
+	// (a) A second live request while the first is REQUESTED is refused.
+	wo1, err := f.col.RequestWriteOff(tenantCtx(), "SIM_NG", adv.AdvanceID, "alice", "uncollectable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.col.RequestWriteOff(tenantCtx(), "SIM_NG", adv.AdvanceID, "alice", "again"); !errors.Is(err, collections.ErrAlreadyExists) {
+		t.Fatalf("a second live request must be ErrWriteOffExists, got %v", err)
+	}
+
+	// Reject the first (distinct actor).
+	if err := f.col.RejectWriteOff(tenantCtx(), "SIM_NG", wo1.WriteOffID, "bob", "advance recovering, keep it live"); err != nil {
+		t.Fatal(err)
+	}
+
+	// (b) After the rejection, the advance can be re-requested — a NEW write-off, not the rejected one.
+	wo2, err := f.col.RequestWriteOff(tenantCtx(), "SIM_NG", adv.AdvanceID, "alice", "still uncollectable, months later")
+	if err != nil {
+		t.Fatalf("re-request after a REJECTED write-off must succeed, got %v", err)
+	}
+	if wo2.WriteOffID == wo1.WriteOffID {
+		t.Fatalf("the re-request must be a NEW write-off, not the rejected one")
+	}
+
+	// (c) After it is approved (POSTED → advance WRITTEN_OFF) a further re-request is blocked.
+	if err := f.col.ApproveWriteOff(ctx, "SIM_NG", wo2.WriteOffID, "bob", "cor-rr", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.col.RequestWriteOff(tenantCtx(), "SIM_NG", adv.AdvanceID, "alice", "after posted"); !errors.Is(err, collections.ErrNotWritable) {
+		t.Fatalf("re-request after POSTED must be blocked (advance WRITTEN_OFF), got %v", err)
+	}
+}

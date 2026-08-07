@@ -95,21 +95,28 @@ type WriteOff struct {
 	PostedAt    *time.Time
 }
 
-// Insert creates the REQUESTED write-off; a second request for the same
-// advance returns ErrWriteOffExists (UNIQUE(advance_id)).
+// Insert creates the REQUESTED write-off. At most one LIVE (non-REJECTED) write-off may exist per
+// advance: the partial unique index write_offs_one_live_per_advance (0073) is the arbiter, raising
+// 23505 on a live conflict → ErrWriteOffExists. A REJECTED write-off is EXCLUDED from that index,
+// so an advance whose write-off was rejected can be re-requested (a rejection is a "not now", not a
+// permanent bar). A POSTED one is non-REJECTED, so it still permanently bars a re-request. The
+// arbiter is the index (not ON CONFLICT, which cannot infer a partial index without repeating the
+// predicate), so dropping the index's WHERE predicate re-blocks re-request — the mutation canary.
 func (WriteOffs) Insert(ctx context.Context, tx pgx.Tx, w WriteOff) error {
-	ct, err := tx.Exec(ctx, `
+	_, err := tx.Exec(ctx, `
 		INSERT INTO write_offs
 		  (write_off_id, telco_id, advance_id, principal_minor, fee_minor, currency, reason, requested_by)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-		ON CONFLICT (advance_id) DO NOTHING`,
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 		w.WriteOffID, w.TelcoID, w.AdvanceID, w.Principal.Amount(), w.Fee.Amount(),
 		string(w.Principal.Currency()), w.Reason, w.RequestedBy)
 	if err != nil {
+		// A LIVE write-off already exists for this advance (the partial unique index fired). Name-
+		// match so a stray PK/other unique violation is never misreported as "already exists".
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "write_offs_one_live_per_advance" {
+			return ErrWriteOffExists
+		}
 		return fmt.Errorf("insert write-off: %w", err)
-	}
-	if ct.RowsAffected() == 0 {
-		return ErrWriteOffExists
 	}
 	return nil
 }
