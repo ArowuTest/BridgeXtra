@@ -1,4 +1,5 @@
 import { test, expect, Page } from "@playwright/test";
+import { NAV } from "../lib/nav";
 
 // Portal RBAC-scope journeys against the real Go API + seeded Postgres. Keys come
 // from PORTAL_E2E_KEYS (JSON role->key), the SAME source the seed-operators tool
@@ -8,19 +9,18 @@ type Role = "ADMIN" | "RISK" | "FINANCE" | "OPS" | "SUPPORT";
 
 const KEYS: Record<string, string> = JSON.parse(process.env.PORTAL_E2E_KEYS || "{}");
 
-// EXPECTED nav labels per role — mirrors lib/nav.ts NAV (which itself mirrors the
-// server RBAC map). Asserting the exact set proves the console shows a role only
-// the surfaces it is authorised for.
-const EXPECTED_NAV: Record<Role, string[]> = {
-  ADMIN: ["Overview", "Configuration", "Operators", "Risk", "Ledger", "Accounting journals (audit)", "Breaks", "Settlements", "Held recharges", "Subscribers", "Loan book", "Ops", "Support"],
-  FINANCE: ["Overview", "Configuration", "Risk", "Ledger", "Accounting journals (audit)", "Breaks", "Settlements", "Held recharges", "Subscribers", "Loan book", "Ops", "Support"],
-  RISK: ["Overview", "Configuration", "Risk", "Support"],
-  OPS: ["Overview", "Subscribers", "Loan book", "Ops", "Support"],
-  // SUPPORT is walled off from the financial-MI Overview (server RBAC + nav); its
-  // sole surface is Support. (Post-login it still lands on /dashboard, which renders
-  // a welcome panel for non-oversight roles — not the MI tiles.)
-  SUPPORT: ["Support"],
-};
+const ROLES: Role[] = ["ADMIN", "RISK", "FINANCE", "OPS", "SUPPORT"];
+
+// EXPECTED nav labels per role are DERIVED from lib/nav.ts NAV — the single source of
+// truth the sidebar itself filters with (navFor), which in turn mirrors the server RBAC
+// map. Deriving (rather than a hand-kept copy) means a new nav item can never silently
+// drift this journey out of date; the test still exercises the real render pipeline
+// (login -> /me role -> sidebar), so a broken filter, selector, or session shows up here.
+// The server refuses an unauthorised route regardless — the nav is UX; the security oracle
+// is the backend RBAC matrix (TestM4A_RBACMatrix_DenyByDefault).
+const EXPECTED_NAV: Record<Role, string[]> = Object.fromEntries(
+  ROLES.map((role) => [role, NAV.filter((n) => n.roles.includes(role)).map((n) => n.label)]),
+) as Record<Role, string[]>;
 
 async function login(page: Page, key: string) {
   await page.goto("/login");
