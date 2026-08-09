@@ -29,6 +29,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/ledger"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/ratelimit"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/rechargewebhook"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -40,6 +41,12 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/simulator/sim"
 )
 
+const (
+	e2eWhKeyID     = "e2e-kid"
+	e2eWhSecretEnv = "TCP_E2E_WH_SECRET"
+	e2eWhSecret    = "e2e-hmac-shared-secret"
+)
+
 type stack struct {
 	db         *testutil.DB
 	api        *httptest.Server
@@ -49,10 +56,12 @@ type stack struct {
 	recon      *recon.Service
 	checker    *invariants.Checker
 	events     map[string]int // dispatched outbox events by type
+	baseTime   time.Time      // pinned occurred_at so replayed recovery src ids stay byte-identical
 }
 
 func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeoutMs int) *stack {
 	t.Helper()
+	t.Setenv(e2eWhSecretEnv, e2eWhSecret)
 	db := testutil.MustSetup(t, suffix)
 	db.SeedTelco(t, "SIM_NG", "e2e-api-key")
 
@@ -93,6 +102,33 @@ func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeout
 		"channel":    {RatePerMinute: 1e9, Burst: 1e9},
 		"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
 	}), Log: slog.Default()}).Mount(mux, auth)
+
+	// BX-P0-002: recovery has exactly ONE external ingress — the HMAC-signed
+	// recharge webhook. Mount it on the SAME surface, arm the recon-live gate and
+	// activate the governed feed config so E2E recoveries flow through the real
+	// money door ("wh:" namespacing + per-event/daily HELD clamps) that EOD recon
+	// covers (recon selects LIKE 'wh:%'), never a backdoor.
+	activateRechargeFeedE2E(t, cfgW, "global", 50_000_000)
+	activateRechargeFeedE2E(t, cfgW, "telco:SIM_NG", 50_000_000)
+	if err := (&repo.WebhookCredentials{Pool: db.Admin}).Create(ctx, e2eWhKeyID, "SIM_NG", e2eWhSecretEnv, "e2e"); err != nil {
+		t.Fatal(err)
+	}
+	arm := &repo.ReconArming{Pool: db.Admin}
+	if err := arm.SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := arm.AdvanceFreshness(ctx, "SIM_NG", repo.ReconLayerRecovery, 172800); err != nil {
+		t.Fatal(err)
+	}
+	(&handler.RechargeWebhook{
+		Recovery: rec, Config: appCfg,
+		Creds: &repo.WebhookCredentials{Pool: db.App}, Recon: &repo.ReconArming{Pool: db.App},
+		Pool: db.App, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
+		Limiter: ratelimit.New(map[string]ratelimit.Limit{
+			"channel":    {RatePerMinute: 1e9, Burst: 1e9},
+			"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
+		}), Log: slog.Default(),
+	}).Mount(mux)
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)
 
@@ -112,10 +148,59 @@ func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeout
 
 	return &stack{
 		db: db, api: api, sim: simulator, resolver: resolver, dispatcher: d,
-		recon:   recon.New(db.App, appCfg, slog.Default()),
-		checker: &invariants.Checker{Pool: db.Worker},
-		events:  events,
+		recon:    recon.New(db.App, appCfg, slog.Default()),
+		checker:  &invariants.Checker{Pool: db.Worker},
+		events:   events,
+		baseTime: time.Now().UTC(),
 	}
+}
+
+// activateRechargeFeedE2E activates the governed telco.recharge_feed config so the
+// signed recharge webhook accepts + ingests (kill-switch enabled, generous clamps).
+func activateRechargeFeedE2E(t *testing.T, cfgW *configsvc.Service, scope string, perEventMax int64) {
+	t.Helper()
+	ctx := context.Background()
+	content := fmt.Sprintf(`{"enabled":true,"transport":"webhook_push","auth":"hmac_sha256","key_id_header":"X-Bx-Key-Id","signature_header":"X-Bx-Signature","timestamp_header":"X-Bx-Timestamp","replay_window_seconds":120,"future_skew_seconds":60,"max_body_bytes":65536,"expected_currency":"NGN","per_event_amount_max_minor":%d,"per_telco_daily_ceiling_minor":50000000000,"recovery_max_backdate_seconds":1209600,"recovery_max_future_skew_seconds":60}`, perEventMax)
+	c, err := cfgW.CreateDraft(ctx, "telco.recharge_feed", scope, "alice", "e2e", []byte(content))
+	if err != nil {
+		t.Fatalf("recharge_feed draft %s: %v", scope, err)
+	}
+	if err := cfgW.Submit(ctx, c.ConfigVersionID, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgW.Approve(ctx, c.ConfigVersionID, "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfgW.Activate(ctx, c.ConfigVersionID, "bob", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// postRecovery books a recovery through the ONLY external recovery ingress — the
+// HMAC-signed recharge webhook (BX-P0-002). occurred_at is pinned to the stack's
+// base time so a replayed src is byte-identical (idempotent, never a divergent-
+// duplicate refusal). Returns HTTP status + body; callers needing ingestion assert
+// 200 (see (*stack).recover).
+func (s *stack) postRecovery(t *testing.T, token, eventID string, amount int64) (int, []byte) {
+	t.Helper()
+	body := fmt.Sprintf(`{"event_id":%q,"msisdn_token":%q,"amount_minor":%d,"currency":"NGN","occurred_at":%q}`,
+		eventID, token, amount, s.baseTime.Format(time.RFC3339))
+	ts := fmt.Sprintf("%d", time.Now().UTC().Unix())
+	sig := rechargewebhook.Sign(rechargewebhook.NewHMACSHA256Adapter(), []byte(e2eWhSecret), e2eWhKeyID, ts, []byte(body))
+	req, err := http.NewRequest(http.MethodPost, s.api.URL+"/v1/telcos/SIM_NG/recharge-webhook", bytes.NewReader([]byte(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Bx-Key-Id", e2eWhKeyID)
+	req.Header.Set("X-Bx-Timestamp", ts)
+	req.Header.Set("X-Bx-Signature", sig)
+	resp, err := s.api.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
 }
 
 func (s *stack) seedSubscriber(t *testing.T, subID, token string) {
@@ -273,15 +358,11 @@ func TestWalkingSkeleton_E2E(t *testing.T) {
 		t.Fatalf("both fulfilments must emit Confirmed events, got %d", s.events["advance.FulfilmentConfirmed"])
 	}
 
-	// 5. Recoveries close both advances over the wire.
+	// 5. Recoveries close both advances over the wire — through the signed recharge
+	// webhook, the only external recovery ingress (BX-P0-002); recon covers "wh:".
 	for i, tok := range []string{"tok_e2e_ok", "tok_TIMEOUT_e2e"} {
-		code, body = s.http(t, http.MethodPost, "/v1/recovery/events", "", map[string]any{
-			"source_event_id": fmt.Sprintf("e2e-src-%d", i), "msisdn_token": tok,
-			"amount":      map[string]any{"amount_minor": 10000, "currency": "NGN"},
-			"occurred_at": time.Now().UTC().Format(time.RFC3339),
-		})
-		if code != http.StatusOK {
-			t.Fatalf("recovery %s: %d %s", tok, code, body)
+		if code, respBody := s.postRecovery(t, tok, fmt.Sprintf("e2e-src-%d", i), 10000); code != http.StatusOK {
+			t.Fatalf("recovery %s: %d %s", tok, code, respBody)
 		}
 	}
 
@@ -360,11 +441,8 @@ func TestBC3_RandomizedHistories_InvariantsAlwaysHold(t *testing.T) {
 			src := fmt.Sprintf("p-src-%02d-%d", i, e)
 			reps := 1 + rng.Intn(2) // telco replays
 			for r := 0; r < reps; r++ {
-				s.http(t, http.MethodPost, "/v1/recovery/events", "", map[string]any{
-					"source_event_id": src, "msisdn_token": tok,
-					"amount":      map[string]any{"amount_minor": amt, "currency": "NGN"},
-					"occurred_at": time.Now().UTC().Format(time.RFC3339),
-				})
+				// Individual outcome ignored — asserted collectively at assertClean.
+				s.postRecovery(t, tok, src, amt)
 			}
 		}
 	}

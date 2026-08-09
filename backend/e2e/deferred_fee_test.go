@@ -57,15 +57,25 @@ func (s *stack) originate(t *testing.T, token string) (advanceID string, fee, ou
 	return
 }
 
+// recover books a recovery directly against the recovery service. These tests
+// verify deferred-fee LEDGER RECOGNITION, not the ingress, so they use the same
+// service seam the reversal half of this suite uses (recovery.New(...).Reverse) —
+// the event is stored under the raw src, so a reversal references the same id.
+// The HTTP recharge-webhook ingress is proven by the walking skeleton + the
+// recharge_webhook suite.
 func (s *stack) recover(t *testing.T, token, src string, amount int64) {
 	t.Helper()
-	code, body := s.http(t, http.MethodPost, "/v1/recovery/events", "", map[string]any{
-		"source_event_id": src, "msisdn_token": token,
-		"amount":      map[string]any{"amount_minor": amount, "currency": "NGN"},
-		"occurred_at": time.Now().UTC().Format(time.RFC3339),
-	})
-	if code != http.StatusOK {
-		t.Fatalf("recovery %s: %d %s", token, code, body)
+	appCfg := configsvc.New(s.db.App)
+	amt, err := entity.NewMoney(amount, "NGN")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := recovery.New(s.db.App, appCfg, ledger.New(appCfg), slog.Default())
+	if _, err := rec.Ingest(platform.WithTenant(context.Background(), "SIM_NG"), recovery.IngestCmd{
+		SourceEventID: src, MSISDNToken: token, Amount: amt,
+		OccurredAt: s.baseTime, CorrelationID: platform.NewID("cor"),
+	}); err != nil {
+		t.Fatalf("recovery %s: %v", token, err)
 	}
 }
 

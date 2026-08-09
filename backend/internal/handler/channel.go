@@ -85,7 +85,12 @@ func (h *Channel) Mount(mux *http.ServeMux, auth *TenantAuth) {
 	mux.Handle("GET /v1/offers", wrap(h.getOffers))
 	mux.Handle("POST /v1/advances", wrap(h.confirm))
 	mux.Handle("GET /v1/advances/{id}", wrap(h.advanceStatus))
-	mux.Handle("POST /v1/recovery/events", wrap(h.recoveryEvent))
+	// Recovery events have exactly ONE external ingress: the HMAC-signed recharge
+	// webhook (POST /v1/telcos/{telco}/recharge-webhook), which namespaces every
+	// event "wh:" so EOD reconciliation covers it (recon selects LIKE 'wh:%') and
+	// routes it through the per-event/daily HELD blast-radius clamps. A general
+	// api-key channel route here would book money INVISIBLE to recon and skip the
+	// clamps + the S3-C2 re-origination hold — do NOT re-add one (BX-P0-002).
 	// Self-exclusion (R1-MUST): a subscriber opts out of credit; reinstatement is
 	// governed by a cool-off enforced in the usecase.
 	mux.Handle("POST /v1/self-exclusions", wrap(h.selfExclude))
@@ -134,22 +139,6 @@ type advanceResponse struct {
 	Disbursed   entity.Money `json:"disbursed"`
 	Outstanding entity.Money `json:"outstanding"`
 	StatusRoute string       `json:"status_route"` // EDG-004: durable status URL
-}
-
-type recoveryEventRequest struct {
-	SourceEventID string       `json:"source_event_id"`
-	MSISDNToken   string       `json:"msisdn_token"`
-	Amount        entity.Money `json:"amount"`
-	OccurredAt    time.Time    `json:"occurred_at"`
-}
-
-type recoveryEventResponse struct {
-	RecoveryEventID string        `json:"recovery_event_id"`
-	State           string        `json:"state"`
-	Applied         *entity.Money `json:"applied,omitempty"`
-	Excess          *entity.Money `json:"excess,omitempty"`
-	AdvanceClosed   bool          `json:"advance_closed"`
-	Replayed        bool          `json:"replayed"`
 }
 
 // customerStatus maps internal FSM states to the customer-safe vocabulary
@@ -260,38 +249,6 @@ func (h *Channel) advanceStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toAdvanceResponse(adv))
-}
-
-func (h *Channel) recoveryEvent(w http.ResponseWriter, r *http.Request) {
-	var req recoveryEventRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-		writeErr(w, http.StatusBadRequest, "RECOVERY_BAD_REQUEST", "malformed JSON body")
-		return
-	}
-	out, err := h.Recovery.Ingest(r.Context(), recovery.IngestCmd{
-		SourceEventID: req.SourceEventID,
-		MSISDNToken:   req.MSISDNToken,
-		Amount:        req.Amount,
-		OccurredAt:    req.OccurredAt,
-		CorrelationID: platform.CorrelationFrom(r.Context()),
-	})
-	if err != nil {
-		h.writeDomainErr(w, r, err)
-		return
-	}
-	resp := recoveryEventResponse{
-		RecoveryEventID: out.RecoveryEventID,
-		State:           string(out.State),
-		AdvanceClosed:   out.AdvanceClosed,
-		Replayed:        out.Replayed,
-	}
-	if out.Applied.IsSet() {
-		resp.Applied = &out.Applied
-	}
-	if out.Excess.IsSet() {
-		resp.Excess = &out.Excess
-	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 // writeDomainErr is THE typed-error boundary (BC-7): every domain error family

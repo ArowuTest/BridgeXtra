@@ -1322,41 +1322,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
-  /v1/recovery/events:
-    post:
-      operationId: ingestRecoveryEvent
-      summary: Canonical recharge-recovery event (V2-COL-001, EDG-018/020)
-      description: >
-        Idempotent by source_event_id — a telco replay returns the original
-        outcome and changes nothing. Allocation follows the governed waterfall;
-        over-recovery quarantines to suspense as an explicit liability;
-        unmatched tokens are preserved, never discarded.
-      parameters:
-        - $ref: "#/components/parameters/CorrelationId"
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [source_event_id, msisdn_token, amount, occurred_at]
-              properties:
-                source_event_id: { type: string }
-                msisdn_token: { type: string }
-                amount: { $ref: "#/components/schemas/Money" }
-                occurred_at: { type: string, format: date-time }
-      responses:
-        "200":
-          description: Event outcome (allocated / quarantined / unmatched / replayed)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RecoveryEventResult" }
-        "400":
-          description: Malformed event (RECOVERY_BAD_REQUEST)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
   /v1/self-exclusions:
     post:
       operationId: requestSelfExclusion
@@ -1723,16 +1688,6 @@ components:
         disbursed: { $ref: "#/components/schemas/Money" }
         outstanding: { $ref: "#/components/schemas/Money" }
         status_route: { type: string, example: /v1/advances/adv_01J... }
-    RecoveryEventResult:
-      type: object
-      required: [recovery_event_id, state, advance_closed, replayed]
-      properties:
-        recovery_event_id: { type: string }
-        state: { type: string, enum: [ALLOCATED, QUARANTINED, UNMATCHED, PENDING] }
-        applied: { $ref: "#/components/schemas/Money" }
-        excess: { $ref: "#/components/schemas/Money" }
-        advance_closed: { type: boolean }
-        replayed: { type: boolean }
     ErrorEnvelope:
       type: object
       required: [error_code, message]

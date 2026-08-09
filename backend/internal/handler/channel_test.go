@@ -20,6 +20,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/handler"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/ledger"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/rechargewebhook"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -35,6 +36,7 @@ type channelFixture struct {
 
 func newChannelFixture(t *testing.T, suffix string, simHold time.Duration, adapterTimeoutMs int) *channelFixture {
 	t.Helper()
+	t.Setenv(whSecretEnv, whSecret)
 	db := testutil.MustSetup(t, suffix)
 	db.SeedTelco(t, "SIM_NG", "sim-api-key") // credential for the channel
 
@@ -68,6 +70,29 @@ func newChannelFixture(t *testing.T, suffix string, simHold time.Duration, adapt
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: db.App, Log: slog.Default()}
 	mux := http.NewServeMux()
 	(&handler.Channel{Origination: orig, Recovery: rec, Limiter: testLimiter(), Log: slog.Default()}).Mount(mux, auth)
+
+	// BX-P0-002: the wire contract's recovery step goes through the ONLY external
+	// recovery ingress — the HMAC-signed recharge webhook. Mount it alongside the
+	// channel (exactly as cmd/api does), armed + governed so a valid signed event
+	// ingests. "wh:" namespacing keeps recon covering it.
+	activateRechargeFeed(t, cfgW, "global", true, 50_000_000)
+	activateRechargeFeed(t, cfgW, "telco:SIM_NG", true, 50_000_000)
+	if err := (&repo.WebhookCredentials{Pool: db.Admin}).Create(ctx, whKeyID, "SIM_NG", whSecretEnv, "test"); err != nil {
+		t.Fatal(err)
+	}
+	arm := &repo.ReconArming{Pool: db.Admin}
+	if err := arm.SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := arm.AdvanceFreshness(ctx, "SIM_NG", repo.ReconLayerRecovery, 172800); err != nil {
+		t.Fatal(err)
+	}
+	(&handler.RechargeWebhook{
+		Recovery: rec, Config: appCfg,
+		Creds: &repo.WebhookCredentials{Pool: db.App}, Recon: &repo.ReconArming{Pool: db.App},
+		Pool: db.App, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
+		Limiter: testLimiter(), Log: slog.Default(),
+	}).Mount(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return &channelFixture{db: db, srv: srv}
@@ -195,14 +220,27 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 		t.Fatalf("status route: %d %s", resp.StatusCode, body)
 	}
 
-	// 5. Recovery event closes the loop.
-	resp, body = f.do(t, http.MethodPost, "/v1/recovery/events", map[string]string{
-		"X-Correlation-Id": "cor-wire-rec",
-	}, map[string]any{
-		"source_event_id": "wire-src-1", "msisdn_token": "tok_sim_0001",
-		"amount":      map[string]any{"amount_minor": 10_000, "currency": "NGN"},
-		"occurred_at": time.Now().UTC().Format(time.RFC3339),
-	})
+	// 5. Recovery event closes the loop — through the signed recharge webhook, the
+	// only external recovery ingress (BX-P0-002); "wh:" namespaced so recon covers it.
+	{
+		whBody := fmt.Sprintf(`{"event_id":"wire-src-1","msisdn_token":"tok_sim_0001","amount_minor":10000,"currency":"NGN","occurred_at":%q}`,
+			time.Now().UTC().Format(time.RFC3339))
+		ts := fmt.Sprintf("%d", time.Now().UTC().Unix())
+		sig := rechargewebhook.Sign(rechargewebhook.NewHMACSHA256Adapter(), []byte(whSecret), whKeyID, ts, []byte(whBody))
+		req, err := http.NewRequest(http.MethodPost, f.srv.URL+"/v1/telcos/SIM_NG/recharge-webhook", bytes.NewReader([]byte(whBody)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Bx-Key-Id", whKeyID)
+		req.Header.Set("X-Bx-Timestamp", ts)
+		req.Header.Set("X-Bx-Signature", sig)
+		var rerr error
+		if resp, rerr = f.srv.Client().Do(req); rerr != nil {
+			t.Fatal(rerr)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("recovery: %d %s", resp.StatusCode, body)
 	}
@@ -227,6 +265,27 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 	}
 	if adv.Status != "CLOSED" || adv.Outstanding.AmountMinor != 0 {
 		t.Fatalf("final: %s", body)
+	}
+}
+
+// TestBXP0002_LegacyRecoveryRoute_Removed pins the BX-P0-002 invariant at the mux
+// level: the channel surface exposes NO recovery ingress. The ONLY external door
+// for a recovery event is the HMAC-signed recharge webhook, which namespaces every
+// event "wh:" so EOD reconciliation covers it. A general-api-key channel route
+// booked money invisible to recon and skipped the HELD clamps + S3-C2 re-origination
+// hold. Mutation proof: re-add mux.Handle("POST /v1/recovery/events", ...) in
+// Channel.Mount and this test goes red (404 → 200/4xx).
+func TestBXP0002_LegacyRecoveryRoute_Removed(t *testing.T) {
+	f := newChannelFixture(t, "chan_p0002", 0, 2_000)
+	// A well-formed legacy recovery request with a VALID channel api key must not
+	// find a route at all — the door is removed, not merely guarded.
+	resp, body := f.do(t, http.MethodPost, "/v1/recovery/events", nil, map[string]any{
+		"source_event_id": "legacy-1", "msisdn_token": "tok_sim_0001",
+		"amount":      map[string]any{"amount_minor": 10_000, "currency": "NGN"},
+		"occurred_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("legacy /v1/recovery/events must be removed (404), got %d %s", resp.StatusCode, body)
 	}
 }
 

@@ -40,10 +40,12 @@ func TestRP08F1_RotatingInvalidKeys_StillThrottledByIP(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	// Each request presents a DIFFERENT invalid api key — the v1 bypass.
+	// Each request presents a DIFFERENT invalid api key — the v1 bypass. Any
+	// wrap()-ed channel route exercises the pre-auth channel_ip bucket identically;
+	// /v1/advances stands in for the (removed, BX-P0-002) legacy recovery route.
 	got429 := false
 	for i := 0; i < 30; i++ {
-		req, _ := http.NewRequest("POST", srv.URL+"/v1/recovery/events", http.NoBody)
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/advances", http.NoBody)
 		req.Header.Set("X-Api-Key", "forged-key-"+strconv.Itoa(i))
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
