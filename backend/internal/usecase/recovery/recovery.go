@@ -149,6 +149,11 @@ func (s *Service) Ingest(ctx context.Context, cmd IngestCmd) (IngestResult, erro
 // silent replay — refused loudly with a security audit for reconciliation.
 var ErrDivergentRecovery = errors.New("recovery: source event id reused with a divergent payload")
 
+// ErrDivergentReversal (P0-003): a telco reused a reversal_source_event_id with a
+// DIFFERENT payload (original/amount/currency). Never applied as a silent replay —
+// refused loudly with a security audit for reconciliation.
+var ErrDivergentReversal = errors.New("recovery: reversal source event id reused with a divergent payload")
+
 // recoverySourceHash is the canonical equivalence fingerprint of a recovery
 // event over its material fields. Deterministic (fixed struct field order).
 func recoverySourceHash(telcoID string, cmd IngestCmd) string {
@@ -161,6 +166,21 @@ func recoverySourceHash(telcoID string, cmd IngestCmd) string {
 		OccurredAt string `json:"occurred_at"`
 	}{telcoID, cmd.SourceEventID, cmd.Amount.Amount(), string(cmd.Amount.Currency()),
 		cmd.MSISDNToken, cmd.OccurredAt.UTC().Format(time.RFC3339Nano)})
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+// reversalSourceHash is the canonical equivalence fingerprint of a recovery REVERSAL
+// over its material fields (P0-003). Deterministic (fixed field order); mirrors
+// recoverySourceHash so a divergent retry is refused, never silently double-applied.
+func reversalSourceHash(telcoID, reversalSourceID, originalSourceID string, amount entity.Money) string {
+	b, _ := json.Marshal(struct {
+		Telco    string `json:"telco_id"`
+		Reversal string `json:"reversal_source_event_id"`
+		Original string `json:"original_source_event_id"`
+		Amount   int64  `json:"amount_minor"`
+		Currency string `json:"currency"`
+	}{telcoID, reversalSourceID, originalSourceID, amount.Amount(), string(amount.Currency())})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
@@ -545,7 +565,34 @@ func (s *Service) Reverse(ctx context.Context, cmd ReverseCmd) (ReverseResult, e
 		}
 		return nil
 	})
+	if errors.Is(err, ErrDivergentReversal) {
+		s.recordDivergentReversal(ctx, cmd)
+		return ReverseResult{}, ErrDivergentReversal
+	}
 	return out, err
+}
+
+// recordDivergentReversal writes the DIVERGENT_DUPLICATE security-audit out-of-band
+// (the reverse tx rolled back). Mirrors recordDivergentRecovery.
+func (s *Service) recordDivergentReversal(ctx context.Context, cmd ReverseCmd) {
+	telcoID, err := platform.TenantFrom(ctx)
+	if err != nil {
+		s.Log.Error("divergent reversal audit: no tenant in context", "err", err)
+		return
+	}
+	tctx := platform.WithTenant(ctx, telcoID)
+	if e := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		return s.audit.Insert(ctx, tx, entity.AuditEvent{
+			ID: platform.NewID("aud"), TelcoID: telcoID, Actor: "channel:telco",
+			Action: "recovery.reverse.divergent_duplicate", TargetType: "reversal_source_event_id", TargetID: cmd.ReversalSourceEventID,
+			Reason: fmt.Sprintf("reversal source event reused with a divergent payload (original=%s amount=%d %s)",
+				cmd.OriginalSourceEventID, cmd.Amount.Amount(), cmd.Amount.Currency()),
+		})
+	}); e != nil {
+		s.Log.Error("failed to record reversal DIVERGENT_DUPLICATE audit", "reversal", cmd.ReversalSourceEventID, "err", e)
+	}
+	s.Log.Warn("DIVERGENT_DUPLICATE: reversal source event reused with a different payload",
+		"reversal", cmd.ReversalSourceEventID, "amount", cmd.Amount.String())
 }
 
 // RetryResult reports an operator-initiated retry of a PARKED reversal.
@@ -682,6 +729,35 @@ func (s *Service) applyParkedIfAny(ctx context.Context, tx pgx.Tx, ingest *Inges
 // CHECK guards), CLOSED re-opens, mirrored balanced journal.
 func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResult,
 	original entity.RecoveryEvent, amount entity.Money, correlationID, reversalSourceID string) error {
+
+	// P0-003 (mirror R-P0-2): claim (telco, "recovery.reverse", reversal_source_event_id)
+	// in the SAME tx (this SAVEPOINT) that books the claw-back. A duplicate reversal only
+	// REPLAYS when its hash matches; a divergent one (same id, different amount) is refused.
+	// Without this, a duplicate PARTIAL reversal writes a SECOND negative allocation (the
+	// allocations have no uniqueness backstop) while the RECOVERY_REVERSED journal dedups on
+	// its business-event-key — so outstanding is clawed back twice but the ledger records it
+	// once, breaking book==ledger (INV-016). Claiming here covers EVERY apply path (immediate
+	// Reverse, EDG-019 auto-apply, operator RetryParked) since all book through here; a
+	// collision rolls this SAVEPOINT (and the claim) back, so a later retry re-applies.
+	telcoID, err := platform.TenantFrom(ctx)
+	if err != nil {
+		return err
+	}
+	hash := reversalSourceHash(telcoID, reversalSourceID, original.SourceEventID, amount)
+	rec, stored, err := s.idem.PutIfAbsent(ctx, tx, entity.IdempotencyRecord{
+		TelcoID: telcoID, Operation: "recovery.reverse", IdemKey: reversalSourceID,
+		RequestHash: hash, ResponseStatus: 0, ResponseBody: []byte(`{}`),
+	})
+	if err != nil {
+		return err
+	}
+	if !stored {
+		if rec.RequestHash != hash {
+			return ErrDivergentReversal
+		}
+		out.Replayed = true // already applied on the first submission — never double-book
+		return nil
+	}
 
 	netApplied, advanceID, err := s.allocations.NetAppliedByEvent(ctx, tx, original.RecoveryEventID)
 	if err != nil {
