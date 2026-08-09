@@ -82,7 +82,12 @@ func (s *Service) Generate(ctx context.Context, telcoID, programmeID string, per
 	if !periodEnd.After(periodStart) {
 		return Statement{}, fmt.Errorf("period_end must be after period_start")
 	}
-	cv, err := s.Config.ActiveAt(ctx, "settlement.terms", "programme:"+programmeID, time.Now().UTC())
+	// BX-HIGH-011: resolve the terms in force DURING the settlement period, not at
+	// generation time. Using time.Now() meant a statement generated (or backfilled) after a
+	// terms renegotiation applied the NEW terms to an OLD period. Anchor at periodStart (the
+	// contractual instant the period's obligations began); periodEnd is the half-open
+	// boundary at which a renegotiated version activates, so it would pull in the new terms.
+	cv, err := s.Config.ActiveAt(ctx, "settlement.terms", "programme:"+programmeID, periodStart.UTC())
 	if err != nil {
 		return Statement{}, fmt.Errorf("settlement.terms config: %w", err)
 	}
