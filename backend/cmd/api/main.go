@@ -58,28 +58,35 @@ func main() {
 	egress.SetBlockPrivate(env("TCP_EGRESS_BLOCK_PRIVATE", "false") == "true")
 	log.Info("egress guard", "block_private_ranges", egress.BlockPrivateEnabled())
 
-	// Boot-time self-migration (project lesson: never depend on an external
-	// deploy hook having run).
-	adminPool, err := platform.NewPool(ctx, adminDSN)
-	if err != nil {
-		log.Error("admin db connect failed", "err", err)
-		os.Exit(1)
+	// Boot-time self-migration is the DEFAULT (project lesson: never depend on an external
+	// deploy hook having run). BX-HIGH-012: in production the migrator + role-password
+	// rotation run as a SEPARATE privileged job (cmd/migrate) so the request-serving API
+	// process never opens the owner DSN — set TCP_API_SELF_MIGRATE=false there and run
+	// cmd/migrate as a pre-start job / init container.
+	if env("TCP_API_SELF_MIGRATE", "true") == "true" {
+		adminPool, err := platform.NewPool(ctx, adminDSN)
+		if err != nil {
+			log.Error("admin db connect failed", "err", err)
+			os.Exit(1)
+		}
+		if n, err := dbmigrate.Apply(ctx, adminPool, migrations.FS); err != nil {
+			log.Error("migrate failed", "err", err)
+			os.Exit(1)
+		} else if n > 0 {
+			log.Info("migrations applied", "count", n)
+		}
+		// Rotate role passwords from the environment (production must never run
+		// on the dev passwords baked into 0001 — V2-SEC-005).
+		if rotated, err := dbroles.ApplyPasswords(ctx, adminPool); err != nil {
+			log.Error("role password rotation failed", "err", err)
+			os.Exit(1)
+		} else if len(rotated) > 0 {
+			log.Info("role passwords applied from environment", "roles", rotated)
+		}
+		adminPool.Close()
+	} else {
+		log.Info("boot-time self-migration DISABLED (BX-HIGH-012) — migrations + role passwords must be applied by the separate cmd/migrate job before this API starts")
 	}
-	if n, err := dbmigrate.Apply(ctx, adminPool, migrations.FS); err != nil {
-		log.Error("migrate failed", "err", err)
-		os.Exit(1)
-	} else if n > 0 {
-		log.Info("migrations applied", "count", n)
-	}
-	// Rotate role passwords from the environment (production must never run
-	// on the dev passwords baked into 0001 — V2-SEC-005).
-	if rotated, err := dbroles.ApplyPasswords(ctx, adminPool); err != nil {
-		log.Error("role password rotation failed", "err", err)
-		os.Exit(1)
-	} else if len(rotated) > 0 {
-		log.Info("role passwords applied from environment", "roles", rotated)
-	}
-	adminPool.Close()
 
 	appPool, err := platform.NewPool(ctx, appDSN)
 	if err != nil {
