@@ -158,6 +158,15 @@ func (in Input) Score() (Decision, error) {
 
 	// --- staleness (EDG-014 / V2-SCR-016): explicit policy, never silent ---
 	age := in.ScoredAt.Sub(in.FeatureAsOf)
+	// BX-HIGH-007 defence-in-depth: a feature cut dated in the FUTURE (negative age)
+	// is not "fresh" — it is invalid. The ingest clamp refuses future-dated files, so
+	// this is normally unreachable; if a future as_of ever reaches scoring, reject it
+	// rather than let a negative age fall through to the FRESH default below.
+	if age < 0 {
+		reason("FEATURES_FUTURE_DATED_REJECTED")
+		d.StalenessOutcome = "REJECTED"
+		return d, nil
+	}
 	switch {
 	case age > time.Duration(p.Staleness.DegradeHours)*time.Hour:
 		reason("FEATURES_STALE_REJECTED")

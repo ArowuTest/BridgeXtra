@@ -215,6 +215,12 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 		CircuitMinRequests     *int    `json:"circuit_min_requests"`
 		CircuitCooldownSeconds *int    `json:"circuit_cooldown_seconds"`
 		MaxWeeklyRechargeMinor *int64  `json:"max_weekly_recharge_minor"`
+		// BX-HIGH-007: the feature file's as_of may not be dated in the future beyond
+		// this clock-skew tolerance (seconds). Optional — absent means 0, i.e. any
+		// future-dated cut is refused outright. A future as_of would otherwise poison
+		// the nin_verified monotonic guard (a far-future "true" durably blocks later
+		// real revocations) and score as artificially FRESH (negative age).
+		FeatureAsOfMaxFutureSkewSeconds *int `json:"feature_as_of_max_future_skew_seconds"`
 		// Phase 1 S1: optional outbound partner auth. Secrets are NEVER stored in
 		// config — only the names of the env vars that hold them.
 		Auth *struct {
@@ -272,6 +278,12 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 	if v.MaxWeeklyRechargeMinor == nil || *v.MaxWeeklyRechargeMinor <= 0 ||
 		*v.MaxWeeklyRechargeMinor > 922_000_000_000_000 {
 		return fmt.Errorf("max_weekly_recharge_minor is required and must be in (0, 922e12] — the feature-feed plausibility ceiling (G2-F3)")
+	}
+	// BX-HIGH-007: bounded, non-negative future clock-skew tolerance for the feature
+	// file's as_of. Optional (absent = 0 = no future dating permitted).
+	if v.FeatureAsOfMaxFutureSkewSeconds != nil &&
+		(*v.FeatureAsOfMaxFutureSkewSeconds < 0 || *v.FeatureAsOfMaxFutureSkewSeconds > 86_400) {
+		return fmt.Errorf("feature_as_of_max_future_skew_seconds must be 0..86400 (feature-file as_of future clock-skew tolerance, BX-HIGH-007)")
 	}
 
 	// Phase 1 S1: the optional outbound partner-auth block. Fail-closed and

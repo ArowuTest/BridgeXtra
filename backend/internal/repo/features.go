@@ -196,6 +196,31 @@ func (Subscribers) BulkSetNINVerified(ctx context.Context, tx pgx.Tx, ids []stri
 	return nil
 }
 
+// BulkRevokeNINByToken applies a NIN revocation (nin_verified=false) by
+// msisdn_token for EXISTING subscribers only (BX-HIGH-008). Used for rows whose
+// CREDIT features were quarantined: a revocation MUST land even when the row is
+// otherwise malformed, so a corrupted credit field cannot silently suppress it and
+// leave a stale `true` lending-eligible. Under the SAME monotonic as_of guard as
+// BulkSetNINVerified, so a stale/reprocessed older cut still cannot un-revoke a
+// newer state. A token with no live subscriber is a no-op — a never-seen subscriber
+// is ineligible by default. RLS scopes to the tenant; the explicit telco_id
+// predicate is defence in depth. Verification (true) is deliberately NOT applied
+// from a quarantined row (fail-closed: only a clean row may grant eligibility).
+func (Subscribers) BulkRevokeNINByToken(ctx context.Context, tx pgx.Tx, telcoID string, tokens []string, asOf time.Time) error {
+	if len(tokens) == 0 {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `
+		UPDATE subscriber_accounts sa
+		SET nin_verified = false, nin_verified_as_of = $3
+		WHERE sa.telco_id = $1 AND sa.msisdn_token = ANY($2) AND sa.effective_to IS NULL
+		  AND (sa.nin_verified_as_of IS NULL OR sa.nin_verified_as_of <= $3)`, telcoID, tokens, asOf)
+	if err != nil {
+		return fmt.Errorf("bulk revoke nin by token: %w", err)
+	}
+	return nil
+}
+
 // BulkUpsert is the set-based twin of Upsert: one staging COPY + one
 // INSERT..SELECT ON CONFLICT DO NOTHING per chunk. Returns rows written.
 func (FeatureSnapshots) BulkUpsert(ctx context.Context, tx pgx.Tx, snaps []entity.FeatureSnapshot) (int64, error) {

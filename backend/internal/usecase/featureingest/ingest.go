@@ -130,6 +130,19 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	if file.AsOf.IsZero() {
 		return Summary{}, fmt.Errorf("feature file has no as_of — refusing an undated data cut (V2-SCR-002)")
 	}
+	// BX-HIGH-007: refuse a FUTURE-dated cut. A future as_of would (a) poison the
+	// nin_verified monotonic guard — a far-future "true" durably blocks later real
+	// revocations — and (b) score as artificially FRESH (negative age). The tolerance
+	// is governed config (telco.adapter.feature_as_of_max_future_skew_seconds); absent
+	// = 0, so any future date is refused outright (zero-config safe floor).
+	skew, err := s.featureAsOfMaxFutureSkew(ctx, telcoID)
+	if err != nil {
+		return Summary{}, err
+	}
+	if file.AsOf.After(time.Now().UTC().Add(skew)) {
+		return Summary{}, fmt.Errorf("feature file as_of %s is dated in the future beyond the governed skew %s — refusing the cut (BX-HIGH-007)",
+			file.AsOf.UTC().Format(time.RFC3339), skew)
+	}
 
 	// G2-F3: the plausibility ceiling from governed config. FAIL CLOSED — a
 	// telco config without a ceiling refuses the whole feed rather than
@@ -176,11 +189,20 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 				ninVerified       *bool // Build 2: identity flag, upserted in place (not a feature)
 			}
 			preps := make([]prepared, 0, len(chunk))
+			revokeTokens := make([]string, 0) // BX-HIGH-008: revocations carried by quarantined rows
 			for i, row := range chunk {
 				if reason := validateRow(row, ceiling); reason != "" {
 					sum.Quarantined++
 					s.Log.Warn("feature row quarantined", "file", sum.FeatureFileID,
 						"row", start+i, "token", row.MSISDNToken, "reason", reason)
+					// BX-HIGH-008: a REVOCATION (nin_verified=false) must land even when
+					// the row's CREDIT features are quarantined — otherwise corrupting a
+					// credit field silently suppresses the revocation and a stale "true"
+					// keeps the subscriber lending-eligible. Verification (true) is the
+					// dangerous direction and is NOT honoured from a quarantined row.
+					if row.MSISDNToken != "" && row.NINVerified != nil && !*row.NINVerified {
+						revokeTokens = append(revokeTokens, row.MSISDNToken)
+					}
 					continue
 				}
 				features, quality, err := canonicalRow(row)
@@ -193,6 +215,12 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 				preps = append(preps, prepared{token: row.MSISDNToken,
 					features: features, quality: quality, hash: hex.EncodeToString(rowHash[:]),
 					ninVerified: row.NINVerified})
+			}
+			// BX-HIGH-008: apply revocations from quarantined rows FIRST (by token,
+			// existing subscribers only, under the monotonic as_of guard). This precedes
+			// the clean-row early-out so a chunk of ONLY quarantined rows still revokes.
+			if err := subs.BulkRevokeNINByToken(ctx, tx, telcoID, revokeTokens, file.AsOf); err != nil {
+				return err
 			}
 			if len(preps) == 0 {
 				continue
@@ -272,6 +300,27 @@ func (s *Service) plausibilityCeiling(ctx context.Context, telcoID string) (int6
 		return 0, fmt.Errorf("telco.adapter for %s has no max_weekly_recharge_minor — refusing the feed (G2-F3: absent ceiling is not unlimited)", telcoID)
 	}
 	return ac.MaxWeeklyRechargeMinor, nil
+}
+
+// featureAsOfMaxFutureSkew reads the governed clock-skew tolerance for a feature
+// file's as_of (BX-HIGH-007) from telco.adapter config. Absent or negative → 0: a
+// future-dated cut is then refused outright (zero-config safe floor). Permissive
+// read (ignores other fields), unlike the strict config validator.
+func (s *Service) featureAsOfMaxFutureSkew(ctx context.Context, telcoID string) (time.Duration, error) {
+	cv, err := s.Config.ActiveAt(ctx, "telco.adapter", "telco:"+telcoID, time.Now().UTC())
+	if err != nil {
+		return 0, fmt.Errorf("telco.adapter config: %w", err)
+	}
+	var ac struct {
+		FeatureAsOfMaxFutureSkewSeconds int `json:"feature_as_of_max_future_skew_seconds"`
+	}
+	if err := json.Unmarshal(cv.Content, &ac); err != nil {
+		return 0, err
+	}
+	if ac.FeatureAsOfMaxFutureSkewSeconds <= 0 {
+		return 0, nil
+	}
+	return time.Duration(ac.FeatureAsOfMaxFutureSkewSeconds) * time.Second, nil
 }
 
 // validateRow enforces the canonical contract; a violation quarantines the
