@@ -55,6 +55,7 @@ type DB struct {
 	App      *pgxpool.Pool // tcp_app: RLS enforced — the pool business code uses
 	Worker   *pgxpool.Pool // tcp_worker: BYPASSRLS dispatcher
 	Operator *pgxpool.Pool // tcp_operator: RLS-enforced read-only operator (Gate B #1)
+	Config   *pgxpool.Pool // tcp_config: NON-BYPASSRLS config/resolver role (BX-HIGH-012)
 }
 
 func hostPort() string {
@@ -125,12 +126,21 @@ func MustSetup(t *testing.T, suffix string) *DB {
 		worker.Close()
 		t.Fatalf("operator pool: %v", err)
 	}
+	config, err := platform.NewPool(ctx, dsn("tcp_config", "devlocal_config", name))
+	if err != nil {
+		admin.Close()
+		app.Close()
+		worker.Close()
+		operator.Close()
+		t.Fatalf("config pool: %v", err)
+	}
 
-	db := &DB{Name: name, Admin: admin, App: app, Worker: worker, Operator: operator}
+	db := &DB{Name: name, Admin: admin, App: app, Worker: worker, Operator: operator, Config: config}
 	t.Cleanup(func() {
 		app.Close()
 		worker.Close()
 		operator.Close()
+		config.Close()
 		admin.Close()
 		// Drop the test database on teardown so runs don't accumulate hundreds of
 		// stale telco_credit_test_* DBs — that bloat balloons the server's cold-start

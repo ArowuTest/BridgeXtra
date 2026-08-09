@@ -23,6 +23,7 @@ var envPasswords = map[string]string{
 	"tcp_app":      "TCP_APP_PASSWORD",
 	"tcp_worker":   "TCP_WORKER_PASSWORD",
 	"tcp_operator": "TCP_OPERATOR_PASSWORD",
+	"tcp_config":   "TCP_CONFIG_PASSWORD", // BX-HIGH-012: least-privilege config/resolver role
 }
 
 // ApplyPasswords sets each role's password from its env var when present.

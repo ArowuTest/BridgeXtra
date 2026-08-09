@@ -16,9 +16,12 @@ import (
 
 func newSvc(t *testing.T, suffix string) (*configsvc.Service, *testutil.DB) {
 	db := testutil.MustSetup(t, suffix)
-	// Config writes use the worker/admin path in M0; the service gets the
-	// worker pool (INSERT/UPDATE granted) — matching production wiring.
-	return configsvc.New(db.Worker), db
+	// BX-HIGH-012: config governance runs on the least-privilege, NON-BYPASSRLS
+	// tcp_config role (migration 0076) — matching production wiring (cmd/api). This
+	// exercises the whole maker-checker/validator suite with RLS enforced, proving
+	// the role's grants (config_versions S/I/U, telcos S, audit_events S/I) are
+	// exactly sufficient and that config audit rows (telco_id NULL) pass RLS.
+	return configsvc.New(db.Config), db
 }
 
 func TestV2_CFG_002_MakerCannotApproveOwnChange(t *testing.T) {

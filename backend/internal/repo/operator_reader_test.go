@@ -22,7 +22,7 @@ import (
 // specific subscriber row, going through the OperatorReader chokepoint.
 func readerSees(t *testing.T, db *testutil.DB, sessionScope, subID string) bool {
 	t.Helper()
-	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker}
+	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Config}
 	scope := repo.PortalSession{Scope: sessionScope}.OperatorScope()
 	var seen bool
 	if err := reader.Read(context.Background(), scope, func(ctx context.Context, tx pgx.Tx) error {
@@ -99,7 +99,7 @@ func TestOperatorReader_MissedWrapperFailsClosed(t *testing.T) {
 
 	// WRAPPED: through the chokepoint the scope GUC is set and the in-scope
 	// subscriber is visible.
-	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker}
+	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Config}
 	var found bool
 	if err := reader.Read(ctx, scope, func(ctx context.Context, tx pgx.Tx) error {
 		_, _, _, _, _, e := repo.SubscriberTimeline(ctx, tx, scope, "tok_sim")

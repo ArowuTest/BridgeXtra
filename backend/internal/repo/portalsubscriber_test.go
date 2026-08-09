@@ -20,7 +20,7 @@ import (
 
 func searchUnderScope(t *testing.T, db *testutil.DB, sessionScope, query string) []repo.SubscriberDirectoryRow {
 	t.Helper()
-	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker}
+	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Config}
 	scope := repo.PortalSession{Scope: sessionScope}.OperatorScope()
 	var out []repo.SubscriberDirectoryRow
 	if err := reader.Read(context.Background(), scope, func(ctx context.Context, tx pgx.Tx) error {
@@ -37,7 +37,7 @@ func searchUnderScope(t *testing.T, db *testutil.DB, sessionScope, query string)
 // failing the read — an out-of-scope id is a not-found, not a read failure.
 func profileUnderScope(t *testing.T, db *testutil.DB, sessionScope, acct string) (repo.SubscriberProfileResult, error) {
 	t.Helper()
-	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Worker}
+	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Config}
 	scope := repo.PortalSession{Scope: sessionScope}.OperatorScope()
 	var res repo.SubscriberProfileResult
 	var domainErr error

@@ -48,7 +48,11 @@ func main() {
 
 	adminDSN := env("TCP_ADMIN_DSN", "postgres://postgres:devlocal@localhost:5434/telco_credit")
 	appDSN := env("TCP_APP_DSN", "postgres://tcp_app:devlocal_app@localhost:5434/telco_credit")
-	workerDSN := env("TCP_WORKER_DSN", "postgres://tcp_worker:devlocal_worker@localhost:5434/telco_credit")
+	// BX-HIGH-012 (control-plane / data-plane split, Stage 1): the request-serving
+	// API no longer holds a BYPASSRLS pool. Config governance and the programme->telco
+	// resolver run on the dedicated NON-BYPASSRLS tcp_config role (migration 0076),
+	// whose only cross-tenant reach is a SELECT-only two-column programmes policy.
+	configDSN := env("TCP_CONFIG_DSN", "postgres://tcp_config:devlocal_config@localhost:5434/telco_credit")
 	operatorDSN := env("TCP_OPERATOR_DSN", "postgres://tcp_operator:devlocal_operator@localhost:5434/telco_credit")
 	addr := env("TCP_API_ADDR", ":8090")
 
@@ -95,18 +99,21 @@ func main() {
 	}
 	defer appPool.Close()
 
-	// Config writes run under the worker role (INSERT/UPDATE on config_versions
-	// granted there in M0; dedicated admin role arrives with M4 RBAC).
-	workerPool, err := platform.NewPool(ctx, workerDSN)
+	// Config governance + the programme->telco resolver run on the least-privilege
+	// tcp_config role (migration 0076): INSERT/UPDATE/SELECT on the global
+	// config_versions table + a SELECT-only, two-column programmes resolver policy.
+	// It holds NO BYPASSRLS — a compromise of this process cannot read or write any
+	// tenant's money/subscriber data through it (BX-HIGH-012).
+	configPool, err := platform.NewPool(ctx, configDSN)
 	if err != nil {
-		log.Error("worker db connect failed", "err", err)
+		log.Error("config db connect failed", "err", err)
 		os.Exit(1)
 	}
-	defer workerPool.Close()
+	defer configPool.Close()
 
 	// Gate B #1: the RLS-enforced read-only operator pool. Portal operator reads
-	// run here inside a scope-set tx (repo.OperatorReader); the worker pool is the
-	// trusted resolver for programme->telco only.
+	// run here inside a scope-set tx (repo.OperatorReader); the tcp_config pool is
+	// the trusted resolver for programme->telco only.
 	operatorPool, err := platform.NewPool(ctx, operatorDSN)
 	if err != nil {
 		log.Error("operator db connect failed", "err", err)
@@ -148,7 +155,7 @@ func main() {
 
 	// R-P0-8: inbound rate limiter from governed config — fail-closed: the API
 	// refuses to boot without it, so no surface ever runs unlimited.
-	limiter, trustedProxies, err := handler.LoadRateLimiter(ctx, configsvc.New(workerPool))
+	limiter, trustedProxies, err := handler.LoadRateLimiter(ctx, configsvc.New(configPool))
 	if err != nil {
 		log.Error("rate limiter (required at boot)", "err", err)
 		os.Exit(1)
@@ -158,17 +165,17 @@ func main() {
 	portal := &handler.Portal{
 		Admins:   &repo.Admins{Pool: appPool},
 		Sessions: &repo.PortalSessions{Pool: appPool},
-		Config:   configsvc.New(workerPool),
+		Config:   configsvc.New(configPool),
 		// Re-arm actions run as the app role in a tenant tx; operator reads run on
 		// the RLS-enforced tcp_operator pool inside a scope-set tx (OperatorReader),
-		// with the worker pool as the trusted programme->telco resolver only.
+		// with the tcp_config pool as the trusted programme->telco resolver only.
 		Treasury:    treasury.New(appPool, configsvc.New(appPool), log),
 		Ops:         ops.New(appPool, configsvc.New(appPool), log),
 		Settlement:  settlement.New(appPool, configsvc.New(appPool), log),
 		Recovery:    rec,
 		Collections: collections.New(appPool, appCfg, led, log),
 		Demo:        ops.NewDemo(appPool, appCfg, orig, log),
-		Operator:    repo.OperatorReader{Pool: operatorPool, Resolve: workerPool},
+		Operator:    repo.OperatorReader{Pool: operatorPool, Resolve: configPool},
 		// B.2a MSISDN reveal: append-only audit on the app pool (platform-scope row,
 		// telco in detail). The reveal fails closed if this write fails.
 		Audit: repo.Audit{},
