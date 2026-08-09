@@ -149,6 +149,28 @@ func (a *HTTPAdapter) cfgFor(ctx context.Context, telcoID string) (adapterCfg, e
 	return c, nil
 }
 
+// AuthenticatedGet performs a GET to url with the telco's governed outbound partner
+// auth applied (fail-closed) through the SSRF-safe egress client. The feature-feed
+// ingest fetches through this so the feed is authenticated with the SAME governed
+// credentials as fulfilment, never unauthenticated (BX-HIGH-006). A configured
+// scheme whose secret is missing refuses the call rather than sending it in the
+// clear. No circuit breaker: the feed pull is a batch operation, not a per-request
+// money path.
+func (a *HTTPAdapter) AuthenticatedGet(ctx context.Context, telcoID, url string) (*http.Response, error) {
+	cfg, err := a.cfgFor(ctx, telcoID)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.applyAuth(ctx, telcoID, cfg, req); err != nil {
+		return nil, err
+	}
+	return a.HTTPClient.Do(req)
+}
+
 type wireFulfilmentRequest struct {
 	PlatformRequestID   string `json:"platform_request_id"`
 	SubscriberAccountID string `json:"subscriber_account_id"`

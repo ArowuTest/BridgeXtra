@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
@@ -49,7 +50,7 @@ func scoredRun(t *testing.T, suffix string) (*Service, *testutil.DB, string) {
 	}
 
 	appCfg := configsvc.New(db.App)
-	file, err := featureingest.New(db.App, appCfg, slog.Default()).Run(ctx, telcoID)
+	file, err := featureingest.New(db.App, appCfg, mno.NewHTTPAdapter(appCfg), slog.Default()).Run(ctx, telcoID)
 	if err != nil {
 		t.Fatal(err)
 	}

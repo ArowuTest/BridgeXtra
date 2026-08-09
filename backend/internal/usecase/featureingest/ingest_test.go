@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
@@ -45,7 +46,7 @@ func setup(t *testing.T, suffix string) (*Service, *testutil.DB, *httptest.Serve
 	if err := svcCfg.Activate(ctx, c.ConfigVersionID, "bob", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
-	return New(db.App, configsvc.New(db.App), slog.Default()), db, simulator
+	return New(db.App, configsvc.New(db.App), mno.NewHTTPAdapter(configsvc.New(db.App)), slog.Default()), db, simulator
 }
 
 func TestIngest_EndToEnd_ThenDuplicateIsRecordedNoOp(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/testutil"
@@ -52,7 +53,7 @@ func setup(t *testing.T, suffix string) (*Service, *featureingest.Service, *test
 	}
 	appCfg := configsvc.New(db.App)
 	return New(db.App, appCfg, slog.Default()),
-		featureingest.New(db.App, appCfg, slog.Default()), db
+		featureingest.New(db.App, appCfg, mno.NewHTTPAdapter(appCfg), slog.Default()), db
 }
 
 func TestScoringRun_EndToEnd_ThenIdempotentReplay(t *testing.T) {

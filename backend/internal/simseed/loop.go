@@ -119,7 +119,7 @@ func RunLoop(ctx context.Context, appPool *pgxpool.Pool, plan LoopPlan) (LoopRes
 	led := ledger.New(appCfg)
 	adapter := &SyntheticAdapter{Seed: loopSeed, ByToken: map[string]mno.Outcome{}, ByAdv: map[string]mno.Outcome{}}
 	orig := origination.New(appPool, appCfg, led, adapter, log)
-	fi := featureingest.New(appPool, appCfg, log)
+	fi := featureingest.New(appPool, appCfg, mno.NewHTTPAdapter(appCfg), log)
 	sr := scoringrun.New(appPool, appCfg, log)
 	rec := recovery.New(appPool, appCfg, led, log)
 	// Recovery events occur mid-day (Lagos), whole-second, so both sides bucket into

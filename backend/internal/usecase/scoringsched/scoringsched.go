@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
@@ -52,7 +53,7 @@ type Service struct {
 func New(appPool, workerPool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger, instanceID string) *Service {
 	return &Service{
 		appPool: appPool, workerPool: workerPool, cfg: cfg, log: log, instanceID: instanceID,
-		ingest: featureingest.New(appPool, cfg, log),
+		ingest: featureingest.New(appPool, cfg, mno.NewHTTPAdapter(cfg), log),
 		scorer: scoringrun.New(appPool, cfg, log),
 	}
 }

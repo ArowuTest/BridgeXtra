@@ -28,21 +28,27 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
-	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 )
 
 type Service struct {
-	Pool       *pgxpool.Pool // tcp_app
-	Config     *configsvc.Service
-	Log        *slog.Logger
-	HTTPClient *http.Client
+	Pool    *pgxpool.Pool // tcp_app
+	Config  *configsvc.Service
+	Log     *slog.Logger
+	Fetcher FeedFetcher
 }
 
-func New(pool *pgxpool.Pool, cfg *configsvc.Service, log *slog.Logger) *Service {
-	return &Service{Pool: pool, Config: cfg, Log: log,
-		HTTPClient: egress.SafeClient(60 * time.Second)} // SSRF egress guard (VR-32)
+// FeedFetcher fetches a telco feed URL with the telco's governed outbound partner
+// auth applied (fail-closed) through the SSRF-safe egress client. Satisfied by
+// *mno.HTTPAdapter — the feature feed is fetched with the SAME authentication as
+// fulfilment, never unauthenticated (BX-HIGH-006).
+type FeedFetcher interface {
+	AuthenticatedGet(ctx context.Context, telcoID, url string) (*http.Response, error)
+}
+
+func New(pool *pgxpool.Pool, cfg *configsvc.Service, fetcher FeedFetcher, log *slog.Logger) *Service {
+	return &Service{Pool: pool, Config: cfg, Fetcher: fetcher, Log: log}
 }
 
 // fileShape mirrors the canonical simulator/telco feature-file contract.
@@ -101,11 +107,9 @@ func (s *Service) fetch(ctx context.Context, telcoID string) ([]byte, error) {
 		return nil, err
 	}
 	url := fmt.Sprintf("%s/v1/telcos/%s/feature-file", ac.FulfilmentURL, telcoID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := s.HTTPClient.Do(req)
+	// BX-HIGH-006: fetch WITH the telco's governed partner auth (fail-closed), not the
+	// bare SSRF client — the feed carries the same authentication as fulfilment.
+	resp, err := s.Fetcher.AuthenticatedGet(ctx, telcoID, url)
 	if err != nil {
 		return nil, fmt.Errorf("fetch feature file: %w", err)
 	}
@@ -126,6 +130,12 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	var file fileShape
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return Summary{}, fmt.Errorf("feature file does not parse: %w", err)
+	}
+	// BX-HIGH-006: the feed's self-declared telco_id MUST match the authenticated
+	// telco we fetched it for. Without this, a feed (or a misrouted / compromised
+	// endpoint) claiming another telco's id would land under the wrong tenant.
+	if file.TelcoID != telcoID {
+		return Summary{}, fmt.Errorf("feature file telco_id %q does not match the authenticated telco %q — refusing (BX-HIGH-006)", file.TelcoID, telcoID)
 	}
 	if file.AsOf.IsZero() {
 		return Summary{}, fmt.Errorf("feature file has no as_of — refusing an undated data cut (V2-SCR-002)")

@@ -62,7 +62,7 @@ func newDemoFixture(t *testing.T, suffix string) (*portalFixture, *fulfilmentres
 	}
 
 	appCfg := configsvc.New(f.db.App)
-	file, err := featureingest.New(f.db.App, appCfg, slog.Default()).Run(ctx, "SIM_NG")
+	file, err := featureingest.New(f.db.App, appCfg, mno.NewHTTPAdapter(appCfg), slog.Default()).Run(ctx, "SIM_NG")
 	if err != nil {
 		t.Fatal(err)
 	}
