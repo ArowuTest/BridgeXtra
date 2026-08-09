@@ -957,9 +957,11 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		OfferSnapshotID:     adv.OfferID,
 	})
 	if err != nil {
-		// Adapter returns errors only for config/programming faults; the
-		// outcome for the advance is still unknowable — resolve as Unknown.
-		s.Log.Error("adapter fault during submit; classifying unknown", "advance", adv.AdvanceID, "err", err)
+		// BX-HIGH-010: SubmitFulfilment classifies every reachable outcome itself — a
+		// pre-send fault is FAILED+NotSent (reservation released), a maybe-sent is UNKNOWN.
+		// A bare error is therefore UNEXPECTED; resolve CONSERVATIVELY as Unknown (assume
+		// the request may have been sent — never release blind, which risks a double credit).
+		s.Log.Error("unexpected adapter error during submit; classifying unknown (conservative)", "advance", adv.AdvanceID, "err", err)
 		res = mno.Result{Outcome: mno.OutcomeUnknown, ResponseEvidence: []byte(fmt.Sprintf(`{"adapter_fault":%q}`, err.Error()))}
 	}
 

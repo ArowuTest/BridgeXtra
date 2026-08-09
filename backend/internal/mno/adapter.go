@@ -68,6 +68,11 @@ type Result struct {
 	TelcoReference   string
 	RequestEvidence  []byte // exact wire request (V2-TEL-002)
 	ResponseEvidence []byte // exact wire response or transport error
+	// NotSent (BX-HIGH-010): the request was DEFINITIVELY not dialled (a pre-send
+	// config / build / auth fault). A NotSent FAILED releases the reservation with no
+	// enquiry — distinct from a business FAILED (telco rejected a request it received)
+	// and from UNKNOWN (maybe-sent, exposure held pending an enquiry).
+	NotSent bool
 }
 
 // Client is the canonical fulfilment interface the saga depends on.
@@ -189,7 +194,11 @@ type wireFulfilmentResponse struct {
 func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempotencyKey string, req FulfilmentRequest) (Result, error) {
 	cfg, err := a.cfgFor(ctx, telcoID)
 	if err != nil {
-		return Result{}, err
+		// BX-HIGH-010: a pre-send fault (nothing dialled) is a DEFINITE non-send, not an
+		// ambiguous UNKNOWN — classify FAILED+NotSent so the saga releases the reservation
+		// instead of holding it as a zombie awaiting a doomed enquiry.
+		return Result{Outcome: OutcomeFailed, NotSent: true,
+			ResponseEvidence: []byte(fmt.Sprintf(`{"not_sent":true,"reason":%q}`, "adapter config load failed: "+err.Error()))}, nil
 	}
 	body, err := json.Marshal(wireFulfilmentRequest{
 		PlatformRequestID:   req.PlatformRequestID,
@@ -201,7 +210,8 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 		OfferSnapshotID:     req.OfferSnapshotID,
 	})
 	if err != nil {
-		return Result{}, err
+		return Result{Outcome: OutcomeFailed, NotSent: true, // BX-HIGH-010: never dialled
+			ResponseEvidence: []byte(fmt.Sprintf(`{"not_sent":true,"reason":%q}`, "request marshal failed: "+err.Error()))}, nil
 	}
 
 	res := Result{RequestEvidence: body}
@@ -223,15 +233,22 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 	url := cfg.FulfilmentURL + "/v1/telcos/" + telcoID + "/fulfilments"
 	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return Result{}, err
+		res.Outcome = OutcomeFailed // BX-HIGH-010: never dialled
+		res.NotSent = true
+		res.ResponseEvidence = []byte(fmt.Sprintf(`{"not_sent":true,"reason":%q}`, "build request failed: "+err.Error()))
+		return res, nil
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Idempotency-Key", telcoIdempotencyKey)
-	// Phase 1 S1: apply partner auth (fail-closed) BEFORE sending — never dial the
-	// telco unauthenticated. Nothing has been sent yet, so an auth failure is a
-	// clean non-send: return an error, the saga releases the reservation.
+	// Phase 1 S1: apply partner auth (fail-closed) BEFORE sending — never dial the telco
+	// unauthenticated. BX-HIGH-010: nothing has been sent, so a missing secret is a clean
+	// non-send — FAILED+NotSent so the saga releases the reservation (safe decline), never
+	// a zombie UNKNOWN that holds exposure awaiting an enquiry for a request never sent.
 	if err := a.applyAuth(callCtx, telcoID, cfg, httpReq); err != nil {
-		return Result{}, err
+		res.Outcome = OutcomeFailed
+		res.NotSent = true
+		res.ResponseEvidence = []byte(fmt.Sprintf(`{"not_sent":true,"reason":%q}`, "outbound auth failed: "+err.Error()))
+		return res, nil
 	}
 	resp, err := a.HTTPClient.Do(httpReq)
 	if err != nil {

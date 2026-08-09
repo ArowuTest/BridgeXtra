@@ -152,13 +152,18 @@ func TestAuth_OAuth2_BearerPresentedAndCached(t *testing.T) {
 }
 
 func TestAuth_FailClosed_MissingSecret(t *testing.T) {
-	// secret_env points at an UNSET variable — the call must refuse, unsent.
+	// secret_env points at an UNSET variable — the call must fail closed, UNSENT, and
+	// classify as a DEFINITE non-send (FAILED + NotSent) so the saga releases the
+	// reservation rather than holding a zombie UNKNOWN awaiting a doomed enquiry (BX-HIGH-010).
 	a, m := adapterWithAuth(t, "auth_failclosed",
 		`,"auth":{"scheme":"apikey","header":"X-Api-Key","secret_env":"TCP_TEST_MNO_ABSENT"}`)
 
-	_, err := a.SubmitFulfilment(context.Background(), "SIM_NG", "idem-fc", authReq("PRQ-FC"))
-	if err == nil {
-		t.Fatal("a configured auth with a missing secret must fail closed (error), not send unauthenticated")
+	res, err := a.SubmitFulfilment(context.Background(), "SIM_NG", "idem-fc", authReq("PRQ-FC"))
+	if err != nil {
+		t.Fatalf("a missing secret is a clean, CLASSIFIED non-send — not a bare error: %v", err)
+	}
+	if res.Outcome != mno.OutcomeFailed || !res.NotSent {
+		t.Fatalf("a missing secret must classify FAILED + NotSent (release, no enquiry), got outcome=%s notSent=%v", res.Outcome, res.NotSent)
 	}
 	if m.fulfilHits != 0 {
 		t.Fatalf("nothing must reach the MNO when auth fails closed, got %d hits", m.fulfilHits)
