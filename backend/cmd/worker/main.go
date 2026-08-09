@@ -534,6 +534,7 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 		os.Exit(1)
 	}
 	totalBreaks := 0
+	recoveryFailures := 0 // BX-HIGH-005: armed RECOVERY layers that FAILED to run
 	for _, tc := range ts {
 		tctx := platform.WithTenant(ctx, tc.TelcoID)
 		var progs []entity.Programme
@@ -607,6 +608,10 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 		// fulfilment). No-ops for an unarmed telco. RECOVERY breaks count to the exit code.
 		if recSums, rerr := svc.RunRecovery(ctx, tc.TelcoID); rerr != nil {
 			log.Error("RECOVERY recon failed — telco skipped (non-fatal)", "telco", tc.TelcoID, "err", rerr)
+			// BX-HIGH-005: RunRecovery no-ops (nil) for an unarmed telco, so an error here is
+			// an ARMED layer that failed to reconcile. The per-telco skip stays non-fatal
+			// (siblings still run), but the pass can no longer be certified clean.
+			recoveryFailures++
 		} else {
 			for _, rs := range recSums {
 				if rs.NothingToReconcile || rs.Unchanged {
@@ -619,9 +624,26 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 			}
 		}
 	}
-	if totalBreaks > 0 {
-		log.Error("reconciliation breaks found", "total", totalBreaks)
-		os.Exit(1)
+	code, msg := reconExitCode(totalBreaks, recoveryFailures)
+	if code != 0 {
+		log.Error(msg)
+		os.Exit(code)
 	}
-	log.Info("reconciliation clean across all active telcos/programmes")
+	log.Info(msg)
+}
+
+// reconExitCode is the honest terminal verdict of a reconciliation pass
+// (BX-HIGH-004/005): any break across the seven classes, OR any ARMED recovery layer
+// that FAILED to run, means the pass is NOT clean and exits non-zero. A required layer
+// that could not be reconciled must never be certified clean just because it wrote zero
+// breaks — silence there is missing coverage, not proof of a match.
+func reconExitCode(totalBreaks, recoveryFailures int) (int, string) {
+	switch {
+	case totalBreaks > 0:
+		return 1, fmt.Sprintf("reconciliation breaks found (total=%d)", totalBreaks)
+	case recoveryFailures > 0:
+		return 1, fmt.Sprintf("reconciliation incomplete — a required RECOVERY layer failed for %d telco(s)", recoveryFailures)
+	default:
+		return 0, "reconciliation clean across all active telcos/programmes"
+	}
 }
