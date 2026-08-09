@@ -7,8 +7,10 @@ package configsvc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -21,6 +23,7 @@ func init() {
 	validators["advance.fulfilment"] = validateFulfilment
 	validators["recovery.allocation"] = validateAllocation
 	validators["telco.adapter"] = validateTelcoAdapter
+	scopedValidators["telco.adapter"] = validateTelcoAdapterRealism // BX-HIGH-009
 	validators["recon.tolerance"] = validateReconTolerance
 	validators["ledger.accounts"] = validateLedgerAccounts
 	validators["origination.self_exclusion"] = validateSelfExclusion
@@ -327,6 +330,56 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 			return fmt.Errorf("auth: scheme is required (none|apikey|oauth2)")
 		default:
 			return fmt.Errorf("auth: unknown scheme %q (allowed: none|apikey|oauth2)", scheme)
+		}
+	}
+	return nil
+}
+
+// validateTelcoAdapterRealism is the SCOPE-AWARE half of telco.adapter validation
+// (BX-HIGH-009): a REAL (non-synthetic) telco may not be reached over plaintext http or
+// with no outbound auth. Only the synthetic simulator (telcos.is_synthetic — a
+// privileged schema marker config cannot flip) may use http/none. The telco comes from
+// the config scope (telco:<id>); a non-telco scope is a no-op.
+func validateTelcoAdapterRealism(ctx context.Context, tx pgx.Tx, scope string, content json.RawMessage) error {
+	telcoID, ok := strings.CutPrefix(scope, "telco:")
+	if !ok || telcoID == "" {
+		return nil
+	}
+	var isSynthetic bool
+	if err := tx.QueryRow(ctx, `SELECT is_synthetic FROM telcos WHERE telco_id = $1`, telcoID).Scan(&isSynthetic); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("telco.adapter: unknown telco %q", telcoID)
+		}
+		return fmt.Errorf("telco.adapter: telco lookup: %w", err)
+	}
+	if isSynthetic {
+		return nil // the synthetic simulator may use http / none
+	}
+	var v struct {
+		FulfilmentURL *string `json:"fulfilment_url"`
+		Auth          *struct {
+			Scheme   *string `json:"scheme"`
+			TokenURL *string `json:"token_url"`
+		} `json:"auth"`
+	}
+	if err := json.Unmarshal(content, &v); err != nil {
+		return fmt.Errorf("telco.adapter: parse: %w", err)
+	}
+	if v.FulfilmentURL != nil {
+		if u, err := url.Parse(*v.FulfilmentURL); err != nil || u.Scheme != "https" {
+			return fmt.Errorf("telco.adapter: a real (non-synthetic) telco must use an https fulfilment_url (BX-HIGH-009)")
+		}
+	}
+	scheme := "none"
+	if v.Auth != nil && v.Auth.Scheme != nil {
+		scheme = *v.Auth.Scheme
+	}
+	if scheme == "none" || scheme == "" {
+		return fmt.Errorf("telco.adapter: a real (non-synthetic) telco must configure outbound auth (apikey|oauth2), not none (BX-HIGH-009)")
+	}
+	if scheme == "oauth2" && v.Auth != nil && v.Auth.TokenURL != nil {
+		if tu, err := url.Parse(*v.Auth.TokenURL); err != nil || tu.Scheme != "https" {
+			return fmt.Errorf("telco.adapter: a real telco's oauth2 token_url must be https (BX-HIGH-009)")
 		}
 	}
 	return nil

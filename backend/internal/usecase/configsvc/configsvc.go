@@ -52,6 +52,14 @@ var validators = map[string]Validator{
 	"platform.outbox":      validateOutbox,
 }
 
+// scopedValidator is a validator that also needs the config's SCOPE — e.g. the telco
+// for a telco:<id> adapter config, so it can consult privileged per-telco schema like
+// telcos.is_synthetic. Run in addition to (not instead of) the content Validator at
+// Approve and Activate. BX-HIGH-009.
+type scopedValidator func(ctx context.Context, tx pgx.Tx, scope string, content json.RawMessage) error
+
+var scopedValidators = map[string]scopedValidator{}
+
 // CreateDraft creates a new draft version for (domain, scope).
 func (s *Service) CreateDraft(ctx context.Context, domain, scope, createdBy, reason string, content json.RawMessage) (entity.ConfigVersion, error) {
 	if domain == "" || scope == "" || createdBy == "" || reason == "" {
@@ -112,6 +120,11 @@ func (s *Service) Approve(ctx context.Context, id, approver string) error {
 				return fmt.Errorf("%w: domain %s: %s", ErrValidation, c.Domain, err)
 			}
 		}
+		if sv, ok := scopedValidators[c.Domain]; ok && sv != nil {
+			if err := sv(ctx, tx, c.Scope, c.Content); err != nil {
+				return fmt.Errorf("%w: domain %s: %s", ErrValidation, c.Domain, err)
+			}
+		}
 		if err := s.configs.TransitionState(ctx, tx, id, entity.ConfigSubmitted, entity.ConfigApproved, approver); err != nil {
 			return err
 		}
@@ -130,6 +143,11 @@ func (s *Service) Activate(ctx context.Context, id, actor string, at time.Time) 
 		}
 		if v, ok := validators[c.Domain]; ok && v != nil {
 			if err := v(ctx, tx, c.Content); err != nil {
+				return fmt.Errorf("%w: activation, domain %s: %s", ErrValidation, c.Domain, err)
+			}
+		}
+		if sv, ok := scopedValidators[c.Domain]; ok && sv != nil {
+			if err := sv(ctx, tx, c.Scope, c.Content); err != nil {
 				return fmt.Errorf("%w: activation, domain %s: %s", ErrValidation, c.Domain, err)
 			}
 		}
