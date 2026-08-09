@@ -306,6 +306,17 @@ func (s *Service) RunFulfilment(ctx context.Context, telcoID, programmeID string
 	return s.reconcileLayer(ctx, fulfilmentSpec(), telcoID, programmeID, periodStart, cutoff, telcoRecords, tol)
 }
 
+// BreakCount is the total reconciliation breaks across ALL SEVEN break classes
+// (BX-HIGH-004). It is the single source of truth for "is this run clean": the
+// worker's exit code, the per-run tally and the re-sweep tally must all use it, so
+// no break class (currency mismatch, malformed, duplicate, contradictory) is ever
+// silently dropped from the exit gate the way the worker's hand-rolled 3-class sum
+// dropped four of them.
+func (s Summary) BreakCount() int {
+	return s.MissingPlatform + s.MissingTelco + s.AmountMismatch +
+		s.CurrencyMismatch + s.Malformed + s.DuplicateTelco + s.Contradictory
+}
+
 // ReconcilePeriod re-reconciles an EXPLICIT window [periodStart, periodEnd) —
 // the operator re-run path for a corrected or late telco file covering a past
 // period. It supersedes the prior ACTIVE run for exactly that period, guarded
@@ -710,7 +721,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 		}
 		sum.PlatformControlTotalMinor = platTotal
 		sum.MatchedControlTotalMinor = matchedTotal
-		breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco + sum.Contradictory
+		breaks := sum.BreakCount()
 
 		// Completeness gate (R-P0-6): a rerun must carry at least
 		// min_completeness_ratio of the prior ACTIVE run's source record count.
@@ -843,7 +854,7 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 		s.Log.Error("reconciliation re-reconcile REJECTED — source below completeness floor; prior run kept",
 			"run_id", runID, "source_records", srcCount)
 	default:
-		if breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch + sum.CurrencyMismatch + sum.Malformed + sum.DuplicateTelco + sum.Contradictory; breaks > 0 {
+		if breaks := sum.BreakCount(); breaks > 0 {
 			s.Log.Error("reconciliation breaks found — operator attention required (V2-REC-012)",
 				"run_id", runID, "breaks", breaks, "matched", sum.Matched)
 		} else {

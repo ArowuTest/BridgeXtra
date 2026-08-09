@@ -554,7 +554,7 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 				log.Error("recon run failed", "telco", tc.TelcoID, "programme", p.ProgrammeID, "err", err)
 				os.Exit(1)
 			}
-			breaks := sum.MissingPlatform + sum.MissingTelco + sum.AmountMismatch
+			breaks := sum.BreakCount() // BX-HIGH-004: all 7 break classes, not just 3
 			totalBreaks += breaks
 			fmt.Printf("recon %s/%s run=%s matched=%d missing_platform=%d missing_telco=%d amount_mismatch=%d\n",
 				tc.TelcoID, p.ProgrammeID, sum.RunID, sum.Matched,
@@ -575,7 +575,7 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 				if rs.Unchanged {
 					continue
 				}
-				rsBreaks := rs.MissingPlatform + rs.MissingTelco + rs.AmountMismatch
+				rsBreaks := rs.BreakCount() // BX-HIGH-004: all 7 break classes (re-sweep site)
 				totalBreaks += rsBreaks
 				fmt.Printf("recon-resweep %s/%s run=%s period=[%s,%s) matched=%d missing_platform=%d missing_telco=%d amount_mismatch=%d\n",
 					tc.TelcoID, p.ProgrammeID, rs.RunID,
@@ -612,7 +612,7 @@ func runRecon(ctx context.Context, log *slog.Logger, appPool *pgxpool.Pool, appC
 				if rs.NothingToReconcile || rs.Unchanged {
 					continue
 				}
-				totalBreaks += rs.MissingPlatform + rs.MissingTelco + rs.AmountMismatch + rs.CurrencyMismatch + rs.Malformed + rs.DuplicateTelco + rs.Contradictory
+				totalBreaks += rs.BreakCount()
 				fmt.Printf("recon-recovery %s run=%s period=[%s,%s) matched=%d missing_platform=%d missing_telco=%d amount_mismatch=%d\n",
 					tc.TelcoID, rs.RunID, rs.PeriodStart.UTC().Format(time.RFC3339), rs.PeriodEnd.UTC().Format(time.RFC3339),
 					rs.Matched, rs.MissingPlatform, rs.MissingTelco, rs.AmountMismatch)
