@@ -262,6 +262,11 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 		writeErr(w, http.StatusConflict, "OFFER_EXPIRED", "offer expired; request fresh offers")
 	case errors.Is(err, origination.ErrOfferNotAcceptable):
 		writeErr(w, http.StatusConflict, "OFFER_SNAPSHOT_MISMATCH", "offer no longer acceptable; request fresh offers")
+	case errors.Is(err, origination.ErrProgrammeMismatch):
+		// BX-P0-001: the confirm named a programme other than the offer's — refuse so
+		// no gate (kill-switch/economics/disclosure) can be evaluated against a
+		// different programme than the money is booked under.
+		writeErr(w, http.StatusConflict, "PROGRAMME_MISMATCH", "the offer belongs to a different programme; request fresh offers")
 	case errors.Is(err, origination.ErrDivergentDuplicate):
 		// R-P0-1: same idempotency key, different request. Not a replay —
 		// the client must use a fresh key for a new command.

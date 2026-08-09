@@ -47,7 +47,8 @@ var (
 	ErrOfferNotFound        = errors.New("origination: offer not found")
 	ErrOfferExpired         = errors.New("origination: offer expired") // EDG-011
 	ErrOfferNotAcceptable   = errors.New("origination: offer no longer acceptable")
-	ErrSubscriberIneligible = errors.New("origination: subscriber not eligible") // barred/self-excluded/closed
+	ErrProgrammeMismatch    = errors.New("origination: offer programme does not match the confirm request") // BX-P0-001
+	ErrSubscriberIneligible = errors.New("origination: subscriber not eligible")                            // barred/self-excluded/closed
 	// Build 1 — programme economic/legal go-live gate. A programme may be ACTIVE
 	// but cannot originate until its economics are configured (fail-closed).
 	ErrProgrammeEconomicsNotSet  = errors.New("origination: programme economics not configured — cannot originate")
@@ -701,6 +702,19 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		}
 		if offer.SubscriberAccountID != sub.SubscriberAccountID {
 			return ErrOfferNotFound // someone else's offer is invisible, not forbidden
+		}
+		// BX-P0-001: the money side is bound to the OFFER's programme (advance, pool,
+		// fee and the treasury guardrail all use offer.ProgrammeID), but the suspension
+		// kill-switch (GetStatus, :649), economics/lender-of-record (resolveEconomics,
+		// :658) and the channel disclosure (:603) were resolved from the caller-supplied
+		// cmd.ProgrammeID above. A confirm that names a different (e.g. ACTIVE) programme
+		// than the offer's (e.g. SUSPENDED) would bypass the kill-switch and record the
+		// wrong lender-of-record while booking the offer's money. Require equality so
+		// every gate provably evaluates the offer's programme. Fresh path only — a genuine
+		// replay returned at the idempotency claim above; a mismatch rolls back the whole
+		// tx, so no advance and no idempotency record persist.
+		if offer.ProgrammeID != cmd.ProgrammeID {
+			return ErrProgrammeMismatch
 		}
 
 		now := time.Now().UTC()
