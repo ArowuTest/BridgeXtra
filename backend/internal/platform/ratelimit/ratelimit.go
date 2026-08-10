@@ -27,13 +27,18 @@ type bucket struct {
 	last   time.Time
 }
 
+// sweepInterval bounds how often a full limiter scans for reclaimable buckets, so a distinct-key
+// flood cannot turn every new key into an O(n) sweep (a CPU DoS in place of the memory one).
+const sweepInterval = 30 * time.Second
+
 // Limiter is a keyed token-bucket limiter. Safe for concurrent use.
 type Limiter struct {
-	mu      sync.Mutex
-	limits  map[string]Limit
-	buckets map[string]*bucket
-	now     func() time.Time
-	maxKeys int
+	mu        sync.Mutex
+	limits    map[string]Limit
+	buckets   map[string]*bucket
+	now       func() time.Time
+	maxKeys   int
+	lastSweep time.Time
 }
 
 // New builds a limiter from a scope→limit map (loaded from governed config).
@@ -60,7 +65,20 @@ func (l *Limiter) Allow(scope, key string) bool {
 	b := l.buckets[k]
 	if b == nil {
 		if len(l.buckets) >= l.maxKeys {
-			l.sweep(now)
+			// At capacity. Reclaim idle buckets first, but at most once per sweepInterval so a
+			// key-churn flood cannot make every new key pay an O(n) scan (BX-MED-006).
+			if now.Sub(l.lastSweep) >= sweepInterval {
+				l.sweep(now)
+				l.lastSweep = now
+			}
+			// Still full after reclaiming: HARD cap. DENY rather than grow the key space without
+			// bound — the old code inserted unconditionally, so a flood of distinct keys arriving
+			// faster than they go idle grew the map past maxKeys indefinitely (memory exhaustion).
+			// Now memory is bounded; existing keys keep their buckets; a brand-new key under such a
+			// flood is refused (429) until idle buckets are reclaimed. Fail-closed, process stays up.
+			if len(l.buckets) >= l.maxKeys {
+				return false
+			}
 		}
 		b = &bucket{tokens: lim.Burst, last: now}
 		l.buckets[k] = b
