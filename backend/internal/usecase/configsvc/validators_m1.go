@@ -224,6 +224,11 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 		// the nin_verified monotonic guard (a far-future "true" durably blocks later
 		// real revocations) and score as artificially FRESH (negative age).
 		FeatureAsOfMaxFutureSkewSeconds *int `json:"feature_as_of_max_future_skew_seconds"`
+		// BX-MED-003: the maximum feature-feed body the ingester will buffer in memory.
+		// Optional — absent means the code's safe default (64MiB). Bounded so a single feed
+		// fetch cannot pin an arbitrary amount of memory (the old code allowed up to 512MiB
+		// per fetch, N-way concurrent across telcos).
+		FeatureFeedMaxBytes *int64 `json:"feature_feed_max_bytes"`
 		// Phase 1 S1: optional outbound partner auth. Secrets are NEVER stored in
 		// config — only the names of the env vars that hold them.
 		Auth *struct {
@@ -287,6 +292,13 @@ func validateTelcoAdapter(ctx context.Context, tx pgx.Tx, content json.RawMessag
 	if v.FeatureAsOfMaxFutureSkewSeconds != nil &&
 		(*v.FeatureAsOfMaxFutureSkewSeconds < 0 || *v.FeatureAsOfMaxFutureSkewSeconds > 86_400) {
 		return fmt.Errorf("feature_as_of_max_future_skew_seconds must be 0..86400 (feature-file as_of future clock-skew tolerance, BX-HIGH-007)")
+	}
+	// BX-MED-003: bounded feature-feed buffer ceiling. Optional (absent = code default 64MiB);
+	// when set it must be a sane, finite allocation — at least 1MiB to be usable, at most 512MiB
+	// (the previous absolute hard limit) so it can never be widened past that.
+	if v.FeatureFeedMaxBytes != nil &&
+		(*v.FeatureFeedMaxBytes < 1<<20 || *v.FeatureFeedMaxBytes > 512<<20) {
+		return fmt.Errorf("feature_feed_max_bytes must be 1048576..536870912 (1MiB..512MiB feature-feed buffer ceiling, BX-MED-003)")
 	}
 
 	// Phase 1 S1: the optional outbound partner-auth block. Fail-closed and

@@ -32,6 +32,12 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
 )
 
+// defaultFeatureFeedMaxBytes bounds the in-memory feed buffer when a telco has not set the
+// governed feature_feed_max_bytes knob. 64MiB comfortably fits a large per-subscriber feed while
+// preventing a single fetch (N-way concurrent across telcos) from pinning arbitrary memory
+// (BX-MED-003). Operators can raise it per telco up to the validator's 512MiB ceiling.
+const defaultFeatureFeedMaxBytes = 64 << 20
+
 type Service struct {
 	Pool    *pgxpool.Pool // tcp_app
 	Config  *configsvc.Service
@@ -107,10 +113,18 @@ func (s *Service) fetch(ctx context.Context, telcoID string) ([]byte, error) {
 		return nil, fmt.Errorf("telco.adapter config: %w", err)
 	}
 	var ac struct {
-		FulfilmentURL string `json:"fulfilment_url"`
+		FulfilmentURL       string `json:"fulfilment_url"`
+		FeatureFeedMaxBytes *int64 `json:"feature_feed_max_bytes"`
 	}
 	if err := json.Unmarshal(cv.Content, &ac); err != nil {
 		return nil, err
+	}
+	// BX-MED-003: bound the in-memory feed buffer. The feed is one JSON document (parsed whole),
+	// so it cannot stream row-by-row — but the ceiling need not be 512MiB per fetch. Use the
+	// governed per-telco knob when set (validated to 1MiB..512MiB), else a safe 64MiB default.
+	maxBytes := int64(defaultFeatureFeedMaxBytes)
+	if ac.FeatureFeedMaxBytes != nil && *ac.FeatureFeedMaxBytes > 0 {
+		maxBytes = *ac.FeatureFeedMaxBytes
 	}
 	url := fmt.Sprintf("%s/v1/telcos/%s/feature-file", ac.FulfilmentURL, telcoID)
 	// BX-HIGH-006: fetch WITH the telco's governed partner auth (fail-closed), not the
@@ -120,12 +134,18 @@ func (s *Service) fetch(ctx context.Context, telcoID string) ([]byte, error) {
 		return nil, fmt.Errorf("fetch feature file: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 512<<20))
+	// Read at most maxBytes+1 so we can DETECT an over-limit body explicitly rather than silently
+	// truncating it (which would surface as a confusing JSON parse error, or — absent the HIGH-006
+	// control total — a silently partial ingest). Memory is bounded at maxBytes+1.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("feature file endpoint returned %d", resp.StatusCode)
+	}
+	if int64(len(raw)) > maxBytes {
+		return nil, fmt.Errorf("feature feed exceeds the %d-byte buffer ceiling — refusing (BX-MED-003)", maxBytes)
 	}
 	return raw, nil
 }
