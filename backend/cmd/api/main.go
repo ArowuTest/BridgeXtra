@@ -316,7 +316,11 @@ func runServer(ctx context.Context, srv *http.Server, lead, grace time.Duration,
 	<-timer.C
 	phase("lead_elapsed")
 
-	shutCtx, cancel := context.WithTimeout(context.Background(), grace)
+	// context.WithoutCancel, not context.Background: the drain must NOT inherit the cancellation
+	// that just fired (deriving from ctx would abort Shutdown immediately, cutting the very
+	// in-flight requests this exists to protect), but it SHOULD keep the parent's values so
+	// anything context-scoped during the drain still resolves.
+	shutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), grace)
 	defer cancel()
 	phase("shutdown_begin")
 	err := srv.Shutdown(shutCtx)

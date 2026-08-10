@@ -48,7 +48,11 @@ func freePort(t *testing.T) int {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	return ln.Addr().(*net.TCPAddr).Port
+	addr, ok := ln.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("listener address is %T, want *net.TCPAddr", ln.Addr())
+	}
+	return addr.Port
 }
 
 // appDSNFor mirrors testutil's DSN construction (same host/port source) for the app role, so the

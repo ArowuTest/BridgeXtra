@@ -111,11 +111,16 @@ func TestBXMED007_NoRawSubscriberTokenInLogs(t *testing.T) {
 			if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			abs, aerr := filepath.Abs(path)
-			if aerr != nil || seen[abs] {
+			// Two roots overlap, so de-duplicate by absolute path where possible; if the path
+			// cannot be absolutised, the raw path is still a stable key for this walk.
+			key := path
+			if abs, aerr := filepath.Abs(path); aerr == nil {
+				key = abs
+			}
+			if seen[key] {
 				return nil
 			}
-			seen[abs] = true
+			seen[key] = true
 
 			f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
 			if perr != nil {
