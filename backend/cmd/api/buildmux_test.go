@@ -109,6 +109,23 @@ func TestBuildMux_AllMode_MountsBoth(t *testing.T) {
 	}
 }
 
+// deriveRoleDSN swaps the role/password while preserving host, port, database and params —
+// so the config pool can be derived from TCP_APP_DSN when TCP_CONFIG_DSN is unset (the fix for
+// the Render deploy that crash-looped on the localhost dev default).
+func TestDeriveRoleDSN(t *testing.T) {
+	got, err := deriveRoleDSN("postgres://tcp_app:apppass@db.internal:5432/telco_credit?sslmode=require", "tcp_config", "cfgpass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "postgres://tcp_config:cfgpass@db.internal:5432/telco_credit?sslmode=require"
+	if got != want {
+		t.Fatalf("deriveRoleDSN = %q, want %q", got, want)
+	}
+	if _, err := deriveRoleDSN("://not a dsn", "tcp_config", "x"); err == nil {
+		t.Fatal("a malformed template DSN must error, not silently produce a bad DSN")
+	}
+}
+
 func TestResolvePlanes(t *testing.T) {
 	cases := []struct {
 		mode       string

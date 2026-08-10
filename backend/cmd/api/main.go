@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -53,6 +54,19 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// deriveRoleDSN rebuilds a DSN for a different role from a template DSN — same host, port,
+// database and query parameters, with the userinfo swapped to (role, password). Used to derive
+// the tcp_config connection from TCP_APP_DSN when TCP_CONFIG_DSN is not set, so the control
+// plane boots against the real database without a second DSN having to be wired first.
+func deriveRoleDSN(templateDSN, role, password string) (string, error) {
+	u, err := url.Parse(templateDSN)
+	if err != nil {
+		return "", fmt.Errorf("parse template DSN: %w", err)
+	}
+	u.User = url.UserPassword(role, password)
+	return u.String(), nil
 }
 
 // planes records which surfaces this process serves.
@@ -194,9 +208,23 @@ func main() {
 	adminDSN := env("TCP_ADMIN_DSN", "postgres://postgres:devlocal@localhost:5434/telco_credit")
 	appDSN := env("TCP_APP_DSN", "postgres://tcp_app:devlocal_app@localhost:5434/telco_credit")
 	// BX-HIGH-012 Stage 1: config governance + the programme->telco resolver run on the
-	// dedicated NON-BYPASSRLS tcp_config role (migration 0076), whose only cross-tenant
-	// reach is a SELECT-only two-column programmes policy. Opened only in control mode.
-	configDSN := env("TCP_CONFIG_DSN", "postgres://tcp_config:devlocal_config@localhost:5434/telco_credit")
+	// dedicated NON-BYPASSRLS tcp_config role (migration 0076), whose only cross-tenant reach
+	// is a SELECT-only two-column programmes policy. Opened only in control mode. When
+	// TCP_CONFIG_DSN is not explicitly set, DERIVE it from TCP_APP_DSN — same host/database,
+	// user swapped to tcp_config — so any environment that already configures the app DSN boots
+	// on the least-privilege role without a second DSN having to be wired first (a missing
+	// TCP_CONFIG_DSN otherwise fell back to the localhost dev default and crash-looped on a
+	// remote database). The password is TCP_CONFIG_PASSWORD, or the migration-seeded default.
+	configDSN := env("TCP_CONFIG_DSN", "")
+	if configDSN == "" {
+		derived, derr := deriveRoleDSN(appDSN, "tcp_config", env("TCP_CONFIG_PASSWORD", "devlocal_config"))
+		if derr != nil {
+			log.Error("derive config DSN from app DSN failed; set TCP_CONFIG_DSN explicitly", "err", derr)
+			os.Exit(1)
+		}
+		configDSN = derived
+		log.Info("TCP_CONFIG_DSN not set — derived from TCP_APP_DSN with the tcp_config role (BX-HIGH-012)")
+	}
 	operatorDSN := env("TCP_OPERATOR_DSN", "postgres://tcp_operator:devlocal_operator@localhost:5434/telco_credit")
 	addr := env("TCP_API_ADDR", ":8090")
 
