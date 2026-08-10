@@ -78,6 +78,19 @@ func (r *Telcos) ResolveCredential(ctx context.Context, apiKey string) (telcoID 
 	return telcoID, credentialID, err
 }
 
+// OperationalState returns a telco's runtime status and its privileged synthetic marker.
+// Boundaries that must gate on live operational state (e.g. feed ingestion — BX-HIGH-003 /
+// BX-HIGH-006) call this instead of embedding SQL in the usecase layer. telcos is a global
+// non-RLS registry, so it reads on the pool directly.
+func (r *Telcos) OperationalState(ctx context.Context, telcoID string) (status string, isSynthetic bool, err error) {
+	err = r.Pool.QueryRow(ctx,
+		`SELECT status, is_synthetic FROM telcos WHERE telco_id=$1`, telcoID).Scan(&status, &isSynthetic)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, fmt.Errorf("telco %s: %w", telcoID, ErrNotFound)
+	}
+	return status, isSynthetic, err
+}
+
 func (r *Telcos) CreateCredential(ctx context.Context, credentialID, telcoID, apiKey, label string) error {
 	h := sha256.Sum256([]byte(apiKey))
 	_, err := r.Pool.Exec(ctx,

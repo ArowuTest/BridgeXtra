@@ -137,9 +137,8 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	// feed up front, before parsing or writing anything. This is the feed-ingestion boundary
 	// of the same suspension gate enforced at channel + webhook auth. telcos is a global
 	// non-RLS registry, so a plain SELECT (tcp_app has the grant) is correct here.
-	var telcoStatus string
-	var isSynthetic bool
-	if err := s.Pool.QueryRow(ctx, `SELECT status, is_synthetic FROM telcos WHERE telco_id=$1`, telcoID).Scan(&telcoStatus, &isSynthetic); err != nil {
+	telcoStatus, isSynthetic, err := (&repo.Telcos{Pool: s.Pool}).OperationalState(ctx, telcoID)
+	if err != nil {
 		return Summary{}, fmt.Errorf("telco lookup for %s: %w", telcoID, err)
 	}
 	if telcoStatus != "ACTIVE" {
