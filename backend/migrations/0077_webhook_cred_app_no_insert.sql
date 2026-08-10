@@ -1,0 +1,18 @@
+-- 0077_webhook_cred_app_no_insert.sql — BX-HIGH-013 (reopen).
+--
+-- 0074 froze telco_webhook_credentials against UPDATE of its identity/secret binding,
+-- but left the tcp_app INSERT grant from 0051:34 in place — so the request-serving app
+-- role could still FORGE a credential: INSERT a new key_id -> telco -> secret_env row
+-- that then authenticates inbound recharge webhooks straight into the recovery money
+-- core. Freezing mutation while leaving creation open is only half the maker-checker.
+--
+-- Webhook-credential provisioning is an owner/admin BOOTSTRAP operation (out-of-band,
+-- exactly like telco_api_credentials and the seed-operators harness), never a runtime
+-- app action: production resolves creds via SELECT at webhook receipt and revokes via
+-- UPDATE(status), and does nothing else. Align telco_webhook_credentials with its
+-- sibling telco_api_credentials — SELECT-only for tcp_app (0001:194) — by revoking the
+-- INSERT grant. The app keeps SELECT (resolve) + UPDATE(status) (revoke, granted 0074);
+-- creation is done by the migration owner / a credential-admin, and the 0074 BEFORE
+-- UPDATE trigger already makes key_id/telco_id/secret_env immutable after creation even
+-- against the table owner. Net: the app can neither create nor mutate the trust map.
+REVOKE INSERT ON telco_webhook_credentials FROM tcp_app;
