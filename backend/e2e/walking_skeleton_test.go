@@ -249,8 +249,8 @@ func (s *stack) offersFor(t *testing.T, token string) []struct {
 	DisclosureRef string `json:"disclosure_ref"`
 } {
 	t.Helper()
-	code, body := s.http(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token="+token, "", nil)
+	code, body := s.http(t, http.MethodPost, "/v1/offers", "",
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": token})
 	if code != http.StatusOK {
 		t.Fatalf("offers %s: %d %s", token, code, body)
 	}

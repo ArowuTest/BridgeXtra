@@ -952,7 +952,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorEnvelope" }
   /v1/portal/support/subscriber:
-    get:
+    post:
       operationId: portalSupportTimeline
       summary: Masked subscriber timeline by full token (roles ADMIN, SUPPORT, OPS, RISK, FINANCE)
       description: >
@@ -963,9 +963,17 @@ paths:
         default, enforced server-side). Read-only; telco-level scope bound.
         No step-up reveal exists because the platform is PII-lean by design:
         it stores tokens, not MSISDNs, and detokenisation lives with the
-        telco.
-      parameters:
-        - { name: token, in: query, required: true, schema: { type: string } }
+        telco. BX-MED-007: the search token is sent in the request body, never a query
+        string (which leaks into portal access logs, browser history and proxies).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
       responses:
         "200":
           description: Timeline
@@ -1187,17 +1195,28 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
   /v1/offers:
-    get:
+    post:
       operationId: listOffers
       summary: Current valid offers for a subscriber (V2-OFR-009 reuse)
       description: >
         Every value derives from governed product config + the pinned decision
         snapshot. Generation is serialized per subscriber/programme — repeated
-        or concurrent enquiries return the same ladder.
+        or concurrent enquiries return the same ladder. BX-MED-007: this read is a
+        POST because it is keyed by the subscriber msisdn_token, a sensitive
+        identifier that must never travel in a URL (query strings leak into browser
+        history, access logs, proxies and telemetry).
       parameters:
-        - { name: programme_id, in: query, required: true, schema: { type: string } }
-        - { name: msisdn_token, in: query, required: true, schema: { type: string } }
         - $ref: "#/components/parameters/CorrelationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [programme_id, msisdn_token]
+              properties:
+                programme_id: { type: string }
+                msisdn_token: { type: string }
       responses:
         "200":
           description: Offer ladder (may be empty when nothing is offerable)

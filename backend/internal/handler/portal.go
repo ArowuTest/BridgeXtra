@@ -181,7 +181,7 @@ var routeRoles = map[string][]string{
 	// M4f support workspace (V3-ORG-005): SUPPORT's ENTIRE write surface is
 	// the complaint workflow — case management, never financial truth. The
 	// masked timeline is read-only evidence; reads go to all console roles.
-	"GET /v1/portal/support/subscriber":                {roleAdmin, roleSupport, roleOps, roleRisk, roleFinance},
+	"POST /v1/portal/support/subscriber":               {roleAdmin, roleSupport, roleOps, roleRisk, roleFinance},
 	"GET /v1/portal/support/complaints":                {roleAdmin, roleSupport, roleOps, roleRisk, roleFinance},
 	"POST /v1/portal/support/complaints":               {roleAdmin, roleSupport, roleOps},
 	"POST /v1/portal/support/complaints/{id}/progress": {roleAdmin, roleSupport, roleOps},
@@ -273,7 +273,7 @@ func (p *Portal) Mount(mux *http.ServeMux) {
 	p.mountRBAC(mux, "GET /v1/portal/ops/demo/runs", http.HandlerFunc(p.opsDemoRuns))
 	p.mountRBAC(mux, "GET /v1/portal/ops/demo/runs/{id}", http.HandlerFunc(p.opsDemoRunDetail))
 
-	p.mountRBAC(mux, "GET /v1/portal/support/subscriber", http.HandlerFunc(p.supportTimeline))
+	p.mountRBAC(mux, "POST /v1/portal/support/subscriber", http.HandlerFunc(p.supportTimeline))
 	p.mountRBAC(mux, "GET /v1/portal/support/complaints", http.HandlerFunc(p.supportComplaints))
 	p.mountRBAC(mux, "POST /v1/portal/support/complaints", http.HandlerFunc(p.supportComplaintOpen))
 	p.mountRBAC(mux, "POST /v1/portal/support/complaints/{id}/progress", http.HandlerFunc(p.supportComplaintProgress))

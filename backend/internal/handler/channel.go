@@ -82,7 +82,10 @@ func (h *Channel) Mount(mux *http.ServeMux, auth *TenantAuth) {
 		return rateLimited(h.Limiter, "channel_ip", ipKey,
 			auth.Wrap(perTelcoRateLimit(h.Limiter, Correlation(fn))))
 	}
-	mux.Handle("GET /v1/offers", wrap(h.getOffers))
+	// BX-MED-007: offers is a read, but it is keyed by the subscriber msisdn_token — a sensitive
+	// identifier that must never ride in a URL (query strings leak into browser history, access
+	// logs, proxies and telemetry). It is a POST so the token travels in the request body.
+	mux.Handle("POST /v1/offers", wrap(h.getOffers))
 	mux.Handle("POST /v1/advances", wrap(h.confirm))
 	mux.Handle("GET /v1/advances/{id}", wrap(h.advanceStatus))
 	// Recovery events have exactly ONE external ingress: the HMAC-signed recharge
@@ -168,14 +171,23 @@ func toAdvanceResponse(a entity.Advance) advanceResponse {
 
 // --- handlers --------------------------------------------------------------
 
+type offersRequest struct {
+	ProgrammeID string `json:"programme_id"`
+	MSISDNToken string `json:"msisdn_token"`
+}
+
 func (h *Channel) getOffers(w http.ResponseWriter, r *http.Request) {
-	programmeID := r.URL.Query().Get("programme_id")
-	token := r.URL.Query().Get("msisdn_token")
-	if programmeID == "" || token == "" {
+	// BX-MED-007: the msisdn_token comes from the POST body, never a query string.
+	var req offersRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "OFFER_BAD_REQUEST", "malformed JSON body")
+		return
+	}
+	if req.ProgrammeID == "" || req.MSISDNToken == "" {
 		writeErr(w, http.StatusBadRequest, "OFFER_BAD_REQUEST", "programme_id and msisdn_token are required")
 		return
 	}
-	offers, err := h.Origination.GetOffers(r.Context(), programmeID, token)
+	offers, err := h.Origination.GetOffers(r.Context(), req.ProgrammeID, req.MSISDNToken)
 	if err != nil {
 		h.writeDomainErr(w, r, err)
 		return

@@ -232,7 +232,7 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 				if reason := validateRow(row, ceiling); reason != "" {
 					sum.Quarantined++
 					s.Log.Warn("feature row quarantined", "file", sum.FeatureFileID,
-						"row", start+i, "token", row.MSISDNToken, "reason", reason)
+						"row", start+i, "token", platform.MaskToken(row.MSISDNToken), "reason", reason)
 					// BX-HIGH-008: a REVOCATION (nin_verified=false) must land even when
 					// the row's CREDIT features are quarantined — otherwise corrupting a
 					// credit field silently suppresses the revocation and a stale "true"

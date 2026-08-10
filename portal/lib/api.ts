@@ -762,7 +762,9 @@ export type SubscriberTimeline = {
 };
 
 export function supportTimeline(token: string): Promise<SubscriberTimeline> {
-  return request("GET", `/v1/portal/support/subscriber?token=${encodeURIComponent(token)}`);
+  // BX-MED-007: the subscriber token is sensitive — send it in the POST body, never a query
+  // string (which leaks into access logs, browser history and proxies).
+  return request("POST", "/v1/portal/support/subscriber", { token });
 }
 
 export type ComplaintItem = {

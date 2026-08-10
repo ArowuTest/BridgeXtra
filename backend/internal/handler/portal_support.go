@@ -16,25 +16,29 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
-// maskToken renders a subscriber token masked-by-default (UI-004): the last
-// four characters only. Short or empty tokens mask entirely.
-func maskToken(tok string) string {
-	if tok == "" {
-		return ""
-	}
-	if len(tok) <= 4 {
-		return "…"
-	}
-	return "…" + tok[len(tok)-4:]
-}
+// maskToken renders a subscriber token masked-by-default (UI-004): the last four characters
+// only. It delegates to platform.MaskToken so masking is one shared implementation everywhere
+// (BX-MED-007).
+func maskToken(tok string) string { return platform.MaskToken(tok) }
 
 // supportTimeline resolves the case view for one subscriber by FULL token.
 func (p *Portal) supportTimeline(w http.ResponseWriter, r *http.Request) {
 	sess := sessionFrom(r.Context())
-	token := r.URL.Query().Get("token")
+	// BX-MED-007: the operator's search token is a sensitive identifier — it comes from the
+	// POST body, never a query string (which leaks into portal access logs, browser history and
+	// proxies). The response is masked; the request must be too.
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "malformed JSON body")
+		return
+	}
+	token := body.Token
 	if token == "" {
 		writeErr(w, http.StatusBadRequest, "PORTAL_BAD_REQUEST", "token is required")
 		return

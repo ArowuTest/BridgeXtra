@@ -29,7 +29,7 @@ func TestM4F_Timeline_MaskedByDefault_AndScope(t *testing.T) {
 	const fullToken = "tok_m4e_1"
 	seedAmbiguousChain(t, f, 1, "UNKNOWN", time.Hour)
 
-	code, body := f.callBody(t, &supSess, "GET", "/v1/portal/support/subscriber?token="+fullToken, "")
+	code, body := f.callBody(t, &supSess, "POST", "/v1/portal/support/subscriber", `{"token":"`+fullToken+`"}`)
 	if code != http.StatusOK {
 		t.Fatalf("timeline: %d %s", code, body)
 	}
@@ -59,7 +59,7 @@ func TestM4F_Timeline_MaskedByDefault_AndScope(t *testing.T) {
 	}
 
 	// Unknown token and out-of-scope both 404 — no oracle.
-	if code, _ := f.callBody(t, &supSess, "GET", "/v1/portal/support/subscriber?token=tok_nope", ""); code != http.StatusNotFound {
+	if code, _ := f.callBody(t, &supSess, "POST", "/v1/portal/support/subscriber", `{"token":"tok_nope"}`); code != http.StatusNotFound {
 		t.Fatalf("unknown token must 404, got %d", code)
 	}
 	ctx := context.Background()
@@ -67,7 +67,7 @@ func TestM4F_Timeline_MaskedByDefault_AndScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	progSess := f.login(t, "portal-key-sup-prog-01")
-	if code, _ := f.callBody(t, &progSess, "GET", "/v1/portal/support/subscriber?token="+fullToken, ""); code != http.StatusNotFound {
+	if code, _ := f.callBody(t, &progSess, "POST", "/v1/portal/support/subscriber", `{"token":"`+fullToken+`"}`); code != http.StatusNotFound {
 		t.Fatalf("programme-scoped support must 404 on a telco-grained read (TelcoLevelBound), got %d", code)
 	}
 }
@@ -90,7 +90,14 @@ func TestM4F_SupportWriteSurface_IsComplaintsOnly(t *testing.T) {
 		}
 	}
 	for _, key := range writes {
-		if !strings.Contains(key, "/v1/portal/support/complaints") {
+		switch {
+		case strings.Contains(key, "/v1/portal/support/complaints"):
+			// the complaint workflow — SUPPORT's legitimate write surface.
+		case key == "POST /v1/portal/support/subscriber":
+			// BX-MED-007: a masked subscriber READ that POSTs only so the search token never
+			// rides in a URL. It mutates nothing (repo.SubscriberTimeline is read-only), so it is
+			// not a write route despite the POST method.
+		default:
 			t.Errorf("SUPPORT holds a non-complaint write route: %s (V3-ORG-005)", key)
 		}
 	}

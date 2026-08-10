@@ -130,8 +130,8 @@ func TestChannel_WalkingSkeleton_OverHTTP(t *testing.T) {
 	f := newChannelFixture(t, "chan_e2e", 0, 2_000)
 
 	// 1. Offers — priced from config.
-	resp, body := f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	resp, body := f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("offers: %d %s", resp.StatusCode, body)
 	}
@@ -296,9 +296,9 @@ func TestVR10F1_CorrelationIdBounded_RemintedNeverTruncated(t *testing.T) {
 	// it — transport-level defense; the charset check covers other clients.)
 	long := bytes.Repeat([]byte("x"), 300)
 	for _, bad := range []string{string(long), "has spaces", "semi;colon"} {
-		resp, _ := f.do(t, http.MethodGet,
-			"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001",
-			map[string]string{"X-Correlation-Id": bad}, nil)
+		resp, _ := f.do(t, http.MethodPost, "/v1/offers",
+			map[string]string{"X-Correlation-Id": bad},
+			map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 		echoed := resp.Header.Get("X-Correlation-Id")
 		if echoed == bad {
 			t.Fatalf("invalid correlation id %q must be re-minted, was accepted", bad)
@@ -308,9 +308,9 @@ func TestVR10F1_CorrelationIdBounded_RemintedNeverTruncated(t *testing.T) {
 		}
 	}
 	// A valid caller id passes through unchanged.
-	resp, _ := f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001",
-		map[string]string{"X-Correlation-Id": "valid-id_1.a"}, nil)
+	resp, _ := f.do(t, http.MethodPost, "/v1/offers",
+		map[string]string{"X-Correlation-Id": "valid-id_1.a"},
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 	if resp.Header.Get("X-Correlation-Id") != "valid-id_1.a" {
 		t.Fatal("valid correlation id must be preserved")
 	}
@@ -347,8 +347,8 @@ func TestChannel_UnknownFulfilment_202Processing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, body := f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_TIMEOUT_w1", nil, nil)
+	resp, body := f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_TIMEOUT_w1"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("offers: %d", resp.StatusCode)
 	}
@@ -386,8 +386,8 @@ func TestChannel_UnknownFulfilment_202Processing(t *testing.T) {
 
 func TestChannel_ExpiredOffer_409StableCode(t *testing.T) {
 	f := newChannelFixture(t, "chan_expired", 0, 2_000)
-	resp, body := f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	resp, body := f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatal("offers")
 	}
@@ -419,8 +419,8 @@ func TestChannel_ExpiredOffer_409StableCode(t *testing.T) {
 // the offer — is refused with the documented envelope, never a silent advance.
 func TestChannel_RP07_DisclosureEvidence_Refusals(t *testing.T) {
 	f := newChannelFixture(t, "chan_rp07", 0, 2_000)
-	_, body := f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	_, body := f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 	var offers []struct {
 		OfferID       string `json:"offer_id"`
 		DisclosureRef string `json:"disclosure_ref"`
@@ -475,8 +475,8 @@ func TestChannel_RP07_DisclosureEvidence_Refusals(t *testing.T) {
 func TestChannel_SelfExclusion_BlocksOffersAndCoolOff(t *testing.T) {
 	f := newChannelFixture(t, "chan_selfexcl", 0, 2_000)
 
-	resp, _ := f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	resp, _ := f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("baseline offers: %d", resp.StatusCode)
 	}
@@ -488,8 +488,8 @@ func TestChannel_SelfExclusion_BlocksOffersAndCoolOff(t *testing.T) {
 		t.Fatalf("self-exclude: %d %s", resp.StatusCode, body)
 	}
 
-	resp, _ = f.do(t, http.MethodGet,
-		"/v1/offers?programme_id=prg_sim_airtime01&msisdn_token=tok_sim_0001", nil, nil)
+	resp, _ = f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_sim_0001"})
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("a self-excluded subscriber must be refused offers (403), got %d", resp.StatusCode)
 	}
