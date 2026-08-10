@@ -274,9 +274,20 @@ func (h *RechargeWebhook) ingest(w http.ResponseWriter, r *http.Request) {
 	// A seen nonce is idempotent success — it must NOT reject a legit byte-for-
 	// byte retry; recovery idempotency by source_event_id is the durable backstop.
 	var heldReason string
+	var priorDisposition string
 	var reservedDay time.Time
 	var reserved, reservedFresh bool
 	err = repo.WithTenantTx(ctx, h.Pool, func(tx pgx.Tx) error {
+		// BX-HIGH-001-F1: once this source_event_id has entered the HELD maker-checker workflow,
+		// every subsequent webhook delivery must replay its disposition and NEVER auto-book — only
+		// ApproveRelease may feed a held event to recovery. Check the durable hold BEFORE the nonce
+		// or any fresh reservation, so a freed ceiling or a UTC-day rollover can never re-admit it.
+		if status, found, e := (repo.HeldRecharge{}).DispositionBySourceEvent(ctx, tx, telco, src); e != nil {
+			return e
+		} else if found {
+			priorDisposition = status
+			return nil
+		}
 		_, stored, e := (repo.Idempotency{}).PutIfAbsent(ctx, tx, entity.IdempotencyRecord{
 			TelcoID: telco, Operation: opRechargeWebhook,
 			IdemKey: "wh:" + hex.EncodeToString(v.decodedMAC), RequestHash: src,
@@ -321,6 +332,21 @@ func (h *RechargeWebhook) ingest(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.Log.Error("recharge webhook: nonce/clamp tx failed", "telco", telco, "src", src, "err", err)
 		writeErr(w, http.StatusServiceUnavailable, "SYSTEM_TEMPORARILY_UNAVAILABLE", "temporary error")
+		return
+	}
+	if priorDisposition != "" {
+		// BX-HIGH-001-F1: the event is already governed by the hold workflow — replay its
+		// disposition and NEVER call Recovery.Ingest. Only ApproveRelease books a held event.
+		h.Log.Warn("recharge webhook: redelivery of a hold-workflow event — replaying disposition, not booking",
+			"telco", telco, "src", src, "disposition", priorDisposition)
+		if priorDisposition == "RELEASED" {
+			// Already booked via the governed maker-checker release — idempotent success, no
+			// second economic effect.
+			writeJSON(w, http.StatusOK, map[string]any{"status": "RELEASED", "source_event_id": src})
+		} else {
+			// HELD / RELEASE_IN_PROGRESS / REJECTED — a decided or in-flight hold; never book.
+			writeJSON(w, http.StatusAccepted, map[string]any{"status": priorDisposition, "source_event_id": src})
+		}
 		return
 	}
 	if heldReason != "" {

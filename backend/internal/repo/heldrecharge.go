@@ -195,6 +195,25 @@ func (HeldRecharge) MarkRejected(ctx context.Context, tx pgx.Tx, heldID string) 
 	return ct.RowsAffected() == 1, nil
 }
 
+// DispositionBySourceEvent returns the current status of a held recharge for
+// (telco, source_event_id) if one exists (BX-HIGH-001-F1). Once a source event has entered the
+// HELD maker-checker workflow, the webhook must replay this disposition and NEVER re-admit the
+// event to recovery — only ApproveRelease may book it. (telco_id, source_event_id) is UNIQUE
+// (0052), so at most one row matches. Runs on the caller's tenant tx (RLS-scoped).
+func (HeldRecharge) DispositionBySourceEvent(ctx context.Context, tx pgx.Tx, telcoID, sourceEventID string) (string, bool, error) {
+	var status string
+	err := tx.QueryRow(ctx,
+		`SELECT status FROM held_recharge_events WHERE telco_id=$1 AND source_event_id=$2`,
+		telcoID, sourceEventID).Scan(&status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return status, true, nil
+}
+
 // DailyIngestedMinor sums the recharge amounts already INGESTED (not held) for a
 // telco via the webhook since the start of the current UTC day — the running
 // total the per-telco daily ceiling is checked against. Webhook recoveries are
