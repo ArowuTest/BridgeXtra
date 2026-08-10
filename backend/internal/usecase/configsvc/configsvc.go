@@ -68,18 +68,27 @@ func (s *Service) CreateDraft(ctx context.Context, domain, scope, createdBy, rea
 	if !json.Valid(content) {
 		return entity.ConfigVersion{}, fmt.Errorf("content is not valid JSON")
 	}
-	sum := sha256.Sum256(content)
 	c := entity.ConfigVersion{
 		ConfigVersionID: platform.NewID("cfg"),
 		Domain:          domain,
 		Scope:           scope,
 		State:           entity.ConfigDraft,
 		Content:         content,
-		ContentHash:     hex.EncodeToString(sum[:]),
 		CreatedBy:       createdBy,
 		Reason:          reason,
 	}
 	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		// BX-MED-009: hash the DB-CANONICAL (jsonb-normalised) form, not the raw request bytes.
+		// content is a jsonb column, so PG rewrites it on storage — keys sorted, duplicates
+		// collapsed, insignificant whitespace stripped, numbers normalised (1e2 -> 100). A hash of
+		// the raw request bytes could never be reproduced from the stored row and differed for two
+		// semantically-identical drafts. Canonicalising through jsonb makes content_hash a stable
+		// content identity AND reproducible from storage (see VerifyContentHash).
+		canon, err := canonicalJSONB(ctx, tx, content)
+		if err != nil {
+			return err
+		}
+		c.ContentHash = hashHex(canon)
 		n, err := s.configs.NextVersionNo(ctx, tx, domain, scope)
 		if err != nil {
 			return err
@@ -88,6 +97,47 @@ func (s *Service) CreateDraft(ctx context.Context, domain, scope, createdBy, rea
 		return s.configs.Insert(ctx, tx, c)
 	})
 	return c, err
+}
+
+// canonicalJSONB returns the DB-canonical form of a JSON document: the exact normalised value a
+// jsonb column holds (keys sorted, duplicate keys collapsed to the last, insignificant whitespace
+// removed, numbers normalised). It is idempotent — canonicalising an already-canonical value
+// returns it unchanged — so a hash taken at write time and one re-taken from the stored column
+// agree without depending on the driver's raw jsonb byte formatting. BX-MED-009.
+func canonicalJSONB(ctx context.Context, tx pgx.Tx, content json.RawMessage) ([]byte, error) {
+	var canon []byte
+	if err := tx.QueryRow(ctx, `SELECT $1::jsonb`, content).Scan(&canon); err != nil {
+		return nil, fmt.Errorf("canonicalise config content: %w", err)
+	}
+	return canon, nil
+}
+
+func hashHex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyContentHash re-derives the content hash from the STORED content and reports whether it
+// matches the persisted content_hash — a governance integrity check (has this config's bytes been
+// altered out from under its approved hash?). Because the hash is over the DB-canonical form and
+// canonicalisation is idempotent, an untampered row always verifies; the previous raw-request-bytes
+// hash could never support this check, since the jsonb column never holds those exact bytes.
+// BX-MED-009.
+func (s *Service) VerifyContentHash(ctx context.Context, id string) (bool, error) {
+	var ok bool
+	err := repo.WithPlatformTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		c, err := s.configs.Get(ctx, tx, id)
+		if err != nil {
+			return err
+		}
+		canon, err := canonicalJSONB(ctx, tx, c.Content)
+		if err != nil {
+			return err
+		}
+		ok = c.ContentHash == hashHex(canon)
+		return nil
+	})
+	return ok, err
 }
 
 func (s *Service) Submit(ctx context.Context, id, actor string) error {
