@@ -328,6 +328,16 @@ func (f *fixture) manualTx1(t *testing.T, offer entity.Offer, token string) stri
 		}); err != nil {
 			return err
 		}
+		// Real tx1 claims the idempotency record in this SAME transaction (origination.go
+		// PutIfAbsent), so a crash leaves advance AND record together. Seed it here too, or this
+		// simulation is not the production shape — and BX-MED-002 makes that difference material:
+		// the resolver settles this advance and must record the confirm response onto this record.
+		if _, _, err := (repo.Idempotency{}).PutIfAbsent(ctx, tx, entity.IdempotencyRecord{
+			TelcoID: "SIM_NG", Operation: "advance.confirm", IdemKey: adv.IdempotencyKey,
+			RequestHash: "crash-sim-hash", ResponseStatus: 0, ResponseBody: []byte(`{"kind":"advance.confirm"}`),
+		}); err != nil {
+			return err
+		}
 		return advances.Transition(ctx, tx, advID, 3, entity.AdvExposureReserved, entity.AdvPendingFulfilment)
 	}); err != nil {
 		t.Fatal(err)

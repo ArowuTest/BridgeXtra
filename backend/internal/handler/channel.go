@@ -237,22 +237,22 @@ func (h *Channel) confirm(w http.ResponseWriter, r *http.Request) {
 		h.writeDomainErr(w, r, err)
 		return
 	}
-	status := http.StatusCreated
-	switch {
-	// BX-MED-002: "pending" and "failed" are properties of the OUTCOME, not of the request's
-	// novelty. A replay of an UNKNOWN confirm is still pending — it must return 202 (poll the
-	// status route), never a 200 that a status-polling channel reads as "settled". So derive the
-	// outcome statuses from state FIRST — because the replay now hands back the ORIGINAL advance
-	// (its persisted confirm-time state, BX-MED-002), a replay returns the same status class as
-	// the original; only a freshly-created ACTIVE flips 201 -> 200 on replay.
-	case res.Advance.State == entity.AdvFulfilmentUnknown:
-		status = http.StatusAccepted // EDG-004: safe pending + status route (fresh or replay)
-	case res.Advance.State == entity.AdvFulfilmentFailed:
-		status = http.StatusUnprocessableEntity // fresh or replay
-	case res.Replayed:
-		status = http.StatusOK // EDG-001: an already-created ACTIVE — replay, not a fresh 201
+	// BX-MED-002: the status is the ORIGINAL confirm's outcome semantics — decided once inside the
+	// transaction that committed the outcome, persisted with it, and replayed from that record.
+	// It is NEVER re-derived here from the advance's mutable current state.
+	//
+	// A zero status is NOT a default: it means the usecase could not establish what the original
+	// confirm earned. Defaulting to 201 CREATED would be the most dangerous possible guess — a lost
+	// 202 (still pending) or 422 (telco rejected) would silently tell the channel a new advance was
+	// credited. Refuse instead.
+	if res.HTTPStatus == 0 {
+		h.Log.Error("confirm produced no HTTP status — refusing rather than guessing",
+			"advance", res.Advance.AdvanceID, "replayed", res.Replayed)
+		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED",
+			"service temporarily limited; retry with the same Idempotency-Key")
+		return
 	}
-	writeJSON(w, status, toAdvanceResponse(res.Advance))
+	writeJSON(w, res.HTTPStatus, toAdvanceResponse(res.Advance))
 }
 
 func (h *Channel) advanceStatus(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +331,13 @@ func (h *Channel) writeDomainErr(w http.ResponseWriter, r *http.Request, err err
 	case errors.Is(err, origination.ErrDisclosureUnavailable):
 		// Fail-closed: no active disclosure policy — cannot disclose, cannot serve.
 		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; try again later")
+	case errors.Is(err, origination.ErrConfirmReplayUnavailable):
+		// BX-MED-002: an outcome committed but its exact original response is unrecoverable. A
+		// refusal is the only safe answer — a success envelope built from current state would
+		// report a since-progressed outcome as the one this command earned. The retry is safe:
+		// the same Idempotency-Key never re-lends.
+		h.Log.Error("confirm replay unavailable — refusing (outcome/response atomicity breach)", "err", err)
+		writeErr(w, http.StatusServiceUnavailable, "SERVICE_TEMPORARILY_LIMITED", "service temporarily limited; retry with the same Idempotency-Key")
 	case errors.Is(err, origination.ErrOverlayBlocked):
 		// V2-SCR-015: which flag fired is logged upstream, never disclosed.
 		writeErr(w, http.StatusForbidden, "SERVICE_RESTRICTED", "service not available for this subscriber right now")

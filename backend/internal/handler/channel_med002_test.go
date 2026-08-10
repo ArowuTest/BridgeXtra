@@ -8,6 +8,7 @@ package handler_test
 // the original class on replay; only a freshly-created ACTIVE flips 201 -> 200.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -83,5 +84,70 @@ func TestBXMED002_WireReplayOfUnknown_Stays202_NotSettled200(t *testing.T) {
 	}
 	if adv2.Status != "PROCESSING" || adv2.AdvanceID != adv1.AdvanceID {
 		t.Fatalf("replay must carry the original PROCESSING advance %s, got %s", adv1.AdvanceID, body)
+	}
+}
+
+// BX-MED-002 (REOPENED), the literal acceptance clause: "reproduce the original confirm response
+// EXACTLY". Status alone is not proof — a defect that takes the STATE from the snapshot but the
+// money amounts from the live row would pass a status-only assertion. So this compares the raw
+// response BYTES, after the advance has moved underneath in both state AND money.
+//
+// Mutation proof (verified): in replayConfirmAdvance, take the STATE from the snapshot but the
+// money from the live row — status and `status` stay correct, and only these bytes diverge
+// (outstanding 10000 -> 7500) — RED. Removing the in-tx persist entirely is also RED (the replay
+// then refuses with 503 instead of reproducing 202).
+func TestBXMED002_WireReplay_ReproducesTheOriginalBodyByteForByte(t *testing.T) {
+	f := newChannelFixture(t, "chan_med002_bytes", 2*time.Second, 300)
+	ctx := context.Background()
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO subscriber_accounts (subscriber_account_id, telco_id, msisdn_token, status, nin_verified)
+		VALUES ('sub_m2b','SIM_NG','tok_TIMEOUT_m2b','ACTIVE',true)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Admin.Exec(ctx, `
+		INSERT INTO decision_snapshots (decision_snapshot_id, telco_id, subscriber_account_id,
+		  max_face_value_minor, currency, config_version_id)
+		VALUES ('dec_m2b','SIM_NG','sub_m2b',50000,'NGN','cfg_seed_product_airtime_v1')`); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, body := f.do(t, http.MethodPost, "/v1/offers", nil,
+		map[string]string{"programme_id": "prg_sim_airtime01", "msisdn_token": "tok_TIMEOUT_m2b"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("offers: %d %s", resp.StatusCode, body)
+	}
+	var offers []struct {
+		OfferID       string `json:"offer_id"`
+		DisclosureRef string `json:"disclosure_ref"`
+	}
+	if err := json.Unmarshal(body, &offers); err != nil {
+		t.Fatal(err)
+	}
+	confirmBody := map[string]any{
+		"programme_id": "prg_sim_airtime01", "offer_id": offers[0].OfferID, "msisdn_token": "tok_TIMEOUT_m2b",
+		"disclosure_ref": offers[0].DisclosureRef, "channel": "USSD",
+		"session_id": "m2b-sess", "accepted_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	hdr := map[string]string{"Idempotency-Key": "wire-med002-b"}
+
+	resp1, body1 := f.do(t, http.MethodPost, "/v1/advances", hdr, confirmBody)
+	if resp1.StatusCode != http.StatusAccepted {
+		t.Fatalf("fresh UNKNOWN confirm must be 202: %d %s", resp1.StatusCode, body1)
+	}
+
+	// Move the advance underneath the channel: the resolver settles it ACTIVE and a recovery
+	// reduces the outstanding. Both the STATE and the MONEY now differ from what the caller was told.
+	if _, err := f.db.Admin.Exec(ctx, `
+		UPDATE advances SET state='ACTIVE', outstanding_minor = outstanding_minor - 2500,
+		       activated_at = now(), version = version + 1`); err != nil {
+		t.Fatal(err)
+	}
+
+	resp2, body2 := f.do(t, http.MethodPost, "/v1/advances", hdr, confirmBody)
+	if resp2.StatusCode != resp1.StatusCode {
+		t.Fatalf("BX-MED-002: replay status must equal the original (%d), got %d", resp1.StatusCode, resp2.StatusCode)
+	}
+	if !bytes.Equal(body1, body2) {
+		t.Fatalf("BX-MED-002: replay must reproduce the original body byte-for-byte\n first: %s\nreplay: %s", body1, body2)
 	}
 }

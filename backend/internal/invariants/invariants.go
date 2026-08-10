@@ -151,6 +151,26 @@ var checks = []struct {
 		     WHERE a.fee_recognition = 'DEFERRED'
 		       AND a.state IN ('ACTIVE','PARTIALLY_RECOVERED'))`,
 	},
+	{
+		"INV-020", "advance with a COMMITTED fulfilment outcome whose exact confirm response was never recorded (BX-MED-002)",
+		// The outcome/response atomicity invariant, as a CLASS-LEVEL control rather than a
+		// per-request read guard. Origination commits the economic outcome and its idempotent
+		// confirm response in ONE transaction, so an advance past PENDING_FULFILMENT must always
+		// have response_status <> 0 on its advance.confirm record. A violation means some writer
+		// settled an outcome without recording what the caller's command earned — exactly the
+		// state in which a replay would otherwise be answered from mutable current state.
+		// Covers BOTH failure shapes: a record present but never filled in, and no record at all.
+		// Advances with no idempotency key are out of scope (they cannot be replayed by key).
+		`SELECT a.advance_id
+		   FROM advances a
+		   LEFT JOIN idempotency_records ir
+		     ON ir.telco_id = a.telco_id
+		    AND ir.operation = 'advance.confirm'
+		    AND ir.idem_key = a.idempotency_key
+		  WHERE a.idempotency_key <> ''
+		    AND a.state NOT IN ('REQUESTED','VALIDATED','EXPOSURE_RESERVED','PENDING_FULFILMENT','DECLINED')
+		    AND (ir.idem_key IS NULL OR ir.response_status = 0)`,
+	},
 }
 
 // Check runs every invariant sweep and returns all violations found.

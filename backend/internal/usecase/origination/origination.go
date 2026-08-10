@@ -85,6 +85,13 @@ var (
 	ErrDisclosureExpired         = errors.New("origination: acceptance falls outside the disclosure validity window")
 	ErrChannelNotAllowed         = errors.New("origination: channel is not permitted for this disclosure policy")
 	ErrAcceptanceEvidenceMissing = errors.New("origination: channel/session acceptance evidence is required at confirm")
+
+	// ErrConfirmReplayUnavailable (BX-MED-002): an economic outcome is committed but its exact
+	// confirm response is not recoverable. Refuse LOUDLY — a replay is never answered from the
+	// advance's mutable current state, because that reports a since-progressed outcome as if it
+	// were the one the caller's command earned. Post-fix this is unreachable (outcome and response
+	// commit in one transaction); if it ever fires, an atomicity invariant has been broken.
+	ErrConfirmReplayUnavailable = errors.New("origination: original confirm response is not recoverable")
 )
 
 // acceptanceSkew tolerates modest clock skew between the telco channel (which
@@ -154,11 +161,58 @@ func canonicalJSON(raw json.RawMessage) string {
 	return string(out)
 }
 
+// The confirm status vocabulary. BX-MED-002: a fulfilment outcome becomes a confirm status in
+// exactly ONE place (confirmHTTPStatus), that status is persisted WITH the outcome in a single
+// transaction, and a replay returns the persisted status. The handler never re-derives it.
+// Plain ints: the usecase layer takes no transport dependency (net/http constants are untyped).
+const (
+	confirmStatusReplayed   = 200 // an already-created advance, replayed
+	confirmStatusCreated    = 201 // fresh advance, fulfilment confirmed
+	confirmStatusProcessing = 202 // outcome ambiguous/pending — poll the status route
+	confirmStatusRejected   = 422 // the telco rejected the fulfilment
+)
+
+// confirmHTTPStatus maps a settled fulfilment outcome to the status its confirm earned. Called
+// ONCE, inside the transaction that commits the outcome; the result is persisted, never recomputed.
+func confirmHTTPStatus(a entity.Advance) int {
+	switch a.State {
+	case entity.AdvFulfilmentUnknown:
+		return confirmStatusProcessing
+	case entity.AdvFulfilmentFailed:
+		return confirmStatusRejected
+	default:
+		return confirmStatusCreated
+	}
+}
+
+// replayHTTPStatus maps a PERSISTED original status to the status a REPLAY carries. A created
+// advance was created by the ORIGINAL call, so its replay is 200 ("idempotent replay of the
+// original outcome", api/openapi.yaml). A pending or rejected outcome replays its own class
+// verbatim: a replayed 202 is still pending and a replayed 422 is still rejected, and telling a
+// channel 200 in either case would read as "settled" — the MED-002 defect in status form.
+func replayHTTPStatus(orig int) int {
+	if orig == confirmStatusCreated {
+		return confirmStatusReplayed
+	}
+	return orig
+}
+
+// outcomeCommitted reports whether an advance has a COMMITTED economic outcome. Past this line a
+// replay must be answered from the persisted response and never from the row (BX-MED-002); before
+// it, no outcome exists yet and the in-flight duplicate is legitimately answered as PROCESSING.
+func outcomeCommitted(st entity.AdvanceState) bool {
+	switch st {
+	case entity.AdvRequested, entity.AdvValidated, entity.AdvExposureReserved, entity.AdvPendingFulfilment:
+		return false
+	}
+	return true
+}
+
 // confirmResponseDTO is the exact confirm response snapshot persisted onto the idempotency
-// record after the outcome resolves (BX-MED-002), so a later replay returns THIS — the response
-// the original confirm produced — rather than the advance's since-progressed current state
-// (e.g. UNKNOWN later resolved to ACTIVE, or outstanding reduced by recovery). It holds exactly
-// the fields the channel confirm response renders.
+// record IN THE SAME TRANSACTION that commits the outcome (BX-MED-002), so a later replay returns
+// THIS — the response the original confirm produced — rather than the advance's since-progressed
+// current state (e.g. UNKNOWN later resolved to ACTIVE, or outstanding reduced by recovery). It
+// holds exactly the fields the channel confirm response renders.
 type confirmResponseDTO struct {
 	AdvanceID string `json:"advance_id"`
 	State     string `json:"state"`
@@ -202,16 +256,56 @@ func decodeConfirmResponse(b []byte) (entity.Advance, bool) {
 	return a, true
 }
 
-// replayConfirmAdvance returns the advance to hand back on a confirm REPLAY (BX-MED-002): the
-// EXACT persisted original response when it was finalised (ResponseStatus 200), else the current
-// advance as a fallback for a duplicate racing the winner's tx2/SetResponse window.
-func (s *Service) replayConfirmAdvance(ctx context.Context, tx pgx.Tx, telcoID, idemKey string) (entity.Advance, error) {
-	if rec, err := s.idem.Get(ctx, tx, telcoID, "advance.confirm", idemKey); err == nil && rec.ResponseStatus == 200 {
-		if a, ok := decodeConfirmResponse(rec.ResponseBody); ok {
-			return a, nil
+// replayConfirmAdvance answers a confirm REPLAY: EXACT-OR-REFUSE (BX-MED-002). The ordering below
+// IS the proof, so it is documented step by step:
+//
+//	(1) A response on record is authoritative — decode and return it with its ORIGINAL status.
+//	(2) No response on record => no outcome has committed for this key yet.
+//	(3) The advance has not reached a committed outcome: this is a duplicate racing the winner's
+//	    in-flight tx2. That is PRE-outcome state, not post-outcome mutable state — answer PROCESSING.
+//	(4) The advance HAS a committed outcome but no response: re-read (a strictly later statement —
+//	    outcome and response now commit together, so a snapshot seeing one must see the other). If
+//	    still absent, the atomicity invariant is broken: REFUSE loudly. Never return the live row.
+//
+// There is deliberately no path that answers a post-outcome replay from the advance's current state.
+func (s *Service) replayConfirmAdvance(ctx context.Context, tx pgx.Tx, telcoID, idemKey string) (entity.Advance, int, error) {
+	recorded := func() (entity.Advance, int, bool, error) {
+		rec, err := s.idem.Get(ctx, tx, telcoID, "advance.confirm", idemKey)
+		if err != nil {
+			if errors.Is(err, repo.ErrNotFound) {
+				return entity.Advance{}, 0, false, nil
+			}
+			return entity.Advance{}, 0, false, err
 		}
+		if rec.ResponseStatus == 0 { // seeded in tx1, no outcome recorded yet
+			return entity.Advance{}, 0, false, nil
+		}
+		a, ok := decodeConfirmResponse(rec.ResponseBody)
+		if !ok {
+			// Recorded but unreadable. Degrading to live state here is exactly the defect.
+			s.Log.Error("confirm replay: recorded response will not decode — refusing",
+				"idem_key", idemKey, "status", rec.ResponseStatus)
+			return entity.Advance{}, 0, false, ErrConfirmReplayUnavailable
+		}
+		return a, replayHTTPStatus(rec.ResponseStatus), true, nil
 	}
-	return s.advances.GetByIdemKey(ctx, tx, idemKey)
+
+	if a, st, ok, err := recorded(); err != nil || ok {
+		return a, st, err
+	}
+	adv, err := s.advances.GetByIdemKey(ctx, tx, idemKey)
+	if err != nil {
+		return entity.Advance{}, 0, err
+	}
+	if !outcomeCommitted(adv.State) {
+		return adv, confirmStatusProcessing, nil
+	}
+	if a, st, ok, err := recorded(); err != nil || ok {
+		return a, st, err
+	}
+	s.Log.Error("confirm replay: outcome committed without its idempotent response — refusing",
+		"advance", adv.AdvanceID, "idem_key", idemKey, "state", adv.State)
+	return entity.Advance{}, 0, ErrConfirmReplayUnavailable
 }
 
 type Service struct {
@@ -680,6 +774,11 @@ type ConfirmCmd struct {
 type ConfirmResult struct {
 	Advance  entity.Advance
 	Replayed bool
+	// HTTPStatus is the status the ORIGINAL confirm earned — derived ONCE from the fulfilment
+	// outcome and persisted with it in the same transaction (BX-MED-002), then replayed from that
+	// record. It is NEVER re-derived from the advance's mutable current state. Zero is not a
+	// default: it means the status could not be established, which the handler treats as a refusal.
+	HTTPStatus int
 }
 
 // Confirm executes the origination saga.
@@ -720,6 +819,7 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 	var attempt entity.FulfilmentAttempt
 	var offer entity.Offer
 	replayed := false
+	replayStatus := 0 // BX-MED-002: the status the ORIGINAL confirm earned, carried through a replay
 	divergent := false
 	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		// R-P0-1: claim the idempotency record FIRST, atomically, in this same
@@ -742,14 +842,15 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 				divergent = true
 				return ErrDivergentDuplicate
 			}
-			// Genuine replay: return the EXACT original confirm response (BX-MED-002), not the
-			// advance's since-progressed current state. The winner's response is persisted after
-			// its outcome resolves; until then this falls back to the current advance.
-			existing, err := s.replayConfirmAdvance(ctx, tx, telcoID, cmd.IdemKey)
+			// Genuine replay: return the EXACT original confirm response (BX-MED-002) — the response
+			// persisted in the same transaction that committed the outcome. Post-outcome there is no
+			// fallback to the advance's current state; a duplicate that arrives BEFORE the winner's
+			// outcome commits is answered PROCESSING from pre-outcome state.
+			existing, st, err := s.replayConfirmAdvance(ctx, tx, telcoID, cmd.IdemKey)
 			if err != nil {
 				return err
 			}
-			adv, replayed = existing, true
+			adv, replayed, replayStatus = existing, true, st
 			return nil
 		}
 
@@ -829,10 +930,15 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		case offer.State == entity.OfferAccepted:
 			// EDG-001 replay path: the advance for this offer already exists — return the exact
 			// original confirm response (BX-MED-002), not its current state.
-			existing, err := s.replayConfirmAdvance(ctx, tx, telcoID, cmd.IdemKey)
+			existing, st, err := s.replayConfirmAdvance(ctx, tx, telcoID, cmd.IdemKey)
 			if err == nil {
-				adv, replayed = existing, true
+				adv, replayed, replayStatus = existing, true, st
 				return nil
+			}
+			// A refusal must surface as itself: masking "the original response is unrecoverable"
+			// as "offer no longer acceptable" would hide the very breach this fix reports.
+			if errors.Is(err, ErrConfirmReplayUnavailable) {
+				return err
 			}
 			return ErrOfferNotAcceptable
 		case offer.State != entity.OfferGenerated:
@@ -1052,7 +1158,7 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		return ConfirmResult{}, err
 	}
 	if replayed {
-		return ConfirmResult{Advance: adv, Replayed: true}, nil
+		return ConfirmResult{Advance: adv, Replayed: true, HTTPStatus: replayStatus}, nil
 	}
 
 	// ---- network: NO transaction open (V2-ADV-006) ------------------------
@@ -1073,23 +1179,50 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		res = mno.Result{Outcome: mno.OutcomeUnknown, ResponseEvidence: []byte(fmt.Sprintf(`{"adapter_fault":%q}`, err.Error()))}
 	}
 
-	// ---- tx2: resolve outcome --------------------------------------------
-	final, err := s.ResolveOutcome(ctx, adv.AdvanceID, attempt.AttemptID, res)
-	if err != nil {
+	// ---- tx2: resolve outcome AND record its idempotent response, ONE commit ----
+	// BX-MED-002: the economic outcome and the exact confirm response commit or roll back
+	// TOGETHER (V2-API-003). There is no best-effort write and no fallback: if the response cannot
+	// be recorded the outcome does not commit, the advance stays PENDING_FULFILMENT with a SENT
+	// attempt, and the resolver reclaims it as stale-SENT — safe, converging, and never a state
+	// where an outcome is durable but the response the caller earned is lost.
+	var final entity.Advance
+	var httpStatus int
+	if err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		a, st, e := s.resolveOutcomeTx(ctx, tx, adv.AdvanceID, attempt.AttemptID, res)
+		if e != nil {
+			return e
+		}
+		final, httpStatus = a, st
+		return nil
+	}); err != nil {
+		// The outcome did not commit. Escalate durably: exposure stays reserved and the telco may
+		// already have credited the customer, so this must be visible to ops, not only in a log.
+		s.recordOutcomeNotCommitted(ctx, telcoID, adv, err)
 		return ConfirmResult{}, err
 	}
-	// BX-MED-002: persist the EXACT confirm response so a later replay returns THIS, not the
-	// advance's since-progressed current state (idempotent response, V2-API-003). Best-effort in
-	// its own tx after the outcome commits; on failure a replay safely falls back to current state.
-	if body, encErr := encodeConfirmResponse(final); encErr == nil {
-		if e := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
-			return s.idem.SetResponse(ctx, tx, telcoID, "advance.confirm", cmd.IdemKey, 200, body)
-		}); e != nil {
-			s.Log.Warn("confirm response snapshot not persisted — replay falls back to current state",
-				"advance", final.AdvanceID, "err", e)
-		}
+	return ConfirmResult{Advance: final, HTTPStatus: httpStatus}, nil
+}
+
+// recordOutcomeNotCommitted writes a durable audit row when tx2 aborts, so an advance can never be
+// silently stranded with exposure held after the telco may already have credited the customer
+// (BX-MED-002). Out-of-band, in its own tx, mirroring recordDivergentDuplicate — the confirm tx
+// has already rolled back. Best-effort by necessity; the standing invariant check is the backstop.
+func (s *Service) recordOutcomeNotCommitted(ctx context.Context, telcoID string, adv entity.Advance, cause error) {
+	s.Log.Error("confirm outcome did not commit — advance left pending with exposure reserved",
+		"advance", adv.AdvanceID, "state", adv.State, "err", cause)
+	if e := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		return (repo.Audit{}).Insert(ctx, tx, entity.AuditEvent{
+			ID:         platform.NewID("aud"),
+			TelcoID:    telcoID,
+			Actor:      "system",
+			Action:     "advance.outcome_not_committed",
+			TargetType: "advance",
+			TargetID:   adv.AdvanceID,
+			Reason:     cause.Error(),
+		})
+	}); e != nil {
+		s.Log.Error("outcome-not-committed escalation not persisted", "advance", adv.AdvanceID, "err", e)
 	}
-	return ConfirmResult{Advance: final}, nil
 }
 
 var errReplayRace = errors.New("origination: idempotency replay race")
@@ -1142,31 +1275,54 @@ func (s *Service) replayByIdemKey(ctx context.Context, idemKey string) (ConfirmR
 		return ConfirmResult{}, err
 	}
 	var adv entity.Advance
+	var status int
 	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		var e error
-		// BX-MED-002: the exact original response when finalised, else the current advance.
-		adv, e = s.replayConfirmAdvance(ctx, tx, telcoID, idemKey)
+		// BX-MED-002: the exact original response, or a loud refusal — never the mutable row.
+		adv, status, e = s.replayConfirmAdvance(ctx, tx, telcoID, idemKey)
 		return e
 	})
 	if err != nil {
 		return ConfirmResult{}, err
 	}
-	return ConfirmResult{Advance: adv, Replayed: true}, nil
+	return ConfirmResult{Advance: adv, Replayed: true, HTTPStatus: status}, nil
 }
 
 // ResolveOutcome applies a fulfilment result to the advance — shared by the
 // saga (tx2) and the M1b-4 resolver worker, so both paths have IDENTICAL
 // semantics: ACTIVE+journal / FAILED+release / UNKNOWN+enquiry schedule.
+//
+// It returns the LIVE post-transition advance. BX-MED-002 persists the confirm response inside
+// the same transaction, but that snapshot is used ONLY on the replay read path — persisting and
+// returning are deliberately decoupled, so this function's contract is unchanged.
 func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID string, res mno.Result) (entity.Advance, error) {
 	var out entity.Advance
 	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+		var e error
+		out, _, e = s.resolveOutcomeTx(ctx, tx, advanceID, attemptID, res)
+		return e
+	})
+	return out, err
+}
+
+// resolveOutcomeTx is the outcome core, running in the CALLER's transaction (BX-MED-002) so the
+// economic outcome and its idempotent confirm response commit or roll back TOGETHER. It returns
+// the live advance and the confirm status that outcome earned.
+func (s *Service) resolveOutcomeTx(ctx context.Context, tx pgx.Tx, advanceID, attemptID string, res mno.Result) (entity.Advance, int, error) {
+	var out entity.Advance
+	var status int
+	err := func(tx pgx.Tx) error {
 		adv, err := s.advances.Get(ctx, tx, advanceID)
 		if err != nil {
 			return err
 		}
-		// Already terminal/active (resolver raced us): idempotent no-op.
+		// Already terminal/active (resolver raced us): idempotent no-op. BX-MED-002: READ the
+		// recorded status, never write one here — this row may have progressed since its outcome
+		// (e.g. ACTIVE -> PARTIALLY_RECOVERED), so writing now would persist MUTABLE CURRENT STATE
+		// as if it were the original response, which is the very defect being fixed.
 		if adv.State != entity.AdvPendingFulfilment && adv.State != entity.AdvFulfilmentUnknown {
 			out = adv
+			status = s.recordedConfirmStatus(ctx, tx, adv)
 			return nil
 		}
 
@@ -1255,9 +1411,79 @@ func (s *Service) ResolveOutcome(ctx context.Context, advanceID, attemptID strin
 		}
 
 		out, err = s.advances.Get(ctx, tx, adv.AdvanceID)
+		if err != nil {
+			return err
+		}
+		// BX-MED-002: record the exact confirm response IN THIS TRANSACTION. If it cannot be
+		// recorded the economic outcome does NOT commit — there is no best-effort path and no
+		// fallback. Note `out` is deliberately the LIVE advance: what we persist and what this
+		// function returns are decoupled (the snapshot serves only the replay read path).
+		status, err = s.recordConfirmResponse(ctx, tx, out)
 		return err
-	})
-	return out, err
+	}(tx)
+	return out, status, err
+}
+
+// recordConfirmResponse persists the exact confirm response for a settled outcome onto its
+// idempotency record, inside the caller's transaction (BX-MED-002). It returns ONLY the status —
+// never an advance — so it can never be mistaken for the outcome's return value.
+//
+// If a response is already on record (the saga and the resolver both settled, or a retry), that
+// FIRST response is authoritative and immutable (migration 0029 is write-once): return its status.
+func (s *Service) recordConfirmResponse(ctx context.Context, tx pgx.Tx, a entity.Advance) (int, error) {
+	if a.IdempotencyKey == "" {
+		// No key => this advance can never be replayed by key; nothing to record.
+		s.Log.Warn("advance has no idempotency key — no confirm response recorded", "advance", a.AdvanceID)
+		return confirmHTTPStatus(a), nil
+	}
+	body, err := encodeConfirmResponse(a)
+	if err != nil {
+		return 0, err
+	}
+	st := confirmHTTPStatus(a)
+	wrote, err := s.idem.SetResponseIfAbsent(ctx, tx, a.TelcoID, "advance.confirm", a.IdempotencyKey, st, body)
+	switch {
+	case errors.Is(err, repo.ErrNotFound):
+		// No idempotency record at all. Production cannot produce this: tx1 seeds the record in the
+		// SAME transaction as the advance (PutIfAbsent), so advance-without-record is not a reachable
+		// state. Aborting here would strand a real advance with exposure held after the telco may
+		// already have credited the customer — the failure mode is worse than the anomaly. So settle
+		// the outcome, escalate loudly, and let the two standing controls catch it: the replay path
+		// still REFUSES (no record => no exact response => never mutable state), and INV-020 reports
+		// the advance. Fail-closed where it matters, converging where stranding money would not help.
+		s.Log.Error("no idempotency record for a settling advance — outcome recorded, replay will refuse",
+			"advance", a.AdvanceID, "idem_key", a.IdempotencyKey)
+		return st, nil
+	case err != nil:
+		// Transient/permission fault: fail closed. The outcome must not commit without its response;
+		// the attempt stays SENT/UNKNOWN and the resolver reclaims it, so this converges by retry.
+		return 0, err
+	}
+	if wrote {
+		return st, nil
+	}
+	rec, err := s.idem.Get(ctx, tx, a.TelcoID, "advance.confirm", a.IdempotencyKey)
+	if err != nil {
+		return 0, err
+	}
+	if rec.ResponseStatus == 0 {
+		return 0, ErrConfirmReplayUnavailable
+	}
+	return rec.ResponseStatus, nil
+}
+
+// recordedConfirmStatus reads the already-recorded confirm status for an advance whose outcome
+// settled earlier, WITHOUT writing (BX-MED-002). Zero when nothing is on record — the caller is
+// the idempotent no-op branch, which never invents a status from current state.
+func (s *Service) recordedConfirmStatus(ctx context.Context, tx pgx.Tx, a entity.Advance) int {
+	if a.IdempotencyKey == "" {
+		return 0
+	}
+	rec, err := s.idem.Get(ctx, tx, a.TelcoID, "advance.confirm", a.IdempotencyKey)
+	if err != nil || rec.ResponseStatus == 0 {
+		return 0
+	}
+	return rec.ResponseStatus
 }
 
 // currentAttemptState infers the guard state for attempt resolution from the
