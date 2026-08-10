@@ -148,16 +148,34 @@ func (HeldRecharge) RequestRelease(ctx context.Context, tx pgx.Tx, heldID, maker
 	return ct.RowsAffected() == 1, nil
 }
 
-// ClaimReleased atomically transitions HELD -> RELEASED for a requested hold,
-// enforcing the DISTINCT approver in the same statement (the schema CHECK is
-// the backstop). Returns false when nothing matched (not requested, already
-// decided, or same actor) — the caller re-reads to distinguish.
-func (HeldRecharge) ClaimReleased(ctx context.Context, tx pgx.Tx, heldID, approver string) (bool, error) {
+// ClaimForRelease atomically CLAIMS a requested hold for release: HELD ->
+// RELEASE_IN_PROGRESS, stamping the DISTINCT approver in the same statement (four-eyes,
+// with the schema CHECK + trigger as backstops). This is the BX-HIGH-002 fix — it runs
+// BEFORE any ingest, so a concurrent Reject (which requires HELD) can no longer win, and
+// money is never booked against a hold that ends REJECTED. Returns false when nothing
+// matched (not HELD, not requested, or same actor); the caller re-reads to distinguish an
+// already-claimed retry from a lost race.
+func (HeldRecharge) ClaimForRelease(ctx context.Context, tx pgx.Tx, heldID, approver string) (bool, error) {
 	ct, err := tx.Exec(ctx, `
 		UPDATE held_recharge_events
-		SET approved_by = $2, status = 'RELEASED', resolved_at = now()
+		SET approved_by = $2, status = 'RELEASE_IN_PROGRESS'
 		WHERE held_id = $1 AND status = 'HELD'
 		  AND requested_by IS NOT NULL AND requested_by <> $2`, heldID, approver)
+	if err != nil {
+		return false, err
+	}
+	return ct.RowsAffected() == 1, nil
+}
+
+// FinaliseReleased completes a claimed release once the recovery has been booked:
+// RELEASE_IN_PROGRESS -> RELEASED for the SAME approver that claimed it. Returns false when
+// nothing matched (already RELEASED — idempotent — or claimed by another approver); the
+// caller re-reads to confirm the idempotent-success case.
+func (HeldRecharge) FinaliseReleased(ctx context.Context, tx pgx.Tx, heldID, approver string) (bool, error) {
+	ct, err := tx.Exec(ctx, `
+		UPDATE held_recharge_events
+		SET status = 'RELEASED', resolved_at = now()
+		WHERE held_id = $1 AND status = 'RELEASE_IN_PROGRESS' AND approved_by = $2`, heldID, approver)
 	if err != nil {
 		return false, err
 	}

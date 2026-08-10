@@ -9,7 +9,9 @@ package rechargehold_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -172,6 +174,87 @@ func TestS23_DoubleApprove_IdempotentSingleIngest(t *testing.T) {
 	}
 	if got := holdStatus(t, db, id); got != "RELEASED" {
 		t.Fatalf("hold must be RELEASED, got %s", got)
+	}
+}
+
+// BX-HIGH-002 (deterministic): once a hold is CLAIMED for release (RELEASE_IN_PROGRESS), a
+// Reject can no longer win — MarkRejected requires HELD. This is the property that makes
+// money-while-rejected impossible. Mutation proof: revert ApproveRelease to claim AFTER
+// ingest (leave the hold HELD before booking) and a concurrent reject succeeds again.
+func TestBXHIGH002_ClaimBeforeIngestBlocksReject(t *testing.T) {
+	svc, _, db := newHoldFixture(t, "high002_claimblocks")
+	id := seedHold(t, db, "wh:cb1", 1000)
+	ctx := context.Background()
+	if err := svc.RequestRelease(ctx, holdTelco, id, "maker", "r"); err != nil {
+		t.Fatal(err)
+	}
+	// Claim the hold for release (HELD -> RELEASE_IN_PROGRESS), as ApproveRelease does BEFORE
+	// it ingests.
+	tctx := platform.WithTenant(ctx, holdTelco)
+	if err := repo.WithTenantTx(tctx, db.App, func(tx pgx.Tx) error {
+		ok, err := (repo.HeldRecharge{}).ClaimForRelease(ctx, tx, id, "checker")
+		if err != nil || !ok {
+			t.Fatalf("claim must succeed: ok=%v err=%v", ok, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := holdStatus(t, db, id); got != "RELEASE_IN_PROGRESS" {
+		t.Fatalf("after claim the hold must be RELEASE_IN_PROGRESS, got %s", got)
+	}
+	// The reject now loses: a claimed hold is no longer HELD.
+	if err := svc.Reject(ctx, holdTelco, id, "maker", "too late"); !errors.Is(err, rechargehold.ErrNotActionable) {
+		t.Fatalf("rejecting a claimed (RELEASE_IN_PROGRESS) hold must be refused, got %v", err)
+	}
+	if got := holdStatus(t, db, id); got != "RELEASE_IN_PROGRESS" {
+		t.Fatalf("a refused reject must leave the hold RELEASE_IN_PROGRESS, got %s", got)
+	}
+}
+
+// BX-HIGH-002 (end-to-end, -race): fire Approve and Reject concurrently on each of many
+// holds. Each must resolve cleanly — either RELEASED with exactly one recovery, or REJECTED
+// with none. Money is NEVER booked against a hold that ends REJECTED, and a RELEASED hold
+// always has its money. On the old ingest-then-flip ordering a reject that crossed the
+// booking left money booked while REJECTED — this asserts that can no longer happen.
+func TestBXHIGH002_ConcurrentApproveReject_NoMoneyWhileRejected(t *testing.T) {
+	svc, _, db := newHoldFixture(t, "high002_race")
+	ctx := context.Background()
+	const n = 12
+	ids := make([]string, n)
+	srcs := make([]string, n)
+	for i := 0; i < n; i++ {
+		srcs[i] = fmt.Sprintf("wh:race%d", i)
+		ids[i] = seedHold(t, db, srcs[i], 1000)
+		if err := svc.RequestRelease(ctx, holdTelco, ids[i], "maker", "r"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(2)
+		go func(i int) { defer wg.Done(); <-start; _, _ = svc.ApproveRelease(ctx, holdTelco, ids[i], "checker") }(i)
+		go func(i int) { defer wg.Done(); <-start; _ = svc.Reject(ctx, holdTelco, ids[i], "maker", "withdrawn") }(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		st := holdStatus(t, db, ids[i])
+		rc := recoveryCount(t, db, srcs[i])
+		switch st {
+		case "RELEASED":
+			if rc != 1 {
+				t.Fatalf("hold %d RELEASED but recovery count = %d (want exactly 1)", i, rc)
+			}
+		case "REJECTED":
+			if rc != 0 {
+				t.Fatalf("hold %d REJECTED but %d recovery booked — money moved while rejected (BX-HIGH-002)", i, rc)
+			}
+		default:
+			t.Fatalf("hold %d ended in %s (want RELEASED or REJECTED) — stuck/inconsistent", i, st)
+		}
 	}
 }
 

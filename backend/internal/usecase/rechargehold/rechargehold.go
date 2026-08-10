@@ -3,15 +3,15 @@
 // that has NOT been ingested; releasing it is a two-actor decision that feeds
 // it to the recovery core, and rejecting it is the safe single-actor direction.
 //
-// Crash-safety (the reviewer-verified ordering): recovery.Ingest manages its
-// own transaction, so release cannot be single-tx with the state flip. The
-// order is guards -> INGEST (idempotent per source_event_id) -> atomic
-// claim-update that re-checks the guards. A crash between ingest and claim
-// leaves HELD-but-ingested; retrying the approval replays the ingest (byte-
-// exact, Replayed=true) and completes the transition — money is never lost and
-// never doubled. The residual approve-vs-reject sub-second race is
-// audit-visible and recon-caught (same accepted class as the daily-ceiling
-// TOCTOU).
+// Crash-safety + BX-HIGH-002 (CLAIM before ingest): recovery.Ingest manages its own
+// transaction, so release cannot be single-tx with the state flip. The order is CLAIM
+// (HELD -> RELEASE_IN_PROGRESS, four-eyes, atomic) -> INGEST (idempotent per
+// source_event_id) -> FINALISE (RELEASE_IN_PROGRESS -> RELEASED). Claiming FIRST closes the
+// approve-vs-reject race: a Reject requires HELD, so once a hold is claimed a reject can
+// never win, and money is never booked against a hold that ends REJECTED. A crash between
+// claim and finalise leaves RELEASE_IN_PROGRESS; a retried approval by the same checker
+// replays the byte-exact ingest and completes the transition — money is never lost, never
+// doubled, and never booked against a rejected hold.
 package rechargehold
 
 import (
@@ -98,24 +98,45 @@ func (s *Service) ApproveRelease(ctx context.Context, telcoID, heldID, approver 
 	}
 	tctx := platform.WithTenant(ctx, telcoID)
 
-	// Pre-guards (fail fast, nothing ingested on refusal).
+	// STEP 1 (BX-HIGH-002): atomically CLAIM the hold for release — HELD -> RELEASE_IN_PROGRESS
+	// with the four-eyes distinct-approver guard — BEFORE any ingest. Once claimed, a concurrent
+	// Reject (which requires HELD) can no longer win, so money is never booked against a hold
+	// that ends REJECTED. Crash/retry-safe: an already-RELEASE_IN_PROGRESS hold claimed by THIS
+	// approver (a prior attempt) is completed below, and an already-RELEASED hold converges.
 	var row repo.HeldRow
 	if err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
-		var e error
-		row, e = s.held.Get(ctx, tx, heldID)
-		return e
+		r, e := s.held.Get(ctx, tx, heldID)
+		if e != nil {
+			return fmt.Errorf("%w: %v", ErrNotActionable, e)
+		}
+		row = r
+		switch {
+		case r.Status == "RELEASED":
+			return nil // already released — STEP 2 replays the ingest for a consistent result
+		case r.Status == "RELEASE_IN_PROGRESS":
+			if r.ApprovedBy != approver {
+				return fmt.Errorf("%w: release already in progress by another approver", ErrNotActionable)
+			}
+			return nil // our own prior claim (crash retry) — complete it below
+		case r.Status != "HELD":
+			return fmt.Errorf("%w: status %s", ErrNotActionable, r.Status)
+		case r.RequestedBy == "":
+			return fmt.Errorf("%w: release not requested", ErrNotActionable)
+		case r.RequestedBy == approver:
+			return ErrSameActor
+		}
+		// HELD, requested by a distinct maker: claim it now, BEFORE ingest.
+		ok, e := s.held.ClaimForRelease(ctx, tx, heldID, approver)
+		if e != nil {
+			return e
+		}
+		if !ok {
+			// A concurrent reject/approve changed the hold between the read and the claim.
+			return fmt.Errorf("%w: hold changed during claim", ErrNotActionable)
+		}
+		return nil
 	}); err != nil {
-		return recovery.IngestResult{}, fmt.Errorf("%w: %v", ErrNotActionable, err)
-	}
-	switch {
-	case row.Status == "RELEASED":
-		// Already decided — idempotent success path continues below via replay.
-	case row.Status != "HELD":
-		return recovery.IngestResult{}, fmt.Errorf("%w: status %s", ErrNotActionable, row.Status)
-	case row.RequestedBy == "":
-		return recovery.IngestResult{}, fmt.Errorf("%w: release not requested", ErrNotActionable)
-	case row.RequestedBy == approver:
-		return recovery.IngestResult{}, ErrSameActor
+		return recovery.IngestResult{}, err
 	}
 
 	amount, err := entity.NewMoney(row.AmountMinor, entity.Currency(row.Currency))
@@ -123,8 +144,9 @@ func (s *Service) ApproveRelease(ctx context.Context, telcoID, heldID, approver 
 		return recovery.IngestResult{}, fmt.Errorf("held amount invalid: %w", err)
 	}
 
-	// INGEST FIRST (idempotent per source_event_id): a crash after this point
-	// leaves HELD-but-ingested, and a retried approval converges safely.
+	// STEP 2: ingest (idempotent per source_event_id). The hold is now RELEASE_IN_PROGRESS (or
+	// already RELEASED), so a reject can never cross this. A failure here leaves the hold
+	// RELEASE_IN_PROGRESS — retryable by a re-approval, never lost, never doubled.
 	res, err := s.Recovery.Ingest(tctx, recovery.IngestCmd{
 		SourceEventID: row.SourceEventID, // already "wh:"-namespaced by the webhook
 		MSISDNToken:   row.MSISDNToken,
@@ -136,11 +158,9 @@ func (s *Service) ApproveRelease(ctx context.Context, telcoID, heldID, approver 
 		return recovery.IngestResult{}, fmt.Errorf("release ingest: %w", err)
 	}
 
-	// Atomic claim re-checking every guard; 0 rows after a successful ingest
-	// means either a concurrent approval won (RELEASED — idempotent success) or
-	// a concurrent reject crossed the ingest (loud inconsistency, surfaced).
-	err = repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
-		ok, e := s.held.ClaimReleased(ctx, tx, heldID, approver)
+	// STEP 3: finalise RELEASE_IN_PROGRESS -> RELEASED + audit. Idempotent when already RELEASED.
+	if err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		ok, e := s.held.FinaliseReleased(ctx, tx, heldID, approver)
 		if e != nil {
 			return e
 		}
@@ -150,19 +170,18 @@ func (s *Service) ApproveRelease(ctx context.Context, telcoID, heldID, approver 
 				return e
 			}
 			if cur.Status == "RELEASED" {
-				return nil // concurrent/retried approval already closed it
+				return nil // already finalised (concurrent/retried approval) — idempotent success
 			}
-			s.Log.Error("HELD release inconsistency: event ingested but hold not releasable — reconcile",
+			s.Log.Error("HELD finalise inconsistency: event ingested but hold not releasable — reconcile",
 				"telco", telcoID, "held", heldID, "status", cur.Status)
-			return fmt.Errorf("%w: status %s changed during release (event ingested — reconcile)", ErrNotActionable, cur.Status)
+			return fmt.Errorf("%w: status %s could not finalise (event ingested — reconcile)", ErrNotActionable, cur.Status)
 		}
 		return s.audit.Insert(ctx, tx, entity.AuditEvent{
 			ID: platform.NewID("aud"), TelcoID: telcoID, Actor: approver,
 			Action: "recharge_hold.released", TargetType: "held_recharge",
 			TargetID: heldID, Reason: "maker-checker release; recovery " + res.RecoveryEventID,
 		})
-	})
-	if err != nil {
+	}); err != nil {
 		return res, err
 	}
 	s.Log.Warn("HELD recharge released (maker-checker) — ingested into recovery",
