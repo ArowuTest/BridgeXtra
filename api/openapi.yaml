@@ -1296,6 +1296,21 @@ paths:
         credited (ACTIVE). 202 = PROCESSING — the outcome is being resolved
         (never blind-retried); poll status_route (EDG-004/005). 422 = telco
         definitively rejected. Customer-safe statuses only (V2-ADV-016).
+
+
+        RETRY CONTRACT (BX-MED-001/002): a retry MUST resend the byte-identical body, INCLUDING
+        `accepted_at`. The idempotency hash covers the command AND its consent/legal evidence
+        (disclosure_ref, channel, session_id, accepted_at, telco_evidence), so a retry that
+        regenerates `accepted_at` is a DIFFERENT acceptance claim and is refused 409
+        IDEMPOTENCY_KEY_REUSED — it is not replayed. `accepted_at` is evidence of when the customer
+        accepted, not of when the request was sent; it is normalised to whole UTC seconds, so
+        sub-second and timezone-equivalent representations of the same instant still replay.
+
+
+        The replayed status is the one the ORIGINAL confirm earned, recorded with the outcome in a
+        single transaction: a replayed 202 stays 202 (still pending — keep polling) and a replayed
+        422 stays 422, even if the advance has since progressed. Only an already-created ACTIVE
+        advance replays as 200.
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
         - $ref: "#/components/parameters/CorrelationId"

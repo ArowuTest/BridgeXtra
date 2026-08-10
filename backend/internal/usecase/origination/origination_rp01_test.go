@@ -33,7 +33,12 @@ func TestRP01_SameKeyDifferentOffer_DivergentDuplicate(t *testing.T) {
 	if len(offers) < 2 {
 		t.Fatal("need >=2 offers")
 	}
-	r1, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_sim_0001", "rp01-k1", "cor-1"))
+	// Build the ORIGINAL command once so the replay below is byte-identical. BX-MED-001 put the
+	// acceptance evidence (including accepted_at) in the idempotency hash, so rebuilding it would
+	// regenerate accepted_at and make the "same-body replay" a divergent duplicate whenever the
+	// two calls straddle a one-second boundary — a timing-dependent failure, not a real one.
+	original := acceptFor(offers[0], "tok_sim_0001", "rp01-k1", "cor-1")
+	r1, err := f.svc.Confirm(tenantCtx(), original)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,8 +61,11 @@ func TestRP01_SameKeyDifferentOffer_DivergentDuplicate(t *testing.T) {
 	if audits != 1 {
 		t.Fatalf("divergent duplicate must record a security audit, got %d", audits)
 	}
-	// A later SAME-body replay of the ORIGINAL request still works.
-	r2, err := f.svc.Confirm(tenantCtx(), acceptFor(offers[0], "tok_sim_0001", "rp01-k1", "cor-3"))
+	// A later SAME-body replay of the ORIGINAL request still works. Correlation id is per-attempt
+	// tracing and is deliberately NOT in the hash, so varying it must not affect the replay.
+	replay := original
+	replay.CorrelationID = "cor-3"
+	r2, err := f.svc.Confirm(tenantCtx(), replay)
 	if err != nil || !r2.Replayed || r2.Advance.AdvanceID != r1.Advance.AdvanceID {
 		t.Fatalf("same-request replay must still return the original advance: %+v %v", r2, err)
 	}

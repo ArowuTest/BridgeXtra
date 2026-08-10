@@ -111,7 +111,14 @@ func TestM2E_ConsentEvidence_WrittenInConfirmTx(t *testing.T) {
 	offers := f.offersFor(t, "tok_sim_0001")
 	ov := offers[0]
 
-	res, err := f.svc.Confirm(tenantCtx(), acceptFor(ov, "tok_sim_0001", "cns-confirm-1", "cor-cns-1"))
+	// ONE command, used for both the original and the replay below. BX-MED-001 made the acceptance
+	// evidence — including accepted_at — part of the idempotency hash, so a retry is only a replay
+	// when it resends the IDENTICAL body. Rebuilding the command per call regenerates accepted_at
+	// and produces a genuinely divergent duplicate (correctly refused) whenever the two calls
+	// straddle a one-second boundary: a latent, timing-dependent failure that passed on a fast
+	// machine and failed in CI. Every other replay test in this package already builds once.
+	cmd := acceptFor(ov, "tok_sim_0001", "cns-confirm-1", "cor-cns-1")
+	res, err := f.svc.Confirm(tenantCtx(), cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,8 +157,8 @@ func TestM2E_ConsentEvidence_WrittenInConfirmTx(t *testing.T) {
 		t.Fatalf("consent must record the EXACT disclosed terms + rendered text: %s", terms)
 	}
 
-	// Replay does not duplicate consent (UNIQUE(advance_id)).
-	if _, err := f.svc.Confirm(tenantCtx(), acceptFor(ov, "tok_sim_0001", "cns-confirm-1", "cor-cns-1")); err != nil {
+	// Replay (the IDENTICAL command) does not duplicate consent (UNIQUE(advance_id)).
+	if _, err := f.svc.Confirm(tenantCtx(), cmd); err != nil {
 		t.Fatal(err)
 	}
 	var consents int
