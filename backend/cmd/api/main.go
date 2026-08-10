@@ -1,17 +1,30 @@
-// cmd/api — platform API service. M0 scope: boot-time self-migration, tenant
-// middleware, health, and a tenant-scoped programmes endpoint proving the
-// context flows end to end.
+// cmd/api — platform API service: boot-time self-migration, tenant middleware,
+// health, the channel + recharge-webhook money surface, the operator portal, and a
+// tenant-scoped programmes endpoint.
+//
+// BX-HIGH-012 Part B (control-plane / data-plane split): TCP_API_MODE selects which
+// surface this process serves —
+//   - "data"    — the PUBLIC data plane: channel API + recharge webhook + tenant
+//     programmes. Runs on tcp_app only; opens NO tcp_config/operator pool
+//     and mounts NO portal/config routes. This is the internet-facing tier.
+//   - "control" — the INTERNAL control plane: operator portal + config governance +
+//     the programme->telco resolver, on tcp_app + tcp_operator + tcp_config.
+//     Deploy internal-only (not reachable from the public internet).
+//   - "all"     — both surfaces in one process (default; local dev + single-service
+//     deployments). Non-breaking: identical to the pre-split wiring.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/handler"
@@ -42,23 +55,154 @@ func env(k, def string) string {
 	return def
 }
 
+// planes records which surfaces this process serves.
+type planes struct {
+	serveData    bool
+	serveControl bool
+}
+
+// resolvePlanes maps TCP_API_MODE to the surfaces to mount. An unknown mode is a
+// fatal misconfiguration (fail-closed), never a silent default.
+func resolvePlanes(mode string) (planes, error) {
+	switch mode {
+	case "", "all":
+		return planes{serveData: true, serveControl: true}, nil
+	case "data":
+		return planes{serveData: true}, nil
+	case "control":
+		return planes{serveControl: true}, nil
+	default:
+		return planes{}, fmt.Errorf("invalid TCP_API_MODE %q (want: all | data | control)", mode)
+	}
+}
+
+// serverDeps are the process-lifetime dependencies buildMux mounts routes onto.
+// OperatorPool and ConfigPool are nil for a pure data-plane process — it neither
+// opens nor needs them (BX-HIGH-012: config/resolver privilege is absent from the
+// public surface).
+type serverDeps struct {
+	AppPool      *pgxpool.Pool
+	OperatorPool *pgxpool.Pool // control plane only
+	ConfigPool   *pgxpool.Pool // control plane only
+	Log          *slog.Logger
+}
+
+// buildMux constructs the HTTP mux for the requested planes. Route mounting is the
+// SINGLE place the split is enforced: a data-plane process mounts channel + webhook +
+// programmes; a control-plane process mounts the portal. /healthz is always present.
+func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, error) {
+	// R-P0-8: inbound rate limiter from governed config — fail-closed (the process
+	// refuses to boot without it, so no surface ever runs unlimited). Read via the app
+	// role, which has SELECT on config_versions — no config/BYPASSRLS pool needed here,
+	// which is what lets a data-plane process load its limiter without a config pool.
+	limiter, trustedProxies, err := handler.LoadRateLimiter(ctx, configsvc.New(d.AppPool))
+	if err != nil {
+		return nil, fmt.Errorf("rate limiter (required at boot): %w", err)
+	}
+
+	// Money core on the app role — shared usecase logic over the same DB, used by the
+	// channel (data plane) and by the portal's re-arm/demo paths (control plane).
+	appCfg := configsvc.New(d.AppPool)
+	led := ledger.New(appCfg)
+	rec := recovery.New(d.AppPool, appCfg, led, d.Log)
+	orig := origination.New(d.AppPool, appCfg, led, mno.NewHTTPAdapter(appCfg), d.Log)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", handler.Health(d.AppPool))
+
+	if p.serveControl {
+		// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC. Config is
+		// managed ONLY through the portal — RBAC- (ADMIN-only for mutations) and scope-
+		// gated; config governance + the programme->telco resolver run on tcp_config. The
+		// former header-authenticated admin config API was removed in EXT-1 (a role-unaware
+		// parallel door). Re-arm actions run as the app role in a tenant tx; operator reads
+		// run on the RLS-enforced tcp_operator pool inside a scope-set tx (OperatorReader),
+		// with the tcp_config pool as the trusted programme->telco resolver only.
+		portal := &handler.Portal{
+			Admins:            &repo.Admins{Pool: d.AppPool},
+			Sessions:          &repo.PortalSessions{Pool: d.AppPool},
+			Config:            configsvc.New(d.ConfigPool),
+			Treasury:          treasury.New(d.AppPool, configsvc.New(d.AppPool), d.Log),
+			Ops:               ops.New(d.AppPool, configsvc.New(d.AppPool), d.Log),
+			Settlement:        settlement.New(d.AppPool, configsvc.New(d.AppPool), d.Log),
+			Recovery:          rec,
+			Collections:       collections.New(d.AppPool, appCfg, led, d.Log),
+			Demo:              ops.NewDemo(d.AppPool, appCfg, orig, d.Log),
+			Operator:          repo.OperatorReader{Pool: d.OperatorPool, Resolve: d.ConfigPool},
+			Audit:             repo.Audit{},
+			Pool:              d.AppPool,
+			Operators:         operatormgmt.New(d.AppPool, d.Log),
+			Held:              rechargehold.New(d.AppPool, rec, d.Log),
+			Limiter:           limiter,
+			TrustedProxyCount: trustedProxies,
+			Log:               d.Log,
+		}
+		portal.Mount(mux)
+	}
+
+	if p.serveData {
+		telcos := &repo.Telcos{Pool: d.AppPool}
+		auth := &handler.TenantAuth{Telcos: telcos, Pool: d.AppPool, Log: d.Log}
+		programmes := repo.Programmes{}
+
+		channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, TrustedProxyCount: trustedProxies, Log: d.Log}
+		channel.Mount(mux, auth)
+
+		// Phase 1 S2: the inbound MNO recharge webhook (HMAC-authenticated, its own
+		// middleware chain, feeding the same recovery money core). DORMANT until a telco
+		// is armed (feed enabled at both scopes + its RECOVERY recon layer live).
+		rechargeHook := &handler.RechargeWebhook{
+			Recovery: rec, Config: appCfg,
+			Creds: &repo.WebhookCredentials{Pool: d.AppPool}, Recon: &repo.ReconArming{Pool: d.AppPool},
+			Pool: d.AppPool, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
+			Limiter: limiter, TrustedProxyCount: trustedProxies, Log: d.Log,
+		}
+		rechargeHook.Mount(mux)
+
+		mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := r.Context()
+			var out []entity.Programme
+			err := repo.WithTenantTx(ctx, d.AppPool, func(tx pgx.Tx) error {
+				var e error
+				out, e = programmes.ListForTenant(ctx, tx)
+				return e
+			})
+			if err != nil {
+				http.Error(w, `{"error_code":"SYSTEM_TEMPORARILY_UNAVAILABLE"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(out)
+		})))
+	}
+
+	return mux, nil
+}
+
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.Background()
 
+	mode := env("TCP_API_MODE", "all")
+	p, err := resolvePlanes(mode)
+	if err != nil {
+		log.Error("api mode", "err", err)
+		os.Exit(1)
+	}
+	log.Info("api mode", "mode", mode, "serve_data", p.serveData, "serve_control", p.serveControl)
+
 	adminDSN := env("TCP_ADMIN_DSN", "postgres://postgres:devlocal@localhost:5434/telco_credit")
 	appDSN := env("TCP_APP_DSN", "postgres://tcp_app:devlocal_app@localhost:5434/telco_credit")
-	// BX-HIGH-012 (control-plane / data-plane split, Stage 1): the request-serving
-	// API no longer holds a BYPASSRLS pool. Config governance and the programme->telco
-	// resolver run on the dedicated NON-BYPASSRLS tcp_config role (migration 0076),
-	// whose only cross-tenant reach is a SELECT-only two-column programmes policy.
+	// BX-HIGH-012 Stage 1: config governance + the programme->telco resolver run on the
+	// dedicated NON-BYPASSRLS tcp_config role (migration 0076), whose only cross-tenant
+	// reach is a SELECT-only two-column programmes policy. Opened only in control mode.
 	configDSN := env("TCP_CONFIG_DSN", "postgres://tcp_config:devlocal_config@localhost:5434/telco_credit")
 	operatorDSN := env("TCP_OPERATOR_DSN", "postgres://tcp_operator:devlocal_operator@localhost:5434/telco_credit")
 	addr := env("TCP_API_ADDR", ":8090")
 
-	// #44 (VR-32 prod hardening): in production, block loopback + private-range
-	// egress too — every legitimate outbound target (the real telco) is public.
-	// Default off so dev/Render private-network traffic keeps working.
+	// #44 (VR-32 prod hardening): in production, block loopback + private-range egress
+	// too — every legitimate outbound target (the real telco) is public. Default off so
+	// dev/Render private-network traffic keeps working.
 	egress.SetBlockPrivate(env("TCP_EGRESS_BLOCK_PRIVATE", "false") == "true")
 	log.Info("egress guard", "block_private_ranges", egress.BlockPrivateEnabled())
 
@@ -79,8 +223,8 @@ func main() {
 		} else if n > 0 {
 			log.Info("migrations applied", "count", n)
 		}
-		// Rotate role passwords from the environment (production must never run
-		// on the dev passwords baked into 0001 — V2-SEC-005).
+		// Rotate role passwords from the environment (production must never run on the
+		// dev passwords baked into 0001 — V2-SEC-005).
 		if rotated, err := dbroles.ApplyPasswords(ctx, adminPool); err != nil {
 			log.Error("role password rotation failed", "err", err)
 			os.Exit(1)
@@ -99,27 +243,25 @@ func main() {
 	}
 	defer appPool.Close()
 
-	// Config governance + the programme->telco resolver run on the least-privilege
-	// tcp_config role (migration 0076): INSERT/UPDATE/SELECT on the global
-	// config_versions table + a SELECT-only, two-column programmes resolver policy.
-	// It holds NO BYPASSRLS — a compromise of this process cannot read or write any
-	// tenant's money/subscriber data through it (BX-HIGH-012).
-	configPool, err := platform.NewPool(ctx, configDSN)
-	if err != nil {
-		log.Error("config db connect failed", "err", err)
-		os.Exit(1)
+	// Control-plane pools: the operator (RLS read-only) and config (least-privilege
+	// governance/resolver) pools are opened ONLY when this process serves the control
+	// plane. A pure data-plane process (TCP_API_MODE=data) never holds them — the
+	// public surface carries no config/resolver privilege at all (BX-HIGH-012 Stage 2).
+	var operatorPool, configPool *pgxpool.Pool
+	if p.serveControl {
+		operatorPool, err = platform.NewPool(ctx, operatorDSN)
+		if err != nil {
+			log.Error("operator db connect failed", "err", err)
+			os.Exit(1)
+		}
+		defer operatorPool.Close()
+		configPool, err = platform.NewPool(ctx, configDSN)
+		if err != nil {
+			log.Error("config db connect failed", "err", err)
+			os.Exit(1)
+		}
+		defer configPool.Close()
 	}
-	defer configPool.Close()
-
-	// Gate B #1: the RLS-enforced read-only operator pool. Portal operator reads
-	// run here inside a scope-set tx (repo.OperatorReader); the tcp_config pool is
-	// the trusted resolver for programme->telco only.
-	operatorPool, err := platform.NewPool(ctx, operatorDSN)
-	if err != nil {
-		log.Error("operator db connect failed", "err", err)
-		os.Exit(1)
-	}
-	defer operatorPool.Close()
 
 	// Governed money formatting: load the currency display scale (decimals + symbol)
 	// ONCE from the seeded `currencies` table and hand it to the handler layer, so
@@ -133,96 +275,21 @@ func main() {
 		log.Info("currency formats loaded", "count", len(formats))
 	}
 
-	telcos := &repo.Telcos{Pool: appPool}
-	auth := &handler.TenantAuth{Telcos: telcos, Pool: appPool, Log: log}
-	programmes := repo.Programmes{}
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handler.Health(appPool))
-
-	// Config is managed ONLY through the portal — RBAC- (ADMIN-only for
-	// mutations) and scope-gated. The former header-authenticated admin config
-	// API was removed in EXT-1: it was a role-unaware parallel door to the same
-	// configsvc. Any future config automation gets a distinctly-classified
-	// service principal on this same RBAC chain, never a header bypass.
-
-	// Channel + recovery services (M1 walking skeleton; recovery is shared
-	// with the portal's M4e parked-reversal retry — ONE money core, not two).
-	appCfg := configsvc.New(appPool)
-	led := ledger.New(appCfg)
-	orig := origination.New(appPool, appCfg, led, mno.NewHTTPAdapter(appCfg), log)
-	rec := recovery.New(appPool, appCfg, led, log)
-
-	// R-P0-8: inbound rate limiter from governed config — fail-closed: the API
-	// refuses to boot without it, so no surface ever runs unlimited.
-	limiter, trustedProxies, err := handler.LoadRateLimiter(ctx, configsvc.New(configPool))
+	mux, err := buildMux(ctx, p, serverDeps{
+		AppPool:      appPool,
+		OperatorPool: operatorPool,
+		ConfigPool:   configPool,
+		Log:          log,
+	})
 	if err != nil {
-		log.Error("rate limiter (required at boot)", "err", err)
+		log.Error("build mux failed", "err", err)
 		os.Exit(1)
 	}
-
-	// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC.
-	portal := &handler.Portal{
-		Admins:   &repo.Admins{Pool: appPool},
-		Sessions: &repo.PortalSessions{Pool: appPool},
-		Config:   configsvc.New(configPool),
-		// Re-arm actions run as the app role in a tenant tx; operator reads run on
-		// the RLS-enforced tcp_operator pool inside a scope-set tx (OperatorReader),
-		// with the tcp_config pool as the trusted programme->telco resolver only.
-		Treasury:    treasury.New(appPool, configsvc.New(appPool), log),
-		Ops:         ops.New(appPool, configsvc.New(appPool), log),
-		Settlement:  settlement.New(appPool, configsvc.New(appPool), log),
-		Recovery:    rec,
-		Collections: collections.New(appPool, appCfg, led, log),
-		Demo:        ops.NewDemo(appPool, appCfg, orig, log),
-		Operator:    repo.OperatorReader{Pool: operatorPool, Resolve: configPool},
-		// B.2a MSISDN reveal: append-only audit on the app pool (platform-scope row,
-		// telco in detail). The reveal fails closed if this write fails.
-		Audit: repo.Audit{},
-		Pool:  appPool,
-		// Governed operator provisioning runs on the app role: migration 0047
-		// grants it exactly INSERT + UPDATE(status) on admin_credentials (create
-		// + revoke), and nothing on role/scope — write-once is DB-enforced.
-		Operators:         operatormgmt.New(appPool, log),
-		Held:              rechargehold.New(appPool, rec, log),
-		Limiter:           limiter,
-		TrustedProxyCount: trustedProxies,
-		Log:               log,
-	}
-	portal.Mount(mux)
-	channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, TrustedProxyCount: trustedProxies, Log: log}
-	channel.Mount(mux, auth)
-
-	// Phase 1 S2: the inbound MNO recharge webhook (HMAC-authenticated, its own
-	// middleware chain, feeding the same recovery money core). DORMANT until a
-	// telco is armed (feed enabled at both scopes + its RECOVERY recon layer live).
-	rechargeHook := &handler.RechargeWebhook{
-		Recovery: rec, Config: appCfg,
-		Creds: &repo.WebhookCredentials{Pool: appPool}, Recon: &repo.ReconArming{Pool: appPool},
-		Pool: appPool, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
-		Limiter: limiter, TrustedProxyCount: trustedProxies, Log: log,
-	}
-	rechargeHook.Mount(mux)
-	mux.Handle("GET /v1/programmes", auth.Wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		var out []entity.Programme
-		err := repo.WithTenantTx(ctx, appPool, func(tx pgx.Tx) error {
-			var e error
-			out, e = programmes.ListForTenant(ctx, tx)
-			return e
-		})
-		if err != nil {
-			http.Error(w, `{"error_code":"SYSTEM_TEMPORARILY_UNAVAILABLE"}`, http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
-	})))
 
 	// Gate B: baseline security headers on every response (SSRF-adjacent pen-test
 	// hardening — a JSON API that serves no active content of its own).
 	srv := &http.Server{Addr: addr, Handler: handler.SecurityHeaders(mux), ReadHeaderTimeout: 10 * time.Second}
-	log.Info("api listening", "addr", addr)
+	log.Info("api listening", "addr", addr, "mode", mode)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
