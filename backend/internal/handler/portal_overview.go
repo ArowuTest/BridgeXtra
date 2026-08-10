@@ -109,14 +109,16 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 	// three terms are fee-inclusive: recovered = Σ recovery allocations, open_outstanding
 	// includes unpaid fee, and WrittenOff is the full face written off (D1) — so a
 	// written-off loan lowers the ratio by its full owed amount, not just principal.
+	// BX-MED-008: the ratio is computed SERVER-SIDE from int64 minor units and shipped as integer
+	// BASIS POINTS. It was a float64 division of two int64s: for a portfolio-scale numerator and
+	// denominator that silently loses precision, and shipping a float invites the client to do
+	// further arithmetic on it. Integer bps is exact, and the invariant "no client-side monetary
+	// arithmetic using JS Number" holds because the client never sees a money integer to divide.
 	recovered := data.summary.Recovered.Amount()
 	openOut := data.summary.OpenOutstanding.Amount()
 	writtenOff := data.extras.WrittenOff.Amount()
 	denom := recovered + openOut + writtenOff
-	var paydownRatio float64
-	if denom > 0 {
-		paydownRatio = float64(recovered) / float64(denom)
-	}
+	paydownBps := ratioBps(recovered, denom)
 
 	// Per-programme health: read the governed ceilings now (config service's own pool),
 	// degrading gracefully if a programme has no resolvable treasury.guardrails config.
@@ -150,6 +152,9 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 				if head, e := capM.Sub(td); e == nil {
 					row["daily_headroom"] = toMoneyView(head)
 				}
+				// BX-MED-008: utilisation is computed HERE, from int64 minor units, as exact integer
+				// basis points. The dashboard used to divide two amount_minor values in JavaScript.
+				row["cap_util_bps"] = ratioBps(td.Amount(), capM.Amount())
 			}
 		}
 
@@ -170,6 +175,8 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 					if head, e := limitM.Sub(exposure); e == nil {
 						pool["exposure_headroom"] = toMoneyView(head)
 					}
+					// BX-MED-008: exposure utilisation as exact integer bps, server-side.
+					pool["exposure_util_bps"] = ratioBps(exposure.Amount(), limitM.Amount())
 				}
 			}
 			row["pool"] = pool
@@ -193,7 +200,7 @@ func (p *Portal) opsOverview(w http.ResponseWriter, r *http.Request) {
 		"by_bucket_value": byBucketValueJSON(data.summary.ByBucketValue), // A9
 		"collected_today": toMoneyView(data.extras.CollectedToday),       // B3
 		"written_off":     toMoneyView(data.extras.WrittenOff),           // B4 denominator term — full face
-		"paydown_ratio":   paydownRatio,                                  // B4 — a proportion; labelled honestly on the client
+		"paydown_bps":     paydownBps,                                    // B4 — exact integer basis points (BX-MED-008)
 		"paydown_ratio_basis": map[string]any{
 			"recovered":        toMoneyView(data.summary.Recovered),
 			"open_outstanding": toMoneyView(data.summary.OpenOutstanding),

@@ -66,7 +66,7 @@ type ovResponse struct {
 	ByBucketValue  map[string]ovMoney `json:"by_bucket_value"`
 	CollectedToday ovMoney            `json:"collected_today"`
 	WrittenOff     ovMoney            `json:"written_off"`
-	PaydownRatio   float64            `json:"paydown_ratio"`
+	PaydownBps     int64              `json:"paydown_bps"`
 	Programmes     []ovProgramme      `json:"programmes"`
 }
 
@@ -172,8 +172,8 @@ func TestOverview_AddTiles_B3_B4_A9_AndScopeFailClosed(t *testing.T) {
 	}
 	// B4 paydown ratio = recovered / (recovered + open + written-off) = 2000/(2000+8000+3000).
 	want := 2000.0 / 13000.0
-	if diff := r.PaydownRatio - want; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("paydown_ratio must be recovered/(recovered+open+written-off) = %.6f, got %.6f — the write-off must LOWER it, not be omitted", want, r.PaydownRatio)
+	if wantBps := int64(want*10000 + 0.5); r.PaydownBps != wantBps {
+		t.Fatalf("paydown_bps must be recovered/(recovered+open+written-off) = %d bps, got %d — the write-off must LOWER it, not be omitted", wantBps, r.PaydownBps)
 	}
 	// A9 — ₦ arrears in the (unclassified) bucket equals that advance's outstanding, as money.
 	b, ok := r.ByBucketValue["UNCLASSIFIED"]
@@ -195,8 +195,8 @@ func TestOverview_AddTiles_B3_B4_A9_AndScopeFailClosed(t *testing.T) {
 		t.Fatalf("no-authority operator must see zeros, got count=%d collected=%d written=%d",
 			gr.Summary.TotalCount, gr.CollectedToday.AmountMinor, gr.WrittenOff.AmountMinor)
 	}
-	if gr.PaydownRatio != 0 {
-		t.Fatalf("no-authority paydown_ratio must be 0 (denominator zero), got %.6f", gr.PaydownRatio)
+	if gr.PaydownBps != 0 {
+		t.Fatalf("no-authority paydown_bps must be 0 (denominator zero), got %d", gr.PaydownBps)
 	}
 	if len(gr.Programmes) != 0 {
 		t.Fatalf("no-authority operator must see NO programmes, got %d", len(gr.Programmes))
@@ -399,7 +399,7 @@ func TestOverview_PaydownDenominator_UsesFullFaceWrittenOff(t *testing.T) {
 	// Denominator = recovered + open + written-off face = 1000 + 4000 + 1000 = 6000.
 	// The old net basis would give 1000/(1000+4000+700) = 0.1724 — higher (overstated).
 	want := 1000.0 / 6000.0
-	if diff := r.PaydownRatio - want; diff > 1e-9 || diff < -1e-9 {
-		t.Fatalf("paydown_ratio must use the full face in the denominator (= %.6f), got %.6f", want, r.PaydownRatio)
+	if wantBps := int64(want*10000 + 0.5); r.PaydownBps != wantBps {
+		t.Fatalf("paydown_bps must use the full face in the denominator (= %d bps), got %d", wantBps, r.PaydownBps)
 	}
 }

@@ -36,6 +36,11 @@ type moneyView struct {
 	AmountMinor int64  `json:"amount_minor,string"`
 	Currency    string `json:"currency"`
 	Display     string `json:"display"` // server-formatted; the UI never computes money
+	// Sign is the server's answer to "is this positive / zero / negative" (-1, 0, 1). BX-MED-008:
+	// without it, a client asking "is there anything here?" must convert amount_minor to a JS
+	// Number, which is monetary arithmetic on a value that can exceed 2^53. Comparing an integer
+	// -1/0/1 is exact and needs no money in the browser at all.
+	Sign int `json:"sign"`
 }
 
 // groupMinor renders an exact minor-unit integer with thousands separators —
@@ -63,10 +68,19 @@ func groupMinor(n int64) string {
 }
 
 func toMoneyView(m entity.Money) moneyView {
+	amt := m.Amount()
+	sign := 0
+	switch {
+	case amt > 0:
+		sign = 1
+	case amt < 0:
+		sign = -1
+	}
 	return moneyView{
-		AmountMinor: m.Amount(),
+		AmountMinor: amt,
 		Currency:    string(m.Currency()),
-		Display:     formatMoney(m.Amount(), string(m.Currency())),
+		Display:     formatMoney(amt, string(m.Currency())),
+		Sign:        sign,
 	}
 }
 

@@ -33,6 +33,7 @@ import {
   RepaymentOutlook,
   subscriberProfile,
   subscriberReveal,
+  moneyIsPositive,
 } from "@/lib/api";
 import { fmtDate, fmtDateTime } from "@/lib/datetime";
 import { stateLabel, bucketLabel } from "@/lib/labels";
@@ -386,7 +387,7 @@ function OutlookCard({ o }: { o: RepaymentOutlook }) {
       <Text size="sm" c="dimmed" mt={6}>
         {o.note}
       </Text>
-      {Number(o.recovered_in_window.amount_minor) > 0 && (
+      {moneyIsPositive(o.recovered_in_window) && (
         <Text size="xs" c="dimmed" mt={4}>
           Repaid in the last {o.window_days} days: {o.recovered_in_window.display} across {o.active_weeks} week
           {o.active_weeks === 1 ? "" : "s"}.

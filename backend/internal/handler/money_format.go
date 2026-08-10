@@ -72,6 +72,23 @@ func formatMoney(minor int64, code string) string {
 	return b.String()
 }
 
+// ratioBps renders part/whole as exact integer BASIS POINTS (BX-MED-008), so no ratio the portal
+// displays is ever computed from money in JavaScript. Integer arithmetic throughout: no float ever
+// touches a money value. Saturates at 0 for a non-positive denominator (nothing to be a part of),
+// and the multiplication is done on int64 with an overflow guard — 10_000 * part can only overflow
+// for values far beyond any real portfolio, and silently wrapping a money ratio is not acceptable.
+func ratioBps(part, whole int64) int64 {
+	if whole <= 0 || part <= 0 {
+		return 0
+	}
+	const bpsScale = 10_000
+	if part > (1<<62)/bpsScale {
+		// Beyond plausible money; clamp rather than wrap. Reaching this means a bug upstream.
+		return bpsScale
+	}
+	return (part * bpsScale) / whole
+}
+
 func pow10(n int) int64 {
 	p := int64(1)
 	for i := 0; i < n; i++ {

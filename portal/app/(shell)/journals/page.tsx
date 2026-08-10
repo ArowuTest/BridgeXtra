@@ -16,6 +16,7 @@ import {
   JournalHeader,
   ledgerJournal,
   ledgerJournals,
+  moneyIsPositive,
 } from "@/lib/api";
 
 function fmtErr(err: unknown): string {
@@ -154,10 +155,10 @@ export default function JournalsPage() {
                 <tr key={e.entry_id}>
                   <td className="mono">{e.account_code}</td>
                   <td className="mono" style={{ textAlign: "right" }}>
-                    {Number(e.debit.amount_minor) > 0 ? e.debit.display : ""}
+                    {moneyIsPositive(e.debit) ? e.debit.display : ""}
                   </td>
                   <td className="mono" style={{ textAlign: "right" }}>
-                    {Number(e.credit.amount_minor) > 0 ? e.credit.display : ""}
+                    {moneyIsPositive(e.credit) ? e.credit.display : ""}
                   </td>
                 </tr>
               ))}

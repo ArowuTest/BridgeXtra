@@ -131,10 +131,38 @@ export function configLifecycle(id: string, step: "submit" | "approve" | "activa
 // --- M4c risk workspace ---
 
 // BX-MED-008: amount_minor is an int64 (kobo) and a portfolio-level aggregate can exceed
-// Number.MAX_SAFE_INTEGER (2^53), so the API sends it as a STRING to preserve exact precision.
-// Render `display` (the exact server-formatted value); use Number(amount_minor) only for the rare
-// ratio / positivity check, never to display an exact amount.
-export type MoneyView = { amount_minor: string; currency: string; display: string };
+// Number.MAX_SAFE_INTEGER (2^53), so the API sends it as a STRING.
+//
+// THE INVARIANT: no client-side monetary arithmetic using JS Number. Do NOT convert amount_minor
+// with Number()/parseInt()/parseFloat()/unary-plus, and do not do arithmetic on `display`.
+//   - to SHOW an amount, render `display` (server-formatted, exact);
+//   - to ask "is there anything here?", use `sign` (-1/0/1) via moneyIsPositive below;
+//   - for a RATIO, use the server's precomputed *_bps integers — never divide two amounts here.
+// A structural fence in the backend test suite fails the build if this is violated.
+export type MoneyView = {
+  amount_minor: string;
+  currency: string;
+  display: string;
+  // Optional ONLY to survive a deploy where the portal is newer than the API. Absent is treated as
+  // an error by moneyIsPositive rather than silently falsy — a missing sign must never read as
+  // "zero", which is the same wrong-answer class this finding is about.
+  sign?: -1 | 0 | 1;
+};
+
+/** Exact positivity, with no money arithmetic in the browser (BX-MED-008). */
+export function moneyIsPositive(m: MoneyView): boolean {
+  if (m.sign === undefined) {
+    throw new Error(
+      "MoneyView.sign missing — the API is older than this portal; refusing to infer a money comparison",
+    );
+  }
+  return m.sign > 0;
+}
+
+/** Render server-computed basis points as a 0..1 fraction for progress bars. Never money. */
+export function bpsToFraction(bps: number): number {
+  return bps / 10_000;
+}
 
 export type GuardrailTrip = {
   trip_id: string;
@@ -342,6 +370,7 @@ export type ProgrammeHealth = {
   telco_id: string;
   status: string; // ACTIVE / SUSPENDED
   today_disbursed: MoneyView; // C1 — same measure the DAILY_DISBURSED guardrail trips on
+  cap_util_bps?: number; // BX-MED-008: server-computed utilisation, exact integer bps
   cap_known: boolean; // false ⇒ no resolvable treasury.guardrails config (headroom omitted)
   daily_cap?: MoneyView;
   daily_headroom?: MoneyView; // cap − today (may be negative when over cap)
@@ -349,6 +378,7 @@ export type ProgrammeHealth = {
     committed: MoneyView;
     exposure?: MoneyView; // reserved + utilised (A10)
     exposure_limit?: MoneyView; // committed × governed bps
+    exposure_util_bps?: number; // BX-MED-008: server-computed, exact integer bps
     exposure_headroom?: MoneyView; // limit − exposure
     exposure_bps?: number; // the governed ceiling (read from config, not hardcoded)
   };
@@ -366,7 +396,7 @@ export type OpsOverview = {
   by_bucket_value: Record<string, MoneyView>; // A9 — ₦ arrears per delinquency bucket
   collected_today: MoneyView; // B3
   written_off: MoneyView; // B4 denominator term — full face written off (fee-inclusive)
-  paydown_ratio: number; // B4 — recovered / (recovered + open + written-off); 0..1
+  paydown_bps: number; // B4 — recovered / (recovered + open + written-off), exact integer basis points (BX-MED-008)
   paydown_ratio_basis: {
     recovered: MoneyView;
     open_outstanding: MoneyView;

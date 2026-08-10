@@ -27,7 +27,7 @@ import {
   Tooltip,
   Divider,
 } from "@mantine/core";
-import { me, opsOverview, ApiError, Session, OpsOverview, MoneyView, ProgrammeHealth } from "@/lib/api";
+import { me, opsOverview, ApiError, Session, OpsOverview, MoneyView, ProgrammeHealth, bpsToFraction } from "@/lib/api";
 import { fmtDateTime } from "@/lib/datetime";
 import { StatusBadge, Tone } from "@/components/StatusBadge";
 
@@ -43,11 +43,10 @@ function errMsg(e: unknown): string {
 function pct(ratio: number): string {
   return `${(ratio * 100).toFixed(1)}%`;
 }
-// utilisation ratio from two same-currency minor amounts — a ratio for a bar, not money.
-function util(usedMinor: number, capMinor: number): number {
-  if (capMinor <= 0) return 0;
-  return usedMinor / capMinor;
-}
+// BX-MED-008: utilisation is NOT computed here. Dividing two amount_minor values in JavaScript is
+// monetary arithmetic on int64s that can exceed 2^53, which is the defect this finding is about.
+// The server ships exact integer basis points (cap_util_bps / exposure_util_bps); this only
+// rescales that integer for a progress bar.
 function utilTone(r: number): "teal" | "yellow" | "red" {
   if (r >= 1) return "red";
   if (r >= 0.8) return "yellow";
@@ -154,7 +153,7 @@ function Overview({ d }: { d: OpsOverview }) {
       <Section title="Are they paying">
         <SimpleGrid cols={{ base: 2, md: 4 }}>
           <Tile label="Collected today" value={d.collected_today.display} accent sub="receivable reduction, today" />
-          <PaydownTile ratio={d.paydown_ratio} basis={d.paydown_ratio_basis} writtenOff={d.written_off} />
+          <PaydownTile bps={d.paydown_bps} basis={d.paydown_ratio_basis} writtenOff={d.written_off} />
         </SimpleGrid>
       </Section>
 
@@ -251,11 +250,11 @@ function ArrearsByBucket({
 // B4 — an honest paydown ratio, NOT a due-based collections rate (no schedule
 // exists). The basis is shown so the number can't be read as something it isn't.
 function PaydownTile({
-  ratio,
+  bps,
   basis,
   writtenOff,
 }: {
-  ratio: number;
+  bps: number;
   basis: OpsOverview["paydown_ratio_basis"];
   writtenOff: MoneyView;
 }) {
@@ -280,7 +279,7 @@ function PaydownTile({
         </Tooltip>
       </Group>
       <Text fw={700} size="xl">
-        {pct(ratio)}
+        {pct(bpsToFraction(bps))}
       </Text>
       <Text size="xs" c="dimmed">
         of the book paid down · {writtenOff.display} written off
@@ -291,12 +290,8 @@ function PaydownTile({
 
 // C1 + C2 + C3 + A10 for one programme.
 function ProgrammeCard({ p }: { p: ProgrammeHealth }) {
-  const capUtil =
-    p.cap_known && p.daily_cap ? util(Number(p.today_disbursed.amount_minor), Number(p.daily_cap.amount_minor)) : 0;
-  const expUtil =
-    p.pool?.exposure && p.pool?.exposure_limit
-      ? util(Number(p.pool.exposure.amount_minor), Number(p.pool.exposure_limit.amount_minor))
-      : 0;
+  const capUtil = bpsToFraction(p.cap_util_bps ?? 0);
+  const expUtil = bpsToFraction(p.pool?.exposure_util_bps ?? 0);
   return (
     <Card withBorder padding="md">
       <Stack gap="sm">
