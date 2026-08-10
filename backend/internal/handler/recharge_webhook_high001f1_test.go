@@ -268,7 +268,10 @@ func TestBXHIGH001F1_ConcurrentRetryVsApprove_NoDoubleBook(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); _, _ = hs.ApproveRelease(ctx, "SIM_NG", heldID, "checker") }()
-	go func() { defer wg.Done(); _ = f.post(t, "SIM_NG", whKeyID, whSecret, nowTS(), rechargeBodyAt("e2", 8_000, occ)).Body.Close() }()
+	go func() {
+		defer wg.Done()
+		_ = f.post(t, "SIM_NG", whKeyID, whSecret, nowTS(), rechargeBodyAt("e2", 8_000, occ)).Body.Close()
+	}()
 	wg.Wait()
 
 	if n := recoveryCountBySrc(t, f.db, "wh:e2"); n != 1 {

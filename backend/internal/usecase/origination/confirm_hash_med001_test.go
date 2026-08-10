@@ -36,7 +36,10 @@ func TestBXMED001_ConfirmHash_EquivalenceAndDivergence(t *testing.T) {
 	}
 
 	// accepted_at: sub-second precision and a timezone-equivalent instant normalise to the same hash.
-	if c := baseConfirmCmd(); func() bool { c.AcceptedAt = time.Date(2026, 8, 10, 12, 0, 0, 999_000_000, time.UTC); return confirmRequestHash(c) != base }() {
+	if c := baseConfirmCmd(); func() bool {
+		c.AcceptedAt = time.Date(2026, 8, 10, 12, 0, 0, 999_000_000, time.UTC)
+		return confirmRequestHash(c) != base
+	}() {
 		t.Fatal("sub-second accepted_at precision must normalise to the same hash")
 	}
 	if c := baseConfirmCmd(); func() bool {
