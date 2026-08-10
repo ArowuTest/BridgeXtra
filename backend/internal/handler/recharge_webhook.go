@@ -275,7 +275,7 @@ func (h *RechargeWebhook) ingest(w http.ResponseWriter, r *http.Request) {
 	// byte retry; recovery idempotency by source_event_id is the durable backstop.
 	var heldReason string
 	var reservedDay time.Time
-	var reserved bool
+	var reserved, reservedFresh bool
 	err = repo.WithTenantTx(ctx, h.Pool, func(tx pgx.Tx) error {
 		_, stored, e := (repo.Idempotency{}).PutIfAbsent(ctx, tx, entity.IdempotencyRecord{
 			TelcoID: telco, Operation: opRechargeWebhook,
@@ -299,12 +299,12 @@ func (h *RechargeWebhook) ingest(w http.ResponseWriter, r *http.Request) {
 			// row-locks the day counter so concurrent webhook deliveries serialize — the ceiling
 			// can never be raced past. The reservation is released below if the booking it
 			// guards fails or turns out to be an idempotent replay.
-			day, ok, e := (repo.HeldRecharge{}).ReserveDaily(ctx, tx, telco, ev.AmountMinor, v.cfg.PerTelcoDailyCeilingMinor)
+			day, ok, fresh, e := (repo.HeldRecharge{}).ReserveDaily(ctx, tx, telco, src, ev.AmountMinor, v.cfg.PerTelcoDailyCeilingMinor)
 			if e != nil {
 				return e
 			}
 			if ok {
-				reservedDay, reserved = day, true
+				reservedDay, reserved, reservedFresh = day, true, fresh
 			} else {
 				heldReason = repo.HeldReasonDailyCeiling
 			}
@@ -335,13 +335,14 @@ func (h *RechargeWebhook) ingest(w http.ResponseWriter, r *http.Request) {
 		SourceEventID: src, MSISDNToken: ev.MSISDNToken, Amount: amount,
 		OccurredAt: ev.OccurredAt, CorrelationID: platform.CorrelationFrom(ctx),
 	})
-	// BX-HIGH-001: the daily reservation guarded a NEW booking. Release it if the booking
-	// failed or was an idempotent replay (no new capacity consumed) — including a divergent
-	// duplicate, which reserves but books nothing. Best-effort: an un-released reservation
+	// BX-HIGH-001: release ONLY a FRESH reservation whose booking failed/diverged. A booking
+	// that replayed (out.Replayed) or a re-claimed retry (reservedFresh=false) already consumed
+	// this event's capacity exactly once via the per-event dedup, so there is nothing to release
+	// — releasing there would wrongly loosen the ceiling. Best-effort: an un-released reservation
 	// only makes the ceiling STRICTER (fail-safe), never looser.
-	if reserved && (err != nil || out.Replayed) {
+	if reserved && reservedFresh && err != nil {
 		if relErr := repo.WithTenantTx(ctx, h.Pool, func(tx pgx.Tx) error {
-			return (repo.HeldRecharge{}).ReleaseDaily(ctx, tx, telco, reservedDay, ev.AmountMinor)
+			return (repo.HeldRecharge{}).ReleaseDaily(ctx, tx, telco, reservedDay, ev.AmountMinor, src)
 		}); relErr != nil {
 			h.Log.Error("recharge webhook: daily reservation release failed (ceiling stays stricter — fail-safe)",
 				"telco", telco, "src", src, "err", relErr)

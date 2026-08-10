@@ -221,34 +221,72 @@ func (HeldRecharge) DailyIngestedMinor(ctx context.Context, tx pgx.Tx, telcoID s
 // ceiling (config enforces per_event_max <= daily_ceiling), so the INSERT path is always in
 // bounds. Runs on the caller's tenant tx (RLS-scoped) and uses the same UTC-day window as
 // DailyIngestedMinor.
-func (HeldRecharge) ReserveDaily(ctx context.Context, tx pgx.Tx, telcoID string, amount, ceiling int64) (time.Time, bool, error) {
-	var day time.Time
-	err := tx.QueryRow(ctx, `
-		INSERT INTO recharge_daily_reservation (telco_id, business_day, reserved_minor)
-		VALUES ($1, (now() AT TIME ZONE 'UTC')::date, $2)
-		ON CONFLICT (telco_id, business_day) DO UPDATE
-		   SET reserved_minor = recharge_daily_reservation.reserved_minor + $2
-		 WHERE recharge_daily_reservation.reserved_minor + $2 <= $3
-		RETURNING business_day`, telcoID, amount, ceiling).Scan(&day)
+// Returns (business_day, reserved, fresh, err): reserved is whether capacity is held for this
+// event (fresh OR already-claimed); fresh is whether THIS call took new counter capacity (so a
+// later ReleaseDaily should give it back). The per-event dedup makes a crash-retry or cross-MAC
+// replay of the same source_event_id idempotent — the counter is incremented exactly once per
+// event, so a retry can never consume capacity twice (BX-HIGH-001 crash-reservation hardening).
+func (HeldRecharge) ReserveDaily(ctx context.Context, tx pgx.Tx, telcoID, sourceEventID string, amount, ceiling int64) (day time.Time, reserved, fresh bool, err error) {
+	// 1. Idempotent per-event claim. A retry of the same source_event_id finds the existing
+	//    claim (crash between reserve and book, or a cross-MAC replay) and does not re-reserve.
+	err = tx.QueryRow(ctx, `
+		INSERT INTO recharge_reserved_event (telco_id, source_event_id, business_day, amount_minor)
+		VALUES ($1, $2, (now() AT TIME ZONE 'UTC')::date, $3)
+		ON CONFLICT (telco_id, source_event_id) DO NOTHING
+		RETURNING business_day`, telcoID, sourceEventID, amount).Scan(&day)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return time.Time{}, false, nil // would exceed the ceiling
+		// Already claimed on a prior attempt — capacity is already counted (idempotent).
+		if e := tx.QueryRow(ctx,
+			`SELECT business_day FROM recharge_reserved_event WHERE telco_id=$1 AND source_event_id=$2`,
+			telcoID, sourceEventID).Scan(&day); e != nil {
+			return time.Time{}, false, false, e
+		}
+		return day, true, false, nil
 	}
 	if err != nil {
-		return time.Time{}, false, err
+		return time.Time{}, false, false, err
 	}
-	return day, true, nil
+	// 2. Fresh claim: take the atomic counter capacity for the SAME day. The conditional UPSERT
+	//    row-locks the counter so concurrent DISTINCT events serialize against the ceiling.
+	var counterDay time.Time
+	cErr := tx.QueryRow(ctx, `
+		INSERT INTO recharge_daily_reservation (telco_id, business_day, reserved_minor)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (telco_id, business_day) DO UPDATE
+		   SET reserved_minor = recharge_daily_reservation.reserved_minor + $3
+		 WHERE recharge_daily_reservation.reserved_minor + $3 <= $4
+		RETURNING business_day`, telcoID, day, amount, ceiling).Scan(&counterDay)
+	if errors.Is(cErr, pgx.ErrNoRows) {
+		// Over the ceiling: undo the per-event claim so the event is HELD (and can be re-tried if
+		// capacity frees) — without this the claim would block a legitimate later retry.
+		if _, e := tx.Exec(ctx,
+			`DELETE FROM recharge_reserved_event WHERE telco_id=$1 AND source_event_id=$2`,
+			telcoID, sourceEventID); e != nil {
+			return time.Time{}, false, false, e
+		}
+		return time.Time{}, false, false, nil
+	}
+	if cErr != nil {
+		return time.Time{}, false, false, cErr
+	}
+	return day, true, true, nil
 }
 
-// ReleaseDaily returns a previously-reserved amount to the telco's per-day ceiling budget
-// (BX-HIGH-001) — called when the booking the reservation guarded did not consume new
-// capacity (the booking failed, or was an idempotent replay). Pass the exact business_day
-// ReserveDaily returned so a release near a UTC midnight can never decrement the wrong day.
-// The CHECK (reserved_minor >= 0) makes an over-release fail loudly rather than ever making
-// the ceiling looser. Runs on a tenant tx.
-func (HeldRecharge) ReleaseDaily(ctx context.Context, tx pgx.Tx, telcoID string, day time.Time, amount int64) error {
-	_, err := tx.Exec(ctx, `
+// ReleaseDaily returns a FRESHLY-reserved amount to the telco's per-day ceiling budget and
+// clears the per-event claim (BX-HIGH-001) — called when the booking a fresh reservation
+// guarded did not consume new capacity (the booking failed / diverged). Pass the exact
+// business_day ReserveDaily returned so a release near a UTC midnight can never decrement the
+// wrong day. Clearing the claim lets a genuine later retry re-reserve. The CHECK
+// (reserved_minor >= 0) makes an over-release fail loudly rather than ever loosening the ceiling.
+func (HeldRecharge) ReleaseDaily(ctx context.Context, tx pgx.Tx, telcoID string, day time.Time, amount int64, sourceEventID string) error {
+	if _, err := tx.Exec(ctx, `
 		UPDATE recharge_daily_reservation
 		   SET reserved_minor = reserved_minor - $3
-		 WHERE telco_id = $1 AND business_day = $2`, telcoID, day, amount)
+		 WHERE telco_id = $1 AND business_day = $2`, telcoID, day, amount); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx,
+		`DELETE FROM recharge_reserved_event WHERE telco_id=$1 AND source_event_id=$2`,
+		telcoID, sourceEventID)
 	return err
 }
