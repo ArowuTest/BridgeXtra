@@ -216,14 +216,18 @@ func (a *HTTPAdapter) SubmitFulfilment(ctx context.Context, telcoID, telcoIdempo
 
 	res := Result{RequestEvidence: body}
 
-	// R-P0-8b: if this telco's circuit is OPEN, do NOT dial a down telco —
-	// short-circuit to Unknown (INV-009: the resolver enquires when the telco
-	// recovers; money is never guessed). Exposure was reserved in the confirm
-	// tx already, so this only spares the doomed HTTP call.
+	// R-P0-8b + BX-HIGH-010: if this telco's circuit is OPEN, do NOT dial a down telco —
+	// short-circuit BEFORE HTTPClient.Do. This is a DETERMINISTIC non-send: nothing reached
+	// the telco, so classify FAILED+NotSent and let the saga RELEASE the reservation (a safe
+	// decline; the subscriber retries once the telco recovers). Mapping it to UNKNOWN would
+	// hold exposure as a zombie awaiting an enquiry that can only find NOT_FOUND — the telco
+	// has no record of a request we never sent. INV-009 forbids blind RETRY of a maybe-sent
+	// request; a definitely-not-sent request is a fresh decline, not a retry, so release is safe.
 	br := a.breakerFor(telcoID, cfg)
 	if !br.allow() {
-		res.Outcome = OutcomeUnknown
-		res.ResponseEvidence = []byte(`{"circuit_open":true}`)
+		res.Outcome = OutcomeFailed
+		res.NotSent = true
+		res.ResponseEvidence = []byte(`{"not_sent":true,"reason":"circuit_open"}`)
 		return res, nil
 	}
 

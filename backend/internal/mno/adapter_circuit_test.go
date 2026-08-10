@@ -1,9 +1,16 @@
 package mno_test
 
 // R-P0-8b: at the adapter level, a DOWN telco (persistent 5xx) trips the
-// circuit, and once open the adapter short-circuits to Unknown WITHOUT dialing
-// — no more doomed HTTP calls hammering the telco. The seeded policy is 50%
-// errors over 20 requests.
+// circuit, and once open the adapter short-circuits WITHOUT dialing — no more
+// doomed HTTP calls hammering the telco. The seeded policy is 50% errors over 20
+// requests.
+//
+// BX-HIGH-010: a 5xx that was SENT stays UNKNOWN (the telco received it; did it
+// process? ambiguous). But the circuit-OPEN short-circuit is a DETERMINISTIC
+// non-send (nothing dialled) — it must classify FAILED+NotSent so the saga
+// RELEASES the reservation, not a zombie UNKNOWN holding exposure for a request
+// that was never sent. Mutation proof: revert the circuit-open branch to
+// OutcomeUnknown and the post-open assertions below go red.
 
 import (
 	"context"
@@ -48,14 +55,18 @@ func TestRP08B_CircuitOpensOnTelcoDown_ShortCircuits(t *testing.T) {
 		t.Fatalf("expected 20 dials before the circuit opens, got %d", dialed)
 	}
 
-	// The circuit is now OPEN: the next call short-circuits to Unknown and does
-	// NOT dial the down telco.
+	// The circuit is now OPEN: the next call short-circuits WITHOUT dialing, and —
+	// BX-HIGH-010 — classifies FAILED+NotSent (a definite non-send releases the
+	// reservation), NOT a zombie UNKNOWN. Evidence records circuit_open.
 	res, err := a.SubmitFulfilment(ctx, "SIM_NG", "k-after-open", req("PRQ", "tok_sim_0001"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Outcome != mno.OutcomeUnknown || !strings.Contains(string(res.ResponseEvidence), "circuit_open") {
-		t.Fatalf("open circuit must short-circuit to Unknown with circuit_open evidence, got %s / %s", res.Outcome, res.ResponseEvidence)
+	if res.Outcome != mno.OutcomeFailed || !res.NotSent {
+		t.Fatalf("open circuit is a deterministic non-send: must be FAILED+NotSent (release), got outcome=%s notSent=%v (BX-HIGH-010)", res.Outcome, res.NotSent)
+	}
+	if !strings.Contains(string(res.ResponseEvidence), "circuit_open") {
+		t.Fatalf("open-circuit evidence must record circuit_open, got %s", res.ResponseEvidence)
 	}
 	if atomic.LoadInt64(&hits) != 20 {
 		t.Fatalf("an open circuit must NOT dial the telco, dials rose to %d", atomic.LoadInt64(&hits))
