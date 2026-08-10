@@ -118,3 +118,98 @@ func TestBXMED010_ProgrammeConfinement_ThroughOperatorReaderChokepoint(t *testin
 		t.Fatal("BX-MED-010: through the chokepoint, a programme:airtime session must NOT see a sibling programme's advance")
 	}
 }
+
+// BX-MED-010 (follow-up): the confinement must hold for EVERY programme-grained protected table,
+// not just advances. Migration 0081 covers journals, guardrail_trips and settlement_statements too;
+// an untested policy is an assumed one.
+func TestBXMED010_ProgrammeConfinement_AllProtectedTables(t *testing.T) {
+	db := testutil.MustSetup(t, "med010_tables")
+	seedTwoProgrammeAdvancesSIM(t, db)
+	ctx := context.Background()
+
+	// One row per protected table in EACH of the two programmes, same telco.
+	for _, s := range []string{
+		`INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, correlation_id)
+		   VALUES ('jrn_m10_air','jrn_m10_air:k','ADVANCE_ISSUED','SIM_NG','prg_sim_airtime01','cor_m10_air')`,
+		`INSERT INTO journals (journal_id, business_event_key, event_type, telco_id, programme_id, correlation_id)
+		   VALUES ('jrn_m10_data','jrn_m10_data:k','ADVANCE_ISSUED','SIM_NG','prg_sim_data02','cor_m10_data')`,
+		`INSERT INTO guardrail_trips (trip_id, telco_id, programme_id, guardrail, measured_minor, limit_minor, currency)
+		   VALUES ('trp_m10_air','SIM_NG','prg_sim_airtime01','DAILY_DISBURSED',600,500,'NGN')`,
+		`INSERT INTO guardrail_trips (trip_id, telco_id, programme_id, guardrail, measured_minor, limit_minor, currency)
+		   VALUES ('trp_m10_data','SIM_NG','prg_sim_data02','DAILY_DISBURSED',600,500,'NGN')`,
+		`INSERT INTO settlement_statements (statement_id, telco_id, programme_id, period_start, period_end, currency, terms_version_id)
+		   VALUES ('stm_m10_air','SIM_NG','prg_sim_airtime01', now()-interval '2 day', now()-interval '1 day','NGN','cfgv_seed')`,
+		`INSERT INTO settlement_statements (statement_id, telco_id, programme_id, period_start, period_end, currency, terms_version_id)
+		   VALUES ('stm_m10_data','SIM_NG','prg_sim_data02', now()-interval '2 day', now()-interval '1 day','NGN','cfgv_seed')`,
+	} {
+		if _, err := db.Admin.Exec(ctx, s); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	prgAir := map[string]string{"app.telco_id": "SIM_NG", "app.programme_id": "prg_sim_airtime01"}
+	telcoOnly := map[string]string{"app.telco_id": "SIM_NG"}
+
+	for _, tc := range []struct{ table, sql, own, sibling string }{
+		{"journals", `SELECT EXISTS (SELECT 1 FROM journals WHERE journal_id=$1)`, "jrn_m10_air", "jrn_m10_data"},
+		{"guardrail_trips", `SELECT EXISTS (SELECT 1 FROM guardrail_trips WHERE trip_id=$1)`, "trp_m10_air", "trp_m10_data"},
+		{"settlement_statements", `SELECT EXISTS (SELECT 1 FROM settlement_statements WHERE statement_id=$1)`, "stm_m10_air", "stm_m10_data"},
+	} {
+		t.Run(tc.table, func(t *testing.T) {
+			if !opRowExists(t, db, prgAir, tc.sql, tc.own) {
+				t.Errorf("a programme:airtime operator must see its OWN %s row", tc.table)
+			}
+			// Mutation proof: drop op_programme_confine_<table> from migration 0081 => this passes => RED.
+			if opRowExists(t, db, prgAir, tc.sql, tc.sibling) {
+				t.Errorf("BX-MED-010: a programme:airtime operator must NOT see a sibling programme's %s row", tc.table)
+			}
+			// The permissive half: a telco-scoped operator (no app.programme_id) still sees both.
+			if !opRowExists(t, db, telcoOnly, tc.sql, tc.own) || !opRowExists(t, db, telcoOnly, tc.sql, tc.sibling) {
+				t.Errorf("a telco-scoped operator must still see BOTH programmes' %s rows", tc.table)
+			}
+		})
+	}
+}
+
+// BX-MED-010 (follow-up): THE LEAK THAT MATTERS. A detail read that 404s is visible; an AGGREGATE
+// that silently sums a sibling programme's money is not — the operator sees a number that looks
+// like their book and is not. This drives the real aggregate (LoanBookSummary) through the real
+// chokepoint and asserts the TOTALS are confined, then contrasts with the detail read.
+func TestBXMED010_AggregateTotalsExcludeSiblingProgrammeMoney(t *testing.T) {
+	db := testutil.MustSetup(t, "med010_aggregate")
+	seedTwoProgrammeAdvancesSIM(t, db)
+	reader := repo.OperatorReader{Pool: db.Operator, Resolve: db.Config}
+
+	summaryFor := func(scope repo.OperatorScope) repo.LoanBookSummaryResult {
+		var out repo.LoanBookSummaryResult
+		if err := reader.Read(context.Background(), scope, func(ctx context.Context, tx pgx.Tx) error {
+			var e error
+			out, e = repo.LoanBookSummary(ctx, tx, scope, repo.AdvanceFilter{})
+			return e
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+
+	// Both advances are ACTIVE with outstanding 8000 (airtime) and 8000 (data) from the shared seed.
+	telco := summaryFor(repo.PortalSession{Scope: "telco:SIM_NG"}.OperatorScope())
+	prog := summaryFor(repo.PortalSession{Scope: "programme:prg_sim_airtime01"}.OperatorScope())
+
+	if telco.TotalCount < 2 {
+		t.Fatalf("setup: the telco-wide aggregate must cover both programmes' advances, got count=%d", telco.TotalCount)
+	}
+	// The load-bearing assertion: the programme operator's TOTALS are strictly smaller — the
+	// sibling programme's money is not inside the number they are shown.
+	if prog.TotalCount >= telco.TotalCount {
+		t.Errorf("BX-MED-010: a programme-scoped aggregate must exclude the sibling programme (prog count=%d, telco count=%d)",
+			prog.TotalCount, telco.TotalCount)
+	}
+	if prog.OpenOutstanding.Amount() >= telco.OpenOutstanding.Amount() {
+		t.Errorf("BX-MED-010: a programme-scoped OPEN OUTSTANDING must exclude the sibling programme's money (prog=%d, telco=%d) — a silently inflated total is the leak that matters",
+			prog.OpenOutstanding.Amount(), telco.OpenOutstanding.Amount())
+	}
+	if prog.TotalCount != 1 {
+		t.Errorf("the programme aggregate must cover exactly its own advance, got %d", prog.TotalCount)
+	}
+}
