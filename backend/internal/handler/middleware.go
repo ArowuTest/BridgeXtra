@@ -92,7 +92,23 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// Health is the unauthenticated liveness endpoint (V2-SRV-008).
+// Live is the unauthenticated LIVENESS endpoint (BX-MED-005): is the process up?
+// It deliberately takes NO dependency on the database. A liveness probe that pinged
+// the DB would turn a transient DB blip into a pod-kill/restart storm — restarting
+// the process cannot fix an unreachable database, it only removes capacity while the
+// DB recovers. Liveness answers "would a restart help?"; readiness (Health) answers
+// "can I serve traffic right now?".
+func Live() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}
+}
+
+// Health is the unauthenticated READINESS endpoint (V2-SRV-008, BX-MED-005): can this
+// instance serve traffic — is its database reachable? A failing readiness probe drains
+// the instance from the load balancer WITHOUT killing it, so a DB outage sheds traffic
+// instead of triggering restarts. Wire this to /readyz and Live() to /healthz.
 func Health(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2_000_000_000)

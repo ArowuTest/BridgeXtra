@@ -122,7 +122,11 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 	orig := origination.New(d.AppPool, appCfg, led, mno.NewHTTPAdapter(appCfg), d.Log)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", handler.Health(d.AppPool))
+	// BX-MED-005: split liveness from readiness. /healthz is DB-free liveness (is the process up?)
+	// so a transient DB blip drains readiness without triggering a restart storm; /readyz is the
+	// DB-dependent readiness probe. Both are always present on every plane.
+	mux.HandleFunc("GET /healthz", handler.Live())
+	mux.HandleFunc("GET /readyz", handler.Health(d.AppPool))
 
 	if p.serveControl {
 		// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC. Config is
@@ -191,6 +195,28 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 	}
 
 	return mux, nil
+}
+
+// apiMaxAdapterTimeout is the governed ceiling on the MNO adapter's request_timeout_ms
+// (configsvc validator: request_timeout_ms must be 100..60000). The confirm saga blocks
+// synchronously on that call, so the server WriteTimeout must stay above it.
+const apiMaxAdapterTimeout = 60 * time.Second
+
+// newAPIServer builds the HTTP server with the full connection-lifecycle timeout set
+// (BX-MED-005), so a slow or idle client cannot pin a goroutine/connection indefinitely.
+// ReadHeaderTimeout/ReadTimeout bound the request read (bodies are tiny — 64KB
+// MaxBytesReader); IdleTimeout reclaims idle keep-alives; WriteTimeout bounds the whole
+// handler+write and is deliberately kept ABOVE apiMaxAdapterTimeout so a legitimate but
+// slow confirm (blocked on the governed adapter) is never truncated mid-flight.
+func newAPIServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      apiMaxAdapterTimeout + 60*time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 }
 
 func main() {
@@ -316,7 +342,7 @@ func main() {
 
 	// Gate B: baseline security headers on every response (SSRF-adjacent pen-test
 	// hardening — a JSON API that serves no active content of its own).
-	srv := &http.Server{Addr: addr, Handler: handler.SecurityHeaders(mux), ReadHeaderTimeout: 10 * time.Second}
+	srv := newAPIServer(addr, handler.SecurityHeaders(mux))
 	log.Info("api listening", "addr", addr, "mode", mode)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Error("server stopped", "err", err)
