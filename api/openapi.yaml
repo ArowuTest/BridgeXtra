@@ -1168,6 +1168,60 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /readyz:
+    get:
+      operationId: getReady
+      summary: Readiness probe (BX-MED-005)
+      description: >
+        Can this instance serve traffic right now? Unlike /healthz (DB-free liveness), this checks
+        the database, and it reports NOT-ready as soon as a graceful shutdown begins — so a load
+        balancer drains the instance BEFORE connections start closing. A failing readiness probe
+        must drain, never restart: restarting cannot fix an unreachable database.
+      security: []  # unauthenticated by design
+      responses:
+        "200":
+          description: Ready to serve
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /version:
+    get:
+      operationId: getVersion
+      summary: Build identity (BX-MED-005)
+      description: >
+        Which build is serving this traffic? Build identity ONLY — never configuration,
+        environment, connection strings or secrets, because this endpoint is reachable wherever its
+        plane is reachable. Commit is stamped at link time in CI; a locally built binary falls back
+        to the toolchain's embedded VCS metadata.
+      security: []  # unauthenticated by design
+      responses:
+        "200":
+          description: Build identity
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version, commit]
+                properties:
+                  version:
+                    type: string
+                  commit:
+                    type: string
+                  go_version:
+                    type: string
+                  modified:
+                    type: boolean
+                    description: built from a dirty working tree
+
   /v1/programmes:
     get:
       operationId: listProgrammes

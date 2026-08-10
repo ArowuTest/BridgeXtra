@@ -13,6 +13,7 @@ import (
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/buildinfo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
@@ -102,6 +103,15 @@ func Live() http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}
+}
+
+// Version reports BUILD IDENTITY (BX-MED-005) so an operator can answer "which build is serving
+// this traffic?" from the process itself during an incident. Build identity only — never config,
+// environment, DSNs or secrets — because it is reachable wherever its plane is reachable.
+func Version() http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, buildinfo.Info())
 	}
 }
 

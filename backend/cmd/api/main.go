@@ -17,11 +17,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,6 +36,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/ledger"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/mno"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/buildinfo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbmigrate"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/dbroles"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform/egress"
@@ -124,9 +129,12 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 	mux := http.NewServeMux()
 	// BX-MED-005: split liveness from readiness. /healthz is DB-free liveness (is the process up?)
 	// so a transient DB blip drains readiness without triggering a restart storm; /readyz is the
-	// DB-dependent readiness probe. Both are always present on every plane.
+	// DB-dependent readiness probe, and it also reports NOT-ready once a graceful shutdown begins
+	// so the load balancer drains this instance BEFORE connections start closing. /version reports
+	// build identity. All three are present on every plane.
 	mux.HandleFunc("GET /healthz", handler.Live())
-	mux.HandleFunc("GET /readyz", handler.Health(d.AppPool))
+	mux.HandleFunc("GET /readyz", drainAwareReadiness(handler.Health(d.AppPool)))
+	mux.HandleFunc("GET /version", handler.Version())
 
 	if p.serveControl {
 		// M4a portal: session auth (httpOnly + CSRF) with deny-by-default RBAC. Config is
@@ -202,6 +210,125 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 // synchronously on that call, so the server WriteTimeout must stay above it.
 const apiMaxAdapterTimeout = 60 * time.Second
 
+// apiWriteTimeout bounds a whole handler+write. It MUST exceed apiMaxAdapterTimeout so a slow but
+// legitimate confirm is never truncated mid-flight.
+const apiWriteTimeout = apiMaxAdapterTimeout + 60*time.Second
+
+// Graceful-shutdown budget (BX-MED-005).
+//
+//	defaultDrainLead    — how long readiness reports NOT-ready BEFORE connections start closing,
+//	                      so the load balancer stops sending new work first.
+//	defaultShutdownGrace— how long in-flight requests may take to finish. It MUST be at least
+//	                      apiWriteTimeout: the server itself allows a request to run that long, so
+//	                      a smaller drain budget would sever a confirm the server had authorised —
+//	                      exactly the money-critical case this fix exists to protect.
+const (
+	defaultDrainLead     = 5 * time.Second
+	defaultShutdownGrace = apiWriteTimeout + 15*time.Second
+)
+
+// draining flips once a graceful shutdown begins; /readyz then reports NOT-ready while /healthz
+// keeps reporting alive (a draining process is healthy, just no longer accepting new work).
+var draining atomic.Bool
+
+func drainAwareReadiness(ready http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if draining.Load() {
+			writeShuttingDown(w)
+			return
+		}
+		ready(w, r)
+	}
+}
+
+func writeShuttingDown(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`{"error":{"code":"SHUTTING_DOWN","message":"draining; not accepting new work"}}`))
+}
+
+// shutdownBudget resolves the drain lead and grace from the environment, with a FLOOR.
+//
+// The knobs are environment variables rather than governed config on purpose: a shutdown budget
+// must be resolvable when the database is already gone. But an unfenced knob is a foot-gun — a
+// dashboard edit setting the grace to 1s would silently re-create the severed-confirm bug with no
+// code change and no test going red. So a grace below apiWriteTimeout is RAISED to the floor with
+// a loud warning naming the consequence. Refusing to boot was the alternative; raising is chosen
+// because a process that will not start is a worse outage than one that drains for longer.
+func shutdownBudget(getenv func(string) string, log *slog.Logger) (lead, grace time.Duration) {
+	lead, grace = defaultDrainLead, defaultShutdownGrace
+	if v := getenv("TCP_API_DRAIN_LEAD"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			lead = d
+		} else if log != nil {
+			log.Warn("TCP_API_DRAIN_LEAD ignored (not a positive duration)", "value", v)
+		}
+	}
+	if v := getenv("TCP_API_SHUTDOWN_GRACE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			grace = d
+		} else if log != nil {
+			log.Warn("TCP_API_SHUTDOWN_GRACE ignored (not a positive duration)", "value", v)
+		}
+	}
+	if grace < apiWriteTimeout {
+		if log != nil {
+			log.Warn("shutdown grace below the server's own WriteTimeout — raising to the floor; a shorter budget would sever an in-flight confirm the server had already authorised",
+				"requested", grace, "floor", apiWriteTimeout)
+		}
+		grace = apiWriteTimeout
+	}
+	return lead, grace
+}
+
+// runServer serves until ctx is cancelled (SIGTERM/SIGINT), then drains gracefully:
+// mark NOT-ready -> wait the lead so the load balancer removes this instance -> Shutdown, which
+// stops accepting new connections and lets in-flight requests finish within the grace.
+//
+// onPhase (nil in production) reports the ordered phases so tests can assert HAPPENS-BEFORE
+// ordering instead of racing a wall clock.
+func runServer(ctx context.Context, srv *http.Server, lead, grace time.Duration, log *slog.Logger, onPhase func(string)) error {
+	phase := func(p string) {
+		if onPhase != nil {
+			onPhase(p)
+		}
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+	}
+
+	draining.Store(true)
+	phase("drain_begin")
+	log.Info("shutdown signal received — draining", "lead", lead, "grace", grace)
+	timer := time.NewTimer(lead)
+	defer timer.Stop()
+	<-timer.C
+	phase("lead_elapsed")
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), grace)
+	defer cancel()
+	phase("shutdown_begin")
+	err := srv.Shutdown(shutCtx)
+	phase("shutdown_done")
+	if err != nil {
+		log.Error("graceful shutdown did not complete within the grace — in-flight work may have been cut", "err", err)
+		return err
+	}
+	log.Info("graceful shutdown complete — all in-flight requests finished")
+	return <-errCh
+}
+
 // newAPIServer builds the HTTP server with the full connection-lifecycle timeout set
 // (BX-MED-005), so a slow or idle client cannot pin a goroutine/connection indefinitely.
 // ReadHeaderTimeout/ReadTimeout bound the request read (bodies are tiny — 64KB
@@ -214,8 +341,13 @@ func newAPIServer(addr string, h http.Handler) *http.Server {
 		Handler:           h,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      apiMaxAdapterTimeout + 60*time.Second,
+		WriteTimeout:      apiWriteTimeout,
 		IdleTimeout:       120 * time.Second,
+		// BX-MED-005: bound header SIZE as well as header TIME. Go's default is 1MB; this API's
+		// largest legitimate header set is a handful of small values (Idempotency-Key,
+		// X-Correlation-Id, an HMAC signature, a session cookie), so 64KiB is generous while
+		// denying a cheap memory-amplification vector. Over the limit answers 431.
+		MaxHeaderBytes: 64 << 10,
 	}
 }
 
@@ -343,8 +475,18 @@ func main() {
 	// Gate B: baseline security headers on every response (SSRF-adjacent pen-test
 	// hardening — a JSON API that serves no active content of its own).
 	srv := newAPIServer(addr, handler.SecurityHeaders(mux))
-	log.Info("api listening", "addr", addr, "mode", mode)
-	if err := srv.ListenAndServe(); err != nil {
+	// BX-MED-005: signal-driven graceful shutdown. SIGTERM is what an orchestrator sends before it
+	// kills a pod; without handling it, an in-flight confirm — which may already have instructed
+	// the telco to credit a customer — is severed mid-flight. The handler is installed here,
+	// AFTER migrations and pool setup: a SIGTERM arriving during boot still takes the default
+	// disposition and kills the process, which is the correct answer while nothing is in flight
+	// and a partially-applied migration must not be interrupted by our own drain logic.
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	lead, grace := shutdownBudget(os.Getenv, log)
+	bi := buildinfo.Info()
+	log.Info("api listening", "addr", addr, "mode", mode, "version", bi.Version, "commit", bi.Commit)
+	if err := runServer(sigCtx, srv, lead, grace, log, nil); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

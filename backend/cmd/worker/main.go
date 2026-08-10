@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -104,7 +105,11 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	// BX-MED-005: SIGTERM as well as SIGINT. SIGTERM is what an orchestrator sends before killing a
+	// container; handling only SIGINT meant the worker — which runs the outbox dispatcher, the
+	// fulfilment resolver and the scoring loop, all of which touch money — was hard-killed on every
+	// ordinary deploy instead of finishing its current unit of work.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// #44 (VR-32 prod hardening): match the API — block loopback + private-range

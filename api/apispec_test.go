@@ -30,7 +30,11 @@ func TestV2_API_001_PlatformSpecValidates(t *testing.T) {
 	// Route pinning: every path the API serves must be documented, and every
 	// documented path must exist in code. Update BOTH in the same commit.
 	served := map[string]bool{
+		// BX-MED-005: the operational lifecycle trio. /healthz is DB-free liveness, /readyz is
+		// DB-dependent readiness (and reports NOT-ready while draining), /version is build identity.
 		"/healthz":          true,
+		"/readyz":           true,
+		"/version":          true,
 		"/v1/programmes":    true,
 		"/v1/offers":        true,
 		"/v1/advances":      true,
