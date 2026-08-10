@@ -31,10 +31,15 @@ type WebhookCredential struct {
 // holding the HMAC secret. Unknown or revoked -> ErrWebhookCredentialNotFound.
 func (r *WebhookCredentials) ResolveByKeyID(ctx context.Context, keyID string) (WebhookCredential, error) {
 	var c WebhookCredential
+	// BX-HIGH-003: the tenant kill-switch applies to the inbound recharge webhook too — the
+	// TELCO must be ACTIVE, not merely the credential. Joining telcos here denies webhook
+	// recovery (the money-moving inbound door) for a SUSPENDED telco at the same chokepoint
+	// that authenticates it, symmetric with the channel-auth gate in Telcos.ResolveCredential.
 	err := r.Pool.QueryRow(ctx, `
-		SELECT key_id, telco_id, secret_env
-		FROM telco_webhook_credentials
-		WHERE key_id = $1 AND status = 'ACTIVE'`, keyID).Scan(&c.KeyID, &c.TelcoID, &c.SecretEnv)
+		SELECT w.key_id, w.telco_id, w.secret_env
+		FROM telco_webhook_credentials w
+		JOIN telcos t ON t.telco_id = w.telco_id
+		WHERE w.key_id = $1 AND w.status = 'ACTIVE' AND t.status = 'ACTIVE'`, keyID).Scan(&c.KeyID, &c.TelcoID, &c.SecretEnv)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return WebhookCredential{}, ErrWebhookCredentialNotFound
 	}

@@ -127,6 +127,17 @@ func (s *Service) fetch(ctx context.Context, telcoID string) ([]byte, error) {
 // IngestRaw lands raw file bytes. Exported path for tests and for a future
 // file-drop (SFTP) source: the pipeline is source-agnostic once bytes arrive.
 func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []byte) (Summary, error) {
+	// BX-HIGH-003: telco kill-switch — refuse a SUSPENDED (or otherwise non-ACTIVE) telco's
+	// feed up front, before parsing or writing anything. This is the feed-ingestion boundary
+	// of the same suspension gate enforced at channel + webhook auth. telcos is a global
+	// non-RLS registry, so a plain SELECT (tcp_app has the grant) is correct here.
+	var telcoStatus string
+	if err := s.Pool.QueryRow(ctx, `SELECT status FROM telcos WHERE telco_id=$1`, telcoID).Scan(&telcoStatus); err != nil {
+		return Summary{}, fmt.Errorf("telco status lookup for %s: %w", telcoID, err)
+	}
+	if telcoStatus != "ACTIVE" {
+		return Summary{}, fmt.Errorf("telco %s is %s (not ACTIVE) — feature-feed ingestion refused (BX-HIGH-003)", telcoID, telcoStatus)
+	}
 	var file fileShape
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return Summary{}, fmt.Errorf("feature file does not parse: %w", err)

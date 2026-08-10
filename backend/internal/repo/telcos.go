@@ -61,9 +61,17 @@ func (r *Telcos) Create(ctx context.Context, t entity.Telco) error {
 // the key is stored or compared (V2-SEC-005). Index: telco_api_credentials_hash_uq.
 func (r *Telcos) ResolveCredential(ctx context.Context, apiKey string) (telcoID string, credentialID string, err error) {
 	h := sha256.Sum256([]byte(apiKey))
+	// BX-HIGH-003: the tenant kill-switch. An ACTIVE credential is not enough — the TELCO
+	// itself must be ACTIVE. Joining telcos here makes suspension a DB-enforced gate at the
+	// single channel-auth chokepoint: a SUSPENDED (or INACTIVE / CERTIFICATION) telco's
+	// credential no longer resolves, so offer / confirm / self-exclusion and every other
+	// authenticated channel money operation is denied immediately, with no per-usecase check
+	// to forget. Mirrors the credential's own status='ACTIVE' requirement.
 	err = r.Pool.QueryRow(ctx,
-		`SELECT telco_id, credential_id FROM telco_api_credentials
-		 WHERE key_hash = $1 AND status = 'ACTIVE'`, h[:]).Scan(&telcoID, &credentialID)
+		`SELECT c.telco_id, c.credential_id
+		   FROM telco_api_credentials c
+		   JOIN telcos t ON t.telco_id = c.telco_id
+		  WHERE c.key_hash = $1 AND c.status = 'ACTIVE' AND t.status = 'ACTIVE'`, h[:]).Scan(&telcoID, &credentialID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", fmt.Errorf("credential: %w", ErrNotFound)
 	}
