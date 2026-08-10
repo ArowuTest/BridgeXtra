@@ -10,12 +10,150 @@ package recovery_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/invariants"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recovery"
 )
+
+func checkInvariants(t *testing.T, f *fixture, when string) {
+	t.Helper()
+	violations, err := (&invariants.Checker{Pool: f.db.Worker}).Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range violations {
+		t.Errorf("invariant violation %s: %s", when, v)
+	}
+}
+
+// BX-P0-003 (re-reopen): a COMPLETED reversal must short-circuit the state machine BEFORE
+// state-dependent routing. A FULL reversal flips the original event ALLOCATED -> REVERSED, so
+// without the front idempotency check an exact retry of an already-applied full reversal is
+// routed to the ORIGINAL_NOT_ALLOCATED park path instead of replaying its completed result.
+func TestBXP0003_FullReversalExactRetry_ReplaysNotParks(t *testing.T) {
+	f := newFixture(t, "p3_full")
+	adv := f.activeAdvance(t) // outstanding 10000
+	f.ingest(t, "src-full", 6_000)
+	if _, o := f.advanceRow(t, adv.AdvanceID); o != 4_000 {
+		t.Fatalf("after 6000 recovery, outstanding must be 4000, got %d", o)
+	}
+	// FULL reversal of the entire 6000 -> outstanding 10000; the original event becomes REVERSED.
+	rev := f.reverse(t, "rvsl-full", "src-full", 6_000)
+	if rev.Parked || rev.Replayed || rev.Applied.Amount() != 6_000 {
+		t.Fatalf("first full reversal must APPLY 6000: %+v", rev)
+	}
+	if _, o := f.advanceRow(t, adv.AdvanceID); o != 10_000 {
+		t.Fatalf("after full reversal, outstanding must be 10000, got %d", o)
+	}
+	negBefore := negativeAllocCount(t, f)
+
+	// Exact retry: the original is now REVERSED. Must REPLAY (short-circuit), not park.
+	// Mutation proof: remove the front idempotency check in Reverse() and this retry parks
+	// (Parked=true, Replayed=false).
+	again := f.reverse(t, "rvsl-full", "src-full", 6_000)
+	if !again.Replayed {
+		t.Fatalf("exact retry of a FULL reversal must REPLAY, got %+v", again)
+	}
+	if again.Parked {
+		t.Fatal("exact retry of a full reversal must NOT be parked (P0-003)")
+	}
+	if again.Applied.Amount() != 6_000 {
+		t.Fatalf("replay must return the original applied amount 6000, got %v", again.Applied)
+	}
+	if _, o := f.advanceRow(t, adv.AdvanceID); o != 10_000 {
+		t.Fatalf("a replayed full reversal must not double-apply — outstanding stays 10000, got %d", o)
+	}
+	if n := negativeAllocCount(t, f); n != negBefore {
+		t.Fatalf("a replayed full reversal must write NO new negative allocation: before=%d after=%d", negBefore, n)
+	}
+	assertBalancedBook(t, f)
+	checkInvariants(t, f, "after full-reversal exact retry")
+}
+
+// Reversal-before-original, auto-applied as a FULL reversal when the original lands, then a
+// telco retry: the auto-apply completed the recovery.reverse record and flipped the event to
+// REVERSED, so the retry must replay, not re-park.
+func TestBXP0003_ReversalBeforeOriginal_FullAutoApply_Retry_Replays(t *testing.T) {
+	f := newFixture(t, "p3_beforeorig")
+	adv := f.activeAdvance(t)
+	if pre := f.reverse(t, "rvsl-bo", "src-bo", 6_000); !pre.Parked {
+		t.Fatalf("a reversal before its original must park: %+v", pre)
+	}
+	// Original lands -> allocates AND auto-applies the parked FULL reversal -> event REVERSED.
+	f.ingest(t, "src-bo", 6_000)
+	if _, o := f.advanceRow(t, adv.AdvanceID); o != 10_000 {
+		t.Fatalf("the net-zero pair must leave outstanding 10000, got %d", o)
+	}
+	again := f.reverse(t, "rvsl-bo", "src-bo", 6_000)
+	if !again.Replayed || again.Parked {
+		t.Fatalf("retry after an auto-applied full reversal must replay (not re-park), got %+v", again)
+	}
+	if _, o := f.advanceRow(t, adv.AdvanceID); o != 10_000 {
+		t.Fatalf("the replay must not disturb the book — outstanding stays 10000, got %d", o)
+	}
+	assertBalancedBook(t, f)
+	checkInvariants(t, f, "after auto-apply retry")
+}
+
+// A divergent retry on an already-REVERSED original must be REFUSED at the front, not parked.
+// Covers "same reversal id, different original" and "same reversal id, different amount"
+// (currency divergence is the identical hash mechanism). The old code would route these to the
+// ORIGINAL_NOT_ALLOCATED park path because it inspects state before the equivalence check.
+func TestBXP0003_DivergentRetryOnReversedOriginal_Refused(t *testing.T) {
+	f := newFixture(t, "p3_divfull")
+	f.activeAdvance(t)
+	f.ingest(t, "src-df", 6_000)
+	f.reverse(t, "rvsl-df", "src-df", 6_000) // full reversal -> event REVERSED
+
+	// Same reversal id, DIFFERENT amount.
+	if _, err := f.rec.Reverse(tenantCtx(), recovery.ReverseCmd{
+		ReversalSourceEventID: "rvsl-df", OriginalSourceEventID: "src-df",
+		Amount: entity.MustMoney(3_000, entity.NGN), CorrelationID: "cor-df-amt",
+	}); !errors.Is(err, recovery.ErrDivergentReversal) {
+		t.Fatalf("a divergent (different-amount) retry of a full reversal must be refused, got %v", err)
+	}
+	// Same reversal id, DIFFERENT original source event.
+	if _, err := f.rec.Reverse(tenantCtx(), recovery.ReverseCmd{
+		ReversalSourceEventID: "rvsl-df", OriginalSourceEventID: "src-OTHER",
+		Amount: entity.MustMoney(6_000, entity.NGN), CorrelationID: "cor-df-orig",
+	}); !errors.Is(err, recovery.ErrDivergentReversal) {
+		t.Fatalf("a divergent (different-original) retry of a full reversal must be refused, got %v", err)
+	}
+}
+
+// Concurrent identical full reversals: the transactional claim (kept beside the economic
+// application) admits exactly one clawback; the rest replay. No double-book, invariants clean.
+func TestBXP0003_ConcurrentIdenticalFullReversal_NoDoubleBook(t *testing.T) {
+	f := newFixture(t, "p3_concurrent")
+	adv := f.activeAdvance(t)
+	f.ingest(t, "src-cc", 6_000)
+
+	const n = 6
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, _ = f.rec.Reverse(tenantCtx(), recovery.ReverseCmd{
+				ReversalSourceEventID: "rvsl-cc", OriginalSourceEventID: "src-cc",
+				Amount: entity.MustMoney(6_000, entity.NGN), CorrelationID: "cor-cc",
+			})
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if _, o := f.advanceRow(t, adv.AdvanceID); o != 10_000 {
+		t.Fatalf("concurrent identical reversals must claw back EXACTLY once — outstanding 10000, got %d", o)
+	}
+	assertBalancedBook(t, f)
+	checkInvariants(t, f, "after concurrent identical full reversals")
+}
 
 func negativeAllocCount(t *testing.T, f *fixture) int {
 	t.Helper()

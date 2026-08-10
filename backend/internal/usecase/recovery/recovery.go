@@ -475,6 +475,39 @@ func (s *Service) Reverse(ctx context.Context, cmd ReverseCmd) (ReverseResult, e
 		if err != nil {
 			return err
 		}
+
+		// P0-003: a COMPLETED reversal must short-circuit the state machine BEFORE any
+		// state-dependent routing. The idempotency claim lives beside the economic application
+		// in applyReversal, but a FULL reversal flips the original event ALLOCATED -> REVERSED —
+		// so an exact retry of an already-applied full reversal would otherwise read the original
+		// as "not allocated" and be routed to the park path instead of replaying its completed
+		// recovery.reverse result. Check the completed record here, first: exact replay on a hash
+		// match, divergent reject on a mismatch (same id, different original/amount/currency), and
+		// only then inspect original state / park / apply. The hash uses the command's own fields
+		// (original.SourceEventID == cmd.OriginalSourceEventID by construction), so it is
+		// available before GetBySource. A committed recovery.reverse record is always completed
+		// (the claim and SetResponse commit together in applyReversal), so status 200 == done.
+		revHash := reversalSourceHash(telcoID, cmd.ReversalSourceEventID, cmd.OriginalSourceEventID, cmd.Amount)
+		existing, gErr := s.idem.Get(ctx, tx, telcoID, "recovery.reverse", cmd.ReversalSourceEventID)
+		if gErr == nil {
+			if existing.RequestHash != revHash {
+				return ErrDivergentReversal
+			}
+			if existing.ResponseStatus == 200 {
+				replay, dErr := decodeReverseApply(existing.ResponseBody)
+				if dErr != nil {
+					return dErr
+				}
+				out = ReverseResult{Applied: replay.Applied, AdvanceReopened: replay.AdvanceReopened, Replayed: true}
+				return nil
+			}
+			// Record exists but is not yet completed (an uncommitted concurrent claim is invisible
+			// at READ COMMITTED, so this is rare/defensive): fall through — applyReversal's claim
+			// converges the concurrent case, and a later retry replays the completed result.
+		} else if !errors.Is(gErr, repo.ErrNotFound) {
+			return gErr
+		}
+
 		original, err := s.events.GetBySource(ctx, tx, cmd.OriginalSourceEventID)
 		if errors.Is(err, repo.ErrNotFound) {
 			// EDG-019: reversal BEFORE original — park it (idempotent).
