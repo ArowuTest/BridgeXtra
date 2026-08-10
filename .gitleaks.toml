@@ -1,0 +1,51 @@
+# BX-MED-015 — merge-blocking secret-scan policy.
+#
+# Mirrors the .golangci.yml convention: the full upstream ruleset, plus exclusions that are NARROW,
+# ANNOTATED and reviewer-gated. Removing a rule or widening an allowlist is a never-weaken change.
+#
+# Every allowlist below is VALUE-scoped (regexTarget = "match"), never PATH-scoped. That distinction
+# is the whole point: a REAL credential landing in one of these same files still fails the scan.
+# Do not convert any of these to `paths`.
+#
+# This repository is PUBLIC. None of the allowlisted literals authenticates to anything reachable:
+#   * devlocal_* are the local-dev Postgres role passwords seeded by migrations 0001/0044/0076.
+#     Every deployment rotates them from the secrets manager at boot (platform/dbroles ApplyPasswords).
+#   * the *-hmac-* literals are per-test fixtures for the recharge-webhook signature tests; no telco
+#     ever sees them, and the tests seed them into a database dropped at the end of the job.
+#   * ENV_SECRET_* / TCP_*_SECRET_ENV values are environment-variable NAMES stored in the
+#     webhook-credential secret_env column — pointers to a secret, never a secret.
+
+title = "BridgeXtra secret-scan policy (BX-MED-015)"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Local-dev Postgres role passwords seeded by migrations; rotated at boot by dbroles.ApplyPasswords."
+regexTarget = "match"
+regexes = ['''devlocal(_app|_worker|_operator|_config)?''']
+
+[[allowlists]]
+description = "Per-test HMAC fixtures for the recharge-webhook signature tests (test-only, ephemeral DB)."
+regexTarget = "match"
+regexes = ['''(?i)(test|sim|wh|dev)[-_]?hmac[-_]?(shared[-_]?)?secret[a-z0-9_-]*''']
+
+[[allowlists]]
+description = "Environment-variable NAMES held in webhook_credentials.secret_env — pointers to a secret, not a secret."
+regexTarget = "match"
+regexes = ['''ENV_SECRET_[0-9]+''', '''TCP_[A-Z0-9_]*SECRET[A-Z0-9_]*''']
+
+[[allowlists]]
+description = """Synthetic operator API keys for the CI end-to-end run and local dev (ci.yml E2E_OPERATORS,
+docker-compose.dev.yml TCP_SEED_OPERATORS). They are seeded by cmd/seed-operators into a database that is
+dropped when the job ends, and they authenticate to nothing outside that ephemeral instance. Value-scoped:
+a real operator key would not match this shape."""
+regexTarget = "match"
+regexes = ['''e2e-key-[a-z0-9-]+''']
+
+[[allowlists]]
+description = """English prose in the SRS, not an assignment: the phrase "secrets/key design" in a controls
+table trips the generic-api-key keyword heuristic. Scoped to the exact phrase, so a real credential pasted
+into the same document still fails the scan."""
+regexTarget = "match"
+regexes = ['''key design, vulnerability/penetration''']

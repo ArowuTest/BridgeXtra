@@ -8,6 +8,12 @@ on:
     branches: [main]
   pull_request:
 
+# BX-MED-015: least privilege by default. No job in this workflow writes to the
+# repository; the supply-chain jobs below only read. Any future job that needs
+# more must declare it locally, where a reviewer will see it.
+permissions:
+  contents: read
+
 jobs:
   quality:
     # Static quality floor — no database needed, fails fast.
@@ -40,16 +46,26 @@ jobs:
       - name: golangci-lint (BC-2 — zero warnings)
         uses: golangci/golangci-lint-action@4afd733a84b1f43292c63897423277bb7f4313a9 # v8.0.0
         with:
-          version: latest
+          # BX-MED-015: pinned, not `latest`. The v2 line is REQUIRED by
+          # .golangci.yml (`version: "2"`). v2.12.2 is what `latest` resolved to
+          # when this was pinned, so the pin reproduces the then-green run.
+          # Bump deliberately, never silently.
+          version: v2.12.2
 
       - name: govulncheck (BC-2 — Go vulnerability DB)
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          # BX-MED-015: the SCANNER is pinned; the vulnerability DATABASE is not
+          # and must not be — govulncheck queries vuln.go.dev live, so CI can go
+          # red on a day nothing changed. That is the gate working, not a flake.
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck -version
           govulncheck ./...
 
       - name: gosec (BC-2 — security static analysis)
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          # BX-MED-015: pinned, so new rules cannot land under our feet mid-PR.
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+          gosec -version
           gosec -quiet -exclude-generated ./...
 
       - name: Vet
@@ -60,6 +76,59 @@ jobs:
 
       - name: OpenAPI spec validation (V2-API-001)
         run: go test -count=1 ./api/...
+
+  # BX-MED-015: merge-blocking secret scan. Deliberately a self-contained pinned
+  # BINARY rather than gitleaks-action: this pins the exact bytes (checksum), not
+  # just a commit, and makes no licence-server call from inside a supply-chain
+  # gate (gitleaks-action requires a licence for organisation-owned repos).
+  #
+  # This job installs NOTHING else, on purpose — no `npm ci`, no `go build`. A
+  # bare checkout means node_modules/ and .next/ do not exist, so vendored
+  # third-party JS can never produce a finding. Do not add install steps here.
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install gitleaks (pinned version + verified checksum)
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+
+      - name: gitleaks — no credentials in the tree (merge-blocking)
+        run: |
+          set -euo pipefail
+          # --redact is MANDATORY, not cosmetic: this repository is PUBLIC, so
+          # build logs are public. An unredacted finding would broadcast the very
+          # secret the scan just caught.
+          /tmp/gitleaks dir . --config .gitleaks.toml --no-banner --redact --exit-code 1
+
+  # BX-MED-015: dependency review — flags advisories in what a PR ADDS.
+  #
+  # NOT redundant with govulncheck: govulncheck is reachability-based, so a newly
+  # added dependency carrying a known advisory that nothing calls yet is invisible
+  # to it. This job flags the dependency itself.
+  #
+  # HONEST LIMITATION: the action only works on pull_request events (it diffs the
+  # PR's base against its head), so it does not run on direct pushes to main.
+  # It is merge-blocking for the PR path; SBOM + provenance + artifact signing
+  # remain staged for production certification, per the audit.
+  dependency-review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Dependency review (merge-blocking on PRs)
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: moderate
 
   backend:
     runs-on: ubuntu-latest
@@ -241,7 +310,8 @@ jobs:
 
       - name: Build + start the API
         run: |
-          go build -o /tmp/tcp-api ./backend/cmd/api
+          # BX-MED-005: stamp build identity so /version reports the REAL commit, not "unknown".
+          go build -ldflags "-X github.com/ArowuTest/telco-credit-platform/backend/internal/platform/buildinfo.Commit=${GITHUB_SHA}" -o /tmp/tcp-api ./backend/cmd/api
           /tmp/tcp-api >/tmp/api.log 2>&1 &
           for i in $(seq 1 40); do
             curl -sf -o /dev/null "http://localhost:8090/healthz" && { echo "api ready"; break; }
