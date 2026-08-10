@@ -70,7 +70,7 @@ func TestBXHIGH001_ConcurrentWebhook_CeilingHolds_ExcessHeld(t *testing.T) {
 				return
 			}
 			codes[i] = resp.StatusCode
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}(i)
 	}
 	close(start)
@@ -114,7 +114,7 @@ func TestBXHIGH001_WebhookRetry_DoesNotConsumeCapacityTwice(t *testing.T) {
 	// byte-identical (the recovery hash covers occurred_at).
 	body := rechargeBody("evt-retry", 10_000)
 	resp1 := f.post(t, "SIM_NG", whKeyID, whSecret, nowTS(), body)
-	resp1.Body.Close()
+	_ = resp1.Body.Close()
 
 	reserved := func() int64 {
 		var v int64
@@ -143,7 +143,7 @@ func TestBXHIGH001_WebhookRetry_DoesNotConsumeCapacityTwice(t *testing.T) {
 	if resp2.StatusCode >= 500 {
 		t.Fatalf("a retry must be idempotent, got HTTP %d", resp2.StatusCode)
 	}
-	resp2.Body.Close()
+	_ = resp2.Body.Close()
 
 	if got := reserved(); got != reservedBefore {
 		t.Fatalf("a retry must NOT consume ceiling capacity twice: reserved before=%d after=%d (BX-HIGH-001 crash hardening)", reservedBefore, got)
