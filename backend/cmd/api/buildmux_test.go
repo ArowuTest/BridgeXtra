@@ -34,7 +34,7 @@ func statusOf(t *testing.T, mux http.Handler, method, path string) int {
 
 var (
 	dataRoutes = []struct{ m, p string }{
-		{"GET", "/v1/offers"},
+		{"POST", "/v1/offers"},
 		{"POST", "/v1/advances"},
 		{"GET", "/v1/advances/x"},
 		{"GET", "/v1/programmes"},
