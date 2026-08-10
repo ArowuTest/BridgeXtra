@@ -189,7 +189,11 @@ func (d *Demo) Run(ctx context.Context, telcoID, scenario, actor string) (repo.D
 	if err != nil {
 		return run, err
 	}
+	// BX-MED-007: the subscriber token is PII and logs are retained — mask it. Caught by the
+	// structural log fence, not by review: this site was missed when MED-007 masked the sites
+	// known at the time, which is exactly why the fence exists.
 	d.Log.Info("fault-demo run started (M4e-3)",
-		"run", runID, "scenario", scenario, "token", token, "advance", res.Advance.AdvanceID, "actor", actor)
+		"run", runID, "scenario", scenario, "token", platform.MaskToken(token),
+		"advance", res.Advance.AdvanceID, "actor", actor)
 	return run, nil
 }
