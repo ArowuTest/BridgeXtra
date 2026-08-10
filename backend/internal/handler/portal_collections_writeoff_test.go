@@ -446,7 +446,7 @@ func TestWriteOff_Inbox_ListsPending(t *testing.T) {
 		AdvanceID   string `json:"advance_id"`
 		RequestedBy string `json:"requested_by"`
 		Principal   struct {
-			AmountMinor int64  `json:"amount_minor"`
+			AmountMinor int64  `json:"amount_minor,string"`
 			Display     string `json:"display"`
 		} `json:"principal"`
 	}

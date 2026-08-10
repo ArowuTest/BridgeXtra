@@ -28,7 +28,7 @@ import (
 )
 
 type ovMoney struct {
-	AmountMinor int64  `json:"amount_minor"`
+	AmountMinor int64  `json:"amount_minor,string"`
 	Currency    string `json:"currency"`
 	Display     string `json:"display"`
 }

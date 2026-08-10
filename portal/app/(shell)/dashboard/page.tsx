@@ -291,10 +291,11 @@ function PaydownTile({
 
 // C1 + C2 + C3 + A10 for one programme.
 function ProgrammeCard({ p }: { p: ProgrammeHealth }) {
-  const capUtil = p.cap_known && p.daily_cap ? util(p.today_disbursed.amount_minor, p.daily_cap.amount_minor) : 0;
+  const capUtil =
+    p.cap_known && p.daily_cap ? util(Number(p.today_disbursed.amount_minor), Number(p.daily_cap.amount_minor)) : 0;
   const expUtil =
     p.pool?.exposure && p.pool?.exposure_limit
-      ? util(p.pool.exposure.amount_minor, p.pool.exposure_limit.amount_minor)
+      ? util(Number(p.pool.exposure.amount_minor), Number(p.pool.exposure_limit.amount_minor))
       : 0;
   return (
     <Card withBorder padding="md">

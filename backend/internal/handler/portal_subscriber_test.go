@@ -76,7 +76,7 @@ func seedReceivable(t *testing.T, f *portalFixture, n int, debitMinor int64) {
 }
 
 type money struct {
-	AmountMinor int64  `json:"amount_minor"`
+	AmountMinor int64  `json:"amount_minor,string"`
 	Currency    string `json:"currency"`
 	Display     string `json:"display"`
 }

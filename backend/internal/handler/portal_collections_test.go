@@ -65,7 +65,7 @@ type collQueueRow struct {
 	SelfExcluded   bool   `json:"self_excluded"`
 	OpenComplaint  bool   `json:"open_complaint"`
 	Outstanding    struct {
-		AmountMinor int64 `json:"amount_minor"`
+		AmountMinor int64 `json:"amount_minor,string"`
 	} `json:"outstanding"`
 }
 

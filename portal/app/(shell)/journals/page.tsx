@@ -154,10 +154,10 @@ export default function JournalsPage() {
                 <tr key={e.entry_id}>
                   <td className="mono">{e.account_code}</td>
                   <td className="mono" style={{ textAlign: "right" }}>
-                    {e.debit.amount_minor > 0 ? e.debit.display : ""}
+                    {Number(e.debit.amount_minor) > 0 ? e.debit.display : ""}
                   </td>
                   <td className="mono" style={{ textAlign: "right" }}>
-                    {e.credit.amount_minor > 0 ? e.credit.display : ""}
+                    {Number(e.credit.amount_minor) > 0 ? e.credit.display : ""}
                   </td>
                 </tr>
               ))}

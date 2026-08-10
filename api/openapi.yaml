@@ -1721,10 +1721,14 @@ components:
         step: { type: string }
     MoneyView:
       type: object
-      description: Money as integer minor units plus a server-formatted display string (the UI never computes money — BC-1).
+      description: >-
+        Money as integer minor units plus a server-formatted display string (the UI never computes
+        money — BC-1). amount_minor is a STRING (BX-MED-008): an int64 minor-unit aggregate can
+        exceed JavaScript's 2^53 safe-integer limit, so it is carried as a decimal string to
+        preserve exact precision. Render `display`; parse amount_minor only for ratios/positivity.
       required: [amount_minor, currency, display]
       properties:
-        amount_minor: { type: integer, format: int64 }
+        amount_minor: { type: string, pattern: '^-?[0-9]+$', example: "50000000" }
         currency: { type: string, example: NGN }
         display: { type: string, example: "NGN 500,000.00" }
     DemoRun:

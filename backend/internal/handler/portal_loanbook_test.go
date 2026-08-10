@@ -97,18 +97,18 @@ func TestB1_LoanBook_SummaryFieldMapping_MaskingAndScope(t *testing.T) {
 		Advances []struct {
 			MSISDNMasked string `json:"msisdn_masked"`
 			Outstanding  struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"outstanding"`
 		} `json:"advances"`
 		Summary struct {
 			Disbursed struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"disbursed"`
 			Recovered struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"recovered"`
 			OpenOutstanding struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"open_outstanding"`
 			TotalCount int64            `json:"total_count"`
 			ByStatus   map[string]int64 `json:"by_status"`
@@ -212,11 +212,11 @@ func TestB1_LoanBook_RevenueRecognized_FromFeeIncomeLedger(t *testing.T) {
 	var resp struct {
 		Summary struct {
 			RevenueRecognized struct {
-				AmountMinor int64  `json:"amount_minor"`
+				AmountMinor int64  `json:"amount_minor,string"`
 				Currency    string `json:"currency"`
 			} `json:"revenue_recognized"`
 			OpenOutstanding struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"open_outstanding"`
 		} `json:"summary"`
 	}
@@ -242,7 +242,7 @@ func TestB1_LoanBook_RevenueRecognized_FromFeeIncomeLedger(t *testing.T) {
 	var gr struct {
 		Summary struct {
 			RevenueRecognized struct {
-				AmountMinor int64  `json:"amount_minor"`
+				AmountMinor int64  `json:"amount_minor,string"`
 				Currency    string `json:"currency"`
 			} `json:"revenue_recognized"`
 		} `json:"summary"`

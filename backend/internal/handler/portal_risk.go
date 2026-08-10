@@ -25,8 +25,15 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
 
+// moneyView is the portal's money shape. amount_minor is serialised as a STRING (`,string`) —
+// BX-MED-008: it is an int64 (kobo), and a portfolio-level aggregate (loan-book totals, ledger
+// receivable) can exceed JavaScript's 2^53 safe-integer limit, where a JSON number silently loses
+// precision. A string round-trips the exact integer to the browser (parse as needed). `display` is
+// the exact server-formatted value the UI renders; amount_minor is for the rare programmatic use.
+// The channel API's entity.Money keeps a numeric amount_minor: its consumers are telcos parsing
+// int64 natively, not JavaScript.
 type moneyView struct {
-	AmountMinor int64  `json:"amount_minor"`
+	AmountMinor int64  `json:"amount_minor,string"`
 	Currency    string `json:"currency"`
 	Display     string `json:"display"` // server-formatted; the UI never computes money
 }

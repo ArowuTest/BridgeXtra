@@ -130,7 +130,11 @@ export function configLifecycle(id: string, step: "submit" | "approve" | "activa
 
 // --- M4c risk workspace ---
 
-export type MoneyView = { amount_minor: number; currency: string; display: string };
+// BX-MED-008: amount_minor is an int64 (kobo) and a portfolio-level aggregate can exceed
+// Number.MAX_SAFE_INTEGER (2^53), so the API sends it as a STRING to preserve exact precision.
+// Render `display` (the exact server-formatted value); use Number(amount_minor) only for the rare
+// ratio / positivity check, never to display an exact amount.
+export type MoneyView = { amount_minor: string; currency: string; display: string };
 
 export type GuardrailTrip = {
   trip_id: string;

@@ -412,10 +412,10 @@ func TestM4D_LedgerBrowser_ScopeAndTapThrough(t *testing.T) {
 	var detail struct {
 		Entries []struct {
 			Debit struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"debit"`
 			Credit struct {
-				AmountMinor int64 `json:"amount_minor"`
+				AmountMinor int64 `json:"amount_minor,string"`
 			} `json:"credit"`
 		} `json:"entries"`
 	}
