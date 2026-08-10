@@ -170,9 +170,11 @@ func TestOverview_AddTiles_B3_B4_A9_AndScopeFailClosed(t *testing.T) {
 	if r.WrittenOff.AmountMinor != 3000 || r.WrittenOff.Display != "₦30.00" {
 		t.Fatalf("written_off must be the WRITE_OFF face (3000 minor = ₦30.00), got %d / %q", r.WrittenOff.AmountMinor, r.WrittenOff.Display)
 	}
-	// B4 paydown ratio = recovered / (recovered + open + written-off) = 2000/(2000+8000+3000).
-	want := 2000.0 / 13000.0
-	if wantBps := int64(want*10000 + 0.5); r.PaydownBps != wantBps {
+	// B4 paydown = recovered / (recovered + open + written-off) = 2000/(2000+8000+3000), as exact
+	// integer basis points. Computed with INTEGER arithmetic here too (BX-MED-008): asserting a money
+	// ratio via a float64 expectation is the very thing this finding is about, and it is what made
+	// this assertion disagree with the server by one bp (round vs truncate).
+	if wantBps := int64(2000*10000) / int64(2000+8000+3000); r.PaydownBps != wantBps {
 		t.Fatalf("paydown_bps must be recovered/(recovered+open+written-off) = %d bps, got %d — the write-off must LOWER it, not be omitted", wantBps, r.PaydownBps)
 	}
 	// A9 — ₦ arrears in the (unclassified) bucket equals that advance's outstanding, as money.
@@ -397,9 +399,9 @@ func TestOverview_PaydownDenominator_UsesFullFaceWrittenOff(t *testing.T) {
 		t.Fatalf("written_off must be the FULL FACE written off (1000), got %d — a net (debit−credit) basis would read 700 and overstate the ratio", r.WrittenOff.AmountMinor)
 	}
 	// Denominator = recovered + open + written-off face = 1000 + 4000 + 1000 = 6000.
-	// The old net basis would give 1000/(1000+4000+700) = 0.1724 — higher (overstated).
-	want := 1000.0 / 6000.0
-	if wantBps := int64(want*10000 + 0.5); r.PaydownBps != wantBps {
+	// The old net basis would give 1000/(1000+4000+700) = 1724 bps — higher (overstated).
+	// Integer arithmetic, matching the server exactly (truncating, never rounding).
+	if wantBps := int64(1000*10000) / int64(1000+4000+1000); r.PaydownBps != wantBps {
 		t.Fatalf("paydown_bps must use the full face in the denominator (= %d bps), got %d", wantBps, r.PaydownBps)
 	}
 }
