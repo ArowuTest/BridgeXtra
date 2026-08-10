@@ -724,6 +724,34 @@ func (s *Service) applyParkedIfAny(ctx context.Context, tx pgx.Tx, ingest *Inges
 	return nil
 }
 
+// reverseApplyDTO persists the APPLIED result of a reversal so a duplicate replays it
+// EXACTLY (P0-003), mirroring ingestResultDTO. Money is split into minor+currency.
+type reverseApplyDTO struct {
+	AppliedMinor    int64  `json:"applied_minor"`
+	AppliedCur      string `json:"applied_cur"`
+	AdvanceReopened bool   `json:"advance_reopened"`
+}
+
+func encodeReverseApply(r ReverseResult) ([]byte, error) {
+	d := reverseApplyDTO{AdvanceReopened: r.AdvanceReopened}
+	if r.Applied.IsSet() {
+		d.AppliedMinor, d.AppliedCur = r.Applied.Amount(), string(r.Applied.Currency())
+	}
+	return json.Marshal(d)
+}
+
+func decodeReverseApply(b []byte) (ReverseResult, error) {
+	var d reverseApplyDTO
+	if err := json.Unmarshal(b, &d); err != nil {
+		return ReverseResult{}, err
+	}
+	r := ReverseResult{AdvanceReopened: d.AdvanceReopened}
+	if d.AppliedCur != "" {
+		r.Applied = entity.MustMoney(d.AppliedMinor, entity.Currency(d.AppliedCur))
+	}
+	return r, nil
+}
+
 // applyReversal claws back an applied recovery: reverse-waterfall negative
 // allocations, outstanding restored, pool utilisation re-added (headroom
 // CHECK guards), CLOSED re-opens, mirrored balanced journal.
@@ -755,7 +783,17 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 		if rec.RequestHash != hash {
 			return ErrDivergentReversal
 		}
-		out.Replayed = true // already applied on the first submission — never double-book
+		// P0-003: EXACT-replay the original applied result (mirror the ingest path), not an
+		// empty result — a retry of an applied reversal returns the same Applied/AdvanceReopened
+		// it produced the first time. The claim already prevents the second clawback (INV-016);
+		// this makes the RESPONSE idempotent too, so the telco never sees a divergent reply.
+		replay, err := decodeReverseApply(rec.ResponseBody)
+		if err != nil {
+			return err
+		}
+		out.Applied = replay.Applied
+		out.AdvanceReopened = replay.AdvanceReopened
+		out.Replayed = true
 		return nil
 	}
 
@@ -883,6 +921,17 @@ func (s *Service) applyReversal(ctx context.Context, tx pgx.Tx, out *ReverseResu
 		}
 	}
 	out.Applied = amount
+	// P0-003: persist the applied result into the idempotency record so a duplicate
+	// reversal REPLAYS this exact outcome (mirror the ingest path's SetResponse), rather
+	// than returning an empty result. Same tx/SAVEPOINT as the clawback, so it commits or
+	// rolls back atomically with it.
+	body, err := encodeReverseApply(*out)
+	if err != nil {
+		return err
+	}
+	if err := s.idem.SetResponse(ctx, tx, telcoID, "recovery.reverse", reversalSourceID, 200, body); err != nil {
+		return err
+	}
 	return nil
 }
 

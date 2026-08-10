@@ -54,6 +54,12 @@ func TestBXP0003_PartialReversalExactRetry_NoDoubleClawback(t *testing.T) {
 	if !again.Replayed {
 		t.Fatalf("an exact reversal retry must replay, got %+v", again)
 	}
+	// P0-003 EXACT-replay: the retry must return the ORIGINAL applied result (2000), not an
+	// empty result — the response is idempotent, mirroring the ingest path. Mutation proof:
+	// remove the SetResponse/decodeReverseApply pair and Applied comes back unset here.
+	if !again.Applied.IsSet() || again.Applied.Amount() != 2_000 {
+		t.Fatalf("a replayed reversal must return the original applied amount (2000), got %v", again.Applied)
+	}
 	if _, o := f.advanceRow(t, adv.AdvanceID); o != 6_000 {
 		t.Fatalf("a replayed reversal must NOT claw back twice — outstanding must stay 6000, got %d", o)
 	}
