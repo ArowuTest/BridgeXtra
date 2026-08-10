@@ -24,7 +24,7 @@ func TestS2_WebhookCredentials_ResolveRevokeUnique(t *testing.T) {
 	db := testutil.MustSetup(t, "repo_whcred")
 	ctx := context.Background()
 	admin := &repo.WebhookCredentials{Pool: db.Admin} // creation: owner/admin bootstrap
-	app := &repo.WebhookCredentials{Pool: db.App}      // runtime: resolve + revoke
+	app := &repo.WebhookCredentials{Pool: db.App}     // runtime: resolve + revoke
 
 	if err := admin.Create(ctx, "kid-1", "SIM_NG", "TCP_MTN_HMAC_1", "mtn primary"); err != nil {
 		t.Fatalf("create (admin): %v", err)
