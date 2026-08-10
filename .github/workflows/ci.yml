@@ -110,16 +110,44 @@ jobs:
           # secret the scan just caught.
           /tmp/gitleaks dir . --config .gitleaks.toml --no-banner --redact --exit-code 1
 
-  # BX-MED-015: dependency review — flags advisories in what a PR ADDS.
+  # BX-MED-015 (reviewer follow-up): the dependency gate that runs on EVERY event.
   #
-  # NOT redundant with govulncheck: govulncheck is reachability-based, so a newly
-  # added dependency carrying a known advisory that nothing calls yet is invisible
-  # to it. This job flags the dependency itself.
+  # dependency-review-action below only works on pull_request (it diffs base against head), so on a
+  # direct push to main — how this repository is actually developed — there was NO dependency gate
+  # at all. govulncheck does not close that hole: it is reachability-based (a known-vulnerable
+  # dependency that nothing calls yet is invisible to it) and it does not look at npm at all.
   #
-  # HONEST LIMITATION: the action only works on pull_request events (it diffs the
-  # PR's base against its head), so it does not run on direct pushes to main.
-  # It is merge-blocking for the PR path; SBOM + provenance + artifact signing
-  # remain staged for production certification, per the audit.
+  # OSV-Scanner is advisory-based, covers BOTH ecosystems from the lockfiles, and runs on push and
+  # PR alike. Pinned by version AND sha256 of the exact binary, verified against upstream's
+  # published SHA256SUMS — the same posture as the gitleaks gate.
+  #
+  # When this fails: fix the dependency. Do not add an ignore without a reviewer-gated reason.
+  dependency-advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install osv-scanner (pinned version + verified checksum)
+        env:
+          OSV_VERSION: v2.5.0
+          OSV_SHA256: edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 --retry-all-errors -o /tmp/osv-scanner \
+            "https://github.com/google/osv-scanner/releases/download/${OSV_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SHA256}  /tmp/osv-scanner" | sha256sum -c -
+          chmod +x /tmp/osv-scanner
+          /tmp/osv-scanner --version
+
+      - name: Known-vulnerable dependencies (Go + npm, merge-blocking)
+        run: |
+          set -euo pipefail
+          /tmp/osv-scanner scan source \
+            --lockfile=go.mod \
+            --lockfile=portal/package-lock.json
+
+  # BX-MED-015: dependency review — additionally flags advisories in what a PR ADDS, with GitHub's
+  # own diff view. Retained alongside the scan above; it only runs on pull_request events.
   dependency-review:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
