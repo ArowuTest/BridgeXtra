@@ -205,8 +205,8 @@ func main() {
 		return
 	}
 	if *armDisarm != "" {
-		if *overrideActor == "" {
-			log.Error("recon-disarm requires -actor")
+		if *overrideActor == "" || *overrideReason == "" {
+			log.Error("recon-disarm requires -actor and -reason (the disarm is durably audited, BX-MED-004)")
 			os.Exit(1)
 		}
 		svc := recon.New(workerPool, appCfg, log)

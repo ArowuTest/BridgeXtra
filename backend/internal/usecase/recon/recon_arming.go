@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/entity"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/platform"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 )
@@ -153,7 +154,34 @@ func (s *Service) ApproveArmRecovery(ctx context.Context, requestID, approvedBy 
 // closing a money door is the fail-safe direction. SetDown deletes the arming row,
 // which closes the webhook on the next request.
 func (s *Service) DisarmRecovery(ctx context.Context, telcoID, actor, reason string) error {
-	if err := s.Arming.SetDown(ctx, telcoID, repo.ReconLayerRecovery); err != nil {
+	// BX-MED-004: a manual money-door control must record WHO and WHY, durably. Disarming a telco's
+	// RECOVERY layer turns off a live money-safety pipeline; the arm path persists
+	// proposer/approver/reason to recon_layer_arming_requests, but disarm previously only logged to
+	// stdout and DELETE-and-forgot — no auditable trail. Require a reason and write a durable
+	// audit_events row ATOMICALLY with the disarm, so the record and reality never diverge.
+	if actor == "" || reason == "" {
+		return fmt.Errorf("recovery disarm requires an actor and a reason (BX-MED-004)")
+	}
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+	if err := s.Arming.SetDownTx(ctx, tx, telcoID, repo.ReconLayerRecovery); err != nil {
+		return err
+	}
+	if err := (repo.Audit{}).Insert(ctx, tx, entity.AuditEvent{
+		ID:         platform.NewID("aud"),
+		TelcoID:    telcoID,
+		Actor:      actor,
+		Action:     "recon.recovery.disarmed",
+		TargetType: "recon_layer",
+		TargetID:   "recovery:" + telcoID,
+		Reason:     reason,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	s.Log.Info("recovery layer DISARMED (single-actor)", "telco", telcoID, "by", actor, "reason", reason)

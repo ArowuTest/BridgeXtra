@@ -97,3 +97,11 @@ func (r *ReconArming) SetDown(ctx context.Context, telcoID, layer string) error 
 		`DELETE FROM recon_layer_arming WHERE telco_id = $1 AND layer = $2`, telcoID, layer)
 	return err
 }
+
+// SetDownTx disarms a layer inside a caller's transaction, so the disarm and its durable audit
+// record commit atomically (BX-MED-004).
+func (ReconArming) SetDownTx(ctx context.Context, tx pgx.Tx, telcoID, layer string) error {
+	_, err := tx.Exec(ctx,
+		`DELETE FROM recon_layer_arming WHERE telco_id = $1 AND layer = $2`, telcoID, layer)
+	return err
+}
