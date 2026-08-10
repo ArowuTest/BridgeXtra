@@ -7,6 +7,7 @@ package repo
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -192,4 +193,44 @@ func (HeldRecharge) DailyIngestedMinor(ctx context.Context, tx pgx.Tx, telcoID s
 		return 0, err
 	}
 	return sum, nil
+}
+
+// ReserveDaily atomically reserves `amount` against the telco's per-UTC-day recharge
+// ceiling (BX-HIGH-001). The conditional UPSERT row-locks the (telco, day) counter, so
+// concurrent bookers serialize and the ceiling can never be raced past: it reserves iff the
+// new running total stays within `ceiling`. Returns the business_day reserved against (for a
+// later ReleaseDaily) and whether the reservation succeeded. A single event never exceeds the
+// ceiling (config enforces per_event_max <= daily_ceiling), so the INSERT path is always in
+// bounds. Runs on the caller's tenant tx (RLS-scoped) and uses the same UTC-day window as
+// DailyIngestedMinor.
+func (HeldRecharge) ReserveDaily(ctx context.Context, tx pgx.Tx, telcoID string, amount, ceiling int64) (time.Time, bool, error) {
+	var day time.Time
+	err := tx.QueryRow(ctx, `
+		INSERT INTO recharge_daily_reservation (telco_id, business_day, reserved_minor)
+		VALUES ($1, (now() AT TIME ZONE 'UTC')::date, $2)
+		ON CONFLICT (telco_id, business_day) DO UPDATE
+		   SET reserved_minor = recharge_daily_reservation.reserved_minor + $2
+		 WHERE recharge_daily_reservation.reserved_minor + $2 <= $3
+		RETURNING business_day`, telcoID, amount, ceiling).Scan(&day)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, false, nil // would exceed the ceiling
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	return day, true, nil
+}
+
+// ReleaseDaily returns a previously-reserved amount to the telco's per-day ceiling budget
+// (BX-HIGH-001) — called when the booking the reservation guarded did not consume new
+// capacity (the booking failed, or was an idempotent replay). Pass the exact business_day
+// ReserveDaily returned so a release near a UTC midnight can never decrement the wrong day.
+// The CHECK (reserved_minor >= 0) makes an over-release fail loudly rather than ever making
+// the ceiling looser. Runs on a tenant tx.
+func (HeldRecharge) ReleaseDaily(ctx context.Context, tx pgx.Tx, telcoID string, day time.Time, amount int64) error {
+	_, err := tx.Exec(ctx, `
+		UPDATE recharge_daily_reservation
+		   SET reserved_minor = reserved_minor - $3
+		 WHERE telco_id = $1 AND business_day = $2`, telcoID, day, amount)
+	return err
 }
