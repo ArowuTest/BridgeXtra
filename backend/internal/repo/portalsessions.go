@@ -226,11 +226,13 @@ func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(c
 			return fmt.Errorf("scope telco: %w", err)
 		}
 	case scope.programme != "":
-		// Programme-scoped: pin the telco (DB-enforced) via a trusted lookup; the
-		// repo query keeps the programme_id filter (intra-tenant, app-level residual).
-		// A programme that resolves to no telco (unknown/mis-scoped) sets NO GUC —
-		// fail-closed to empty rather than erroring, so a stale or foreign programme
-		// scope simply sees nothing.
+		// Programme-scoped: pin the telco (DB-enforced) via a trusted lookup AND pin the programme
+		// (DB-enforced, BX-MED-010) so the operator is confined to its own programme's rows, not the
+		// whole telco. app.programme_id drives the RESTRICTIVE op_programme_confine_* policies
+		// (migration 0081) on the programme-grained money/risk tables; the previous "app-level
+		// residual" programme filter was applied inconsistently and could be forgotten. A programme
+		// that resolves to no telco (unknown/mis-scoped) sets NO GUC — fail-closed to empty rather
+		// than erroring, so a stale or foreign programme scope simply sees nothing.
 		telco, err := r.programmeTelco(ctx, scope.programme)
 		if err != nil {
 			return err
@@ -238,6 +240,9 @@ func (r OperatorReader) Read(ctx context.Context, scope OperatorScope, fn func(c
 		if telco != "" {
 			if _, err := tx.Exec(ctx, `SELECT set_config('app.telco_id',$1,true)`, telco); err != nil {
 				return fmt.Errorf("scope programme telco: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `SELECT set_config('app.programme_id',$1,true)`, scope.programme); err != nil {
+				return fmt.Errorf("scope programme id: %w", err)
 			}
 		}
 	default:
