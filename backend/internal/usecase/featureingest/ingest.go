@@ -56,6 +56,12 @@ type fileShape struct {
 	TelcoID string     `json:"telco_id"`
 	AsOf    time.Time  `json:"as_of"`
 	Rows    []rowShape `json:"rows"`
+	// RowCount (BX-HIGH-006): the feed's self-declared control total. When present it MUST
+	// equal len(Rows) — a mismatch means a truncated/corrupted/partial cut, which is refused
+	// rather than silently ingested. Mandatory for a real (non-synthetic) telco; a synthetic
+	// telco may omit it. The full partner-SIGNED manifest remains gated on the MTN contract
+	// (BX-HIGH-015).
+	RowCount *int `json:"row_count"`
 }
 
 type rowShape struct {
@@ -132,8 +138,9 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	// of the same suspension gate enforced at channel + webhook auth. telcos is a global
 	// non-RLS registry, so a plain SELECT (tcp_app has the grant) is correct here.
 	var telcoStatus string
-	if err := s.Pool.QueryRow(ctx, `SELECT status FROM telcos WHERE telco_id=$1`, telcoID).Scan(&telcoStatus); err != nil {
-		return Summary{}, fmt.Errorf("telco status lookup for %s: %w", telcoID, err)
+	var isSynthetic bool
+	if err := s.Pool.QueryRow(ctx, `SELECT status, is_synthetic FROM telcos WHERE telco_id=$1`, telcoID).Scan(&telcoStatus, &isSynthetic); err != nil {
+		return Summary{}, fmt.Errorf("telco lookup for %s: %w", telcoID, err)
 	}
 	if telcoStatus != "ACTIVE" {
 		return Summary{}, fmt.Errorf("telco %s is %s (not ACTIVE) — feature-feed ingestion refused (BX-HIGH-003)", telcoID, telcoStatus)
@@ -141,6 +148,17 @@ func (s *Service) IngestRaw(ctx context.Context, telcoID, source string, raw []b
 	var file fileShape
 	if err := json.Unmarshal(raw, &file); err != nil {
 		return Summary{}, fmt.Errorf("feature file does not parse: %w", err)
+	}
+	// BX-HIGH-006: feed-integrity control total. A declared row_count must match the actual
+	// rows — a truncated/corrupted/partial cut is refused, never silently ingested. For a REAL
+	// (non-synthetic) telco the control total is MANDATORY: a real MNO feed must be
+	// integrity-checkable end to end. A synthetic telco may omit it. The full partner-SIGNED
+	// manifest (cryptographic provenance) remains gated on the MTN interface contract (BX-HIGH-015).
+	switch {
+	case file.RowCount != nil && *file.RowCount != len(file.Rows):
+		return Summary{}, fmt.Errorf("feature feed control total mismatch: declared row_count %d != %d actual rows — refusing a truncated/corrupted cut (BX-HIGH-006)", *file.RowCount, len(file.Rows))
+	case file.RowCount == nil && !isSynthetic:
+		return Summary{}, fmt.Errorf("a real telco's feature feed must declare a row_count control total — refusing an unverifiable cut (BX-HIGH-006)")
 	}
 	// BX-HIGH-006: the feed's self-declared telco_id MUST match the authenticated
 	// telco we fetched it for. Without this, a feed (or a misrouted / compromised
