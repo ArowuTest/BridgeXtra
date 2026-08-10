@@ -82,6 +82,14 @@ func (s *Service) Generate(ctx context.Context, telcoID, programmeID string, per
 	if !periodEnd.After(periodStart) {
 		return Statement{}, fmt.Errorf("period_end must be after period_start")
 	}
+	// BX-HIGH-011: a statement is a deterministic function of the ledger IN the period, so
+	// only a CLOSED period may be settled. If period_end is in the future the period is still
+	// accumulating — a statement generated now would not reproduce once more events land in
+	// it. Refuse open/future periods rather than emit a premature, non-reproducible statement.
+	if periodEnd.After(time.Now().UTC()) {
+		return Statement{}, fmt.Errorf("cannot settle an open/future period: period_end %s is not yet closed",
+			periodEnd.UTC().Format(time.RFC3339))
+	}
 	// BX-HIGH-011: resolve the terms in force DURING the settlement period, not at
 	// generation time. Using time.Now() meant a statement generated (or backfilled) after a
 	// terms renegotiation applied the NEW terms to an OLD period. Anchor at periodStart (the
