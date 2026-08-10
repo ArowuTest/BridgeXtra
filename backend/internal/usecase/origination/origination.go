@@ -18,6 +18,7 @@
 package origination
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -91,21 +92,66 @@ var (
 // disclosure's validity window.
 const acceptanceSkew = 2 * time.Minute
 
-// confirmRequestHash is the canonical equivalence fingerprint of a confirm
-// command (R-P0-1). Only the fields that DEFINE the command are hashed —
-// programme, offer, and the subscriber token presented. The offer fully pins
-// the money (amounts/fee/terms are immutable per 0023), so these three
-// determine the material effect. correlation_id is per-attempt tracing and is
-// deliberately excluded: a legitimate retry may carry a fresh one.
+// confirmRequestHash is the canonical equivalence fingerprint of a confirm command
+// (R-P0-1, BX-MED-001). It hashes every field that DEFINES the command AND its
+// legal/consent evidence — programme, offer, token, disclosure_ref, channel, session_id,
+// accepted_at and telco_evidence — so a retry that changed ANY of them (materially different
+// acceptance evidence under the same idempotency key) is caught as a divergent duplicate
+// rather than silently treated as the same command. Only per-attempt TRACING is excluded:
+// correlation_id (a legitimate retry may carry a fresh one) and the idem_key itself (the key,
+// not the body). Time and JSON evidence are NORMALISED so a byte-different-but-equivalent
+// retry does not falsely diverge: accepted_at to whole UTC seconds, telco_evidence to
+// canonical JSON (sorted keys, number-precision-preserving, whitespace-independent).
 func confirmRequestHash(cmd ConfirmCmd) string {
 	// Struct field order is fixed, so json.Marshal is deterministic.
 	b, _ := json.Marshal(struct {
-		Programme string `json:"programme_id"`
-		Offer     string `json:"offer_id"`
-		Token     string `json:"msisdn_token"`
-	}{cmd.ProgrammeID, cmd.OfferID, cmd.MSISDNToken})
+		Programme     string `json:"programme_id"`
+		Offer         string `json:"offer_id"`
+		Token         string `json:"msisdn_token"`
+		DisclosureRef string `json:"disclosure_ref"`
+		Channel       string `json:"channel"`
+		SessionID     string `json:"session_id"`
+		AcceptedAt    int64  `json:"accepted_at_unix"`
+		TelcoEvidence string `json:"telco_evidence"`
+	}{
+		cmd.ProgrammeID, cmd.OfferID, cmd.MSISDNToken,
+		cmd.DisclosureRef, cmd.Channel, cmd.SessionID,
+		normalizeAcceptedAt(cmd.AcceptedAt),
+		canonicalJSON(cmd.TelcoEvidence),
+	})
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// normalizeAcceptedAt reduces accepted_at to whole UTC seconds: sub-second precision, or a
+// timezone-offset representation of the SAME instant, must not make a legitimate retry diverge.
+// A zero time hashes to 0.
+func normalizeAcceptedAt(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UTC().Truncate(time.Second).Unix()
+}
+
+// canonicalJSON re-marshals arbitrary JSON evidence to a canonical form (sorted object keys,
+// no insignificant whitespace, original number precision via UseNumber) so an equivalent retry
+// whose evidence differs only in key order or formatting does not diverge. Empty stays empty;
+// bytes that are not valid JSON are hashed verbatim rather than dropped.
+func canonicalJSON(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return string(raw)
+	}
+	out, err := json.Marshal(v) // json.Marshal sorts map keys; json.Number keeps the exact literal
+	if err != nil {
+		return string(raw)
+	}
+	return string(out)
 }
 
 type Service struct {
