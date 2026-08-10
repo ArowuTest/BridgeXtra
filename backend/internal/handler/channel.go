@@ -239,12 +239,18 @@ func (h *Channel) confirm(w http.ResponseWriter, r *http.Request) {
 	}
 	status := http.StatusCreated
 	switch {
-	case res.Replayed:
-		status = http.StatusOK // EDG-001: replay returns the original outcome
+	// BX-MED-002: "pending" and "failed" are properties of the OUTCOME, not of the request's
+	// novelty. A replay of an UNKNOWN confirm is still pending — it must return 202 (poll the
+	// status route), never a 200 that a status-polling channel reads as "settled". So derive the
+	// outcome statuses from state FIRST — because the replay now hands back the ORIGINAL advance
+	// (its persisted confirm-time state, BX-MED-002), a replay returns the same status class as
+	// the original; only a freshly-created ACTIVE flips 201 -> 200 on replay.
 	case res.Advance.State == entity.AdvFulfilmentUnknown:
-		status = http.StatusAccepted // EDG-004: safe pending + status route
+		status = http.StatusAccepted // EDG-004: safe pending + status route (fresh or replay)
 	case res.Advance.State == entity.AdvFulfilmentFailed:
-		status = http.StatusUnprocessableEntity
+		status = http.StatusUnprocessableEntity // fresh or replay
+	case res.Replayed:
+		status = http.StatusOK // EDG-001: an already-created ACTIVE — replay, not a fresh 201
 	}
 	writeJSON(w, status, toAdvanceResponse(res.Advance))
 }

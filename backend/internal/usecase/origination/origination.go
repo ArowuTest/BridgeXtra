@@ -154,6 +154,66 @@ func canonicalJSON(raw json.RawMessage) string {
 	return string(out)
 }
 
+// confirmResponseDTO is the exact confirm response snapshot persisted onto the idempotency
+// record after the outcome resolves (BX-MED-002), so a later replay returns THIS — the response
+// the original confirm produced — rather than the advance's since-progressed current state
+// (e.g. UNKNOWN later resolved to ACTIVE, or outstanding reduced by recovery). It holds exactly
+// the fields the channel confirm response renders.
+type confirmResponseDTO struct {
+	AdvanceID string `json:"advance_id"`
+	State     string `json:"state"`
+	FaceMinor int64  `json:"face_minor"`
+	FaceCur   string `json:"face_cur"`
+	DisbMinor int64  `json:"disb_minor"`
+	DisbCur   string `json:"disb_cur"`
+	OutMinor  int64  `json:"out_minor"`
+	OutCur    string `json:"out_cur"`
+}
+
+func encodeConfirmResponse(a entity.Advance) ([]byte, error) {
+	d := confirmResponseDTO{AdvanceID: a.AdvanceID, State: string(a.State)}
+	if a.FaceValue.IsSet() {
+		d.FaceMinor, d.FaceCur = a.FaceValue.Amount(), string(a.FaceValue.Currency())
+	}
+	if a.Disbursed.IsSet() {
+		d.DisbMinor, d.DisbCur = a.Disbursed.Amount(), string(a.Disbursed.Currency())
+	}
+	if a.Outstanding.IsSet() {
+		d.OutMinor, d.OutCur = a.Outstanding.Amount(), string(a.Outstanding.Currency())
+	}
+	return json.Marshal(d)
+}
+
+func decodeConfirmResponse(b []byte) (entity.Advance, bool) {
+	var d confirmResponseDTO
+	if err := json.Unmarshal(b, &d); err != nil || d.AdvanceID == "" {
+		return entity.Advance{}, false // placeholder / not-yet-finalised body
+	}
+	a := entity.Advance{AdvanceID: d.AdvanceID, State: entity.AdvanceState(d.State)}
+	if d.FaceCur != "" {
+		a.FaceValue = entity.MustMoney(d.FaceMinor, entity.Currency(d.FaceCur))
+	}
+	if d.DisbCur != "" {
+		a.Disbursed = entity.MustMoney(d.DisbMinor, entity.Currency(d.DisbCur))
+	}
+	if d.OutCur != "" {
+		a.Outstanding = entity.MustMoney(d.OutMinor, entity.Currency(d.OutCur))
+	}
+	return a, true
+}
+
+// replayConfirmAdvance returns the advance to hand back on a confirm REPLAY (BX-MED-002): the
+// EXACT persisted original response when it was finalised (ResponseStatus 200), else the current
+// advance as a fallback for a duplicate racing the winner's tx2/SetResponse window.
+func (s *Service) replayConfirmAdvance(ctx context.Context, tx pgx.Tx, telcoID, idemKey string) (entity.Advance, error) {
+	if rec, err := s.idem.Get(ctx, tx, telcoID, "advance.confirm", idemKey); err == nil && rec.ResponseStatus == 200 {
+		if a, ok := decodeConfirmResponse(rec.ResponseBody); ok {
+			return a, nil
+		}
+	}
+	return s.advances.GetByIdemKey(ctx, tx, idemKey)
+}
+
 type Service struct {
 	Pool    *pgxpool.Pool // tcp_app
 	Config  *configsvc.Service
@@ -682,9 +742,10 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 				divergent = true
 				return ErrDivergentDuplicate
 			}
-			// Genuine replay: the original advance committed in the winner's
-			// tx alongside this record, so it is visible now.
-			existing, err := s.advances.GetByIdemKey(ctx, tx, cmd.IdemKey)
+			// Genuine replay: return the EXACT original confirm response (BX-MED-002), not the
+			// advance's since-progressed current state. The winner's response is persisted after
+			// its outcome resolves; until then this falls back to the current advance.
+			existing, err := s.replayConfirmAdvance(ctx, tx, telcoID, cmd.IdemKey)
 			if err != nil {
 				return err
 			}
@@ -766,8 +827,9 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 		now := time.Now().UTC()
 		switch {
 		case offer.State == entity.OfferAccepted:
-			// EDG-001 replay path: the advance for this offer already exists.
-			existing, err := s.advances.GetByIdemKey(ctx, tx, cmd.IdemKey)
+			// EDG-001 replay path: the advance for this offer already exists — return the exact
+			// original confirm response (BX-MED-002), not its current state.
+			existing, err := s.replayConfirmAdvance(ctx, tx, telcoID, cmd.IdemKey)
 			if err == nil {
 				adv, replayed = existing, true
 				return nil
@@ -1016,6 +1078,17 @@ func (s *Service) Confirm(ctx context.Context, cmd ConfirmCmd) (ConfirmResult, e
 	if err != nil {
 		return ConfirmResult{}, err
 	}
+	// BX-MED-002: persist the EXACT confirm response so a later replay returns THIS, not the
+	// advance's since-progressed current state (idempotent response, V2-API-003). Best-effort in
+	// its own tx after the outcome commits; on failure a replay safely falls back to current state.
+	if body, encErr := encodeConfirmResponse(final); encErr == nil {
+		if e := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+			return s.idem.SetResponse(ctx, tx, telcoID, "advance.confirm", cmd.IdemKey, 200, body)
+		}); e != nil {
+			s.Log.Warn("confirm response snapshot not persisted — replay falls back to current state",
+				"advance", final.AdvanceID, "err", e)
+		}
+	}
 	return ConfirmResult{Advance: final}, nil
 }
 
@@ -1064,10 +1137,15 @@ func (s *Service) GetAdvance(ctx context.Context, advanceID string) (entity.Adva
 }
 
 func (s *Service) replayByIdemKey(ctx context.Context, idemKey string) (ConfirmResult, error) {
+	telcoID, err := platform.TenantFrom(ctx)
+	if err != nil {
+		return ConfirmResult{}, err
+	}
 	var adv entity.Advance
-	err := repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
+	err = repo.WithTenantTx(ctx, s.Pool, func(tx pgx.Tx) error {
 		var e error
-		adv, e = s.advances.GetByIdemKey(ctx, tx, idemKey)
+		// BX-MED-002: the exact original response when finalised, else the current advance.
+		adv, e = s.replayConfirmAdvance(ctx, tx, telcoID, idemKey)
 		return e
 	})
 	if err != nil {
