@@ -45,6 +45,13 @@ func TestS3B_DayConfirmed(t *testing.T) {
 		{"under-floor does not", Summary{PlatformRecords: 2, PlatformControlTotalMinor: 1000, MatchedControlTotalMinor: 980}, false},
 		{"fully matched confirms", Summary{PlatformRecords: 2, PlatformControlTotalMinor: 1000, MatchedControlTotalMinor: 1000}, true},
 		{"at floor confirms", Summary{PlatformRecords: 2, PlatformControlTotalMinor: 1000, MatchedControlTotalMinor: 990}, true},
+
+		// BX-HIGH-016: evidence the engine REJECTED is never positive confirmation. The first case is
+		// the exact shape that reopened the money gate: a completeness-rejected run whose platform and
+		// source sides are both zero would otherwise fall into the quiet-day branch and confirm.
+		{"REJECTED quiet day does NOT confirm", Summary{Rejected: true, PlatformRecords: 0, SourceRecordCount: 0}, false},
+		{"REJECTED fully-matched day does NOT confirm", Summary{Rejected: true, PlatformRecords: 2, PlatformControlTotalMinor: 1000, MatchedControlTotalMinor: 1000}, false},
+		{"a summary that reconciled nothing does NOT confirm", Summary{NothingToReconcile: true, PlatformRecords: 0, SourceRecordCount: 0}, false},
 	}
 	for _, c := range cases {
 		if got := dayConfirmed(c.sum, 0.99); got != c.want {

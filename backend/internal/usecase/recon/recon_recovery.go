@@ -204,6 +204,29 @@ func mapFeedToTelco(env recoveryfeed.DayEnvelope, businessDate string, start tim
 // platform control total (measured on MONEY, not row count, so an intra-day
 // sub-event drop where counts happen to match but totals move is caught).
 func dayConfirmed(sum Summary, minConfirmationRatio float64) bool {
+	// BX-HIGH-016: evidence the recon engine REJECTED can never be positive confirmation for the
+	// RECOVERY money gate.
+	//
+	// A completeness failure sets sum.Rejected, persists a REJECTED run and deliberately preserves
+	// the previous ACTIVE run — the engine is saying "this snapshot is not trustworthy". That
+	// Summary then returns NORMALLY (no error), and the hold-clearing path below already refuses it
+	// with `!sum.Rejected && !sum.NothingToReconcile`. The freshness path did not, so a rejected
+	// snapshot could still renew last_recon_at and hold the recharge webhook open.
+	//
+	// The reachable shape is narrow but is exactly what the completeness floor exists to catch: a
+	// prior ACTIVE run with rows, a window with zero platform recovery events, and a feed that
+	// collapses to an authenticated zero. The floor rejects it; without this guard the quiet-day
+	// branch below then reads (0,0) as "confirmed" and reopens the gate on the evidence the engine
+	// just refused.
+	//
+	// The rule lives HERE rather than at the call site so it holds for every future caller — a
+	// second consumer of this predicate must not be able to reintroduce the hole.
+	// Note this does NOT change legitimate quiet-day semantics: an authenticated zero day that was
+	// NOT rejected still confirms, and an approved completeness override produces an accepted run
+	// (Rejected=false) which therefore still confirms.
+	if sum.Rejected || sum.NothingToReconcile {
+		return false
+	}
 	if sum.PlatformRecords == 0 {
 		return sum.SourceRecordCount == 0
 	}
