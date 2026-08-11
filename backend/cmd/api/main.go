@@ -114,7 +114,11 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 	// refuses to boot without it, so no surface ever runs unlimited). Read via the app
 	// role, which has SELECT on config_versions — no config/BYPASSRLS pool needed here,
 	// which is what lets a data-plane process load its limiter without a config pool.
-	limiter, trustedProxies, err := handler.LoadRateLimiter(ctx, configsvc.New(d.AppPool))
+	// BX-MED-006: the Guard pairs that per-process limiter with a SHARED bucket store, so the
+	// per-telco quota is enforced across replicas rather than granted in full by each one. The store
+	// runs on the app pool (the buckets are keyed by the validated telco and bounded by an FK to
+	// telcos), which keeps a data-plane process able to build its limiter with no extra privilege.
+	guard, trustedProxies, err := handler.LoadGuard(ctx, configsvc.New(d.AppPool), repo.RateLimitBuckets{Pool: d.AppPool}, d.Log)
 	if err != nil {
 		return nil, fmt.Errorf("rate limiter (required at boot): %w", err)
 	}
@@ -159,7 +163,7 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 			Pool:              d.AppPool,
 			Operators:         operatormgmt.New(d.AppPool, d.Log),
 			Held:              rechargehold.New(d.AppPool, rec, d.Log),
-			Limiter:           limiter,
+			Guard:             guard,
 			TrustedProxyCount: trustedProxies,
 			Log:               d.Log,
 		}
@@ -171,7 +175,7 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 		auth := &handler.TenantAuth{Telcos: telcos, Pool: d.AppPool, Log: d.Log}
 		programmes := repo.Programmes{}
 
-		channel := &handler.Channel{Origination: orig, Recovery: rec, Limiter: limiter, TrustedProxyCount: trustedProxies, Log: d.Log}
+		channel := &handler.Channel{Origination: orig, Recovery: rec, Guard: guard, TrustedProxyCount: trustedProxies, Log: d.Log}
 		channel.Mount(mux, auth)
 
 		// Phase 1 S2: the inbound MNO recharge webhook (HMAC-authenticated, its own
@@ -181,7 +185,7 @@ func buildMux(ctx context.Context, p planes, d serverDeps) (*http.ServeMux, erro
 			Recovery: rec, Config: appCfg,
 			Creds: &repo.WebhookCredentials{Pool: d.AppPool}, Recon: &repo.ReconArming{Pool: d.AppPool},
 			Pool: d.AppPool, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
-			Limiter: limiter, TrustedProxyCount: trustedProxies, Log: d.Log,
+			Guard: guard, TrustedProxyCount: trustedProxies, Log: d.Log,
 		}
 		rechargeHook.Mount(mux)
 

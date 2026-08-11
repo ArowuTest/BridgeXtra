@@ -66,15 +66,17 @@ func newWebhookFixture(t *testing.T, suffix string, telcoEnabled bool, perEventM
 
 	appCfg := configsvc.New(db.App)
 	rec := recovery.New(db.App, appCfg, ledger.New(appCfg), slog.Default())
-	lim := ratelimit.New(map[string]ratelimit.Limit{
+	// The REAL aggregate store on the app pool, not a stub: this door is a money door, so its
+	// functional tests should exercise the same shared-bucket path production takes.
+	lim := ratelimit.NewGuard(ratelimit.New(map[string]ratelimit.Limit{
 		"channel":    {RatePerMinute: 1e9, Burst: 1e9},
 		"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
-	})
+	}), repo.RateLimitBuckets{Pool: db.App}, testAgg(), 0, nil)
 	h := &handler.RechargeWebhook{
 		Recovery: rec, Config: appCfg,
 		Creds: &repo.WebhookCredentials{Pool: db.App}, Recon: &repo.ReconArming{Pool: db.App},
 		Pool: db.App, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
-		Limiter: lim, Log: slog.Default(),
+		Guard: lim, Log: slog.Default(),
 	}
 	mux := http.NewServeMux()
 	h.Mount(mux)

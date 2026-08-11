@@ -5,9 +5,14 @@
 // an unknown scope is DENIED — a surface wired to a scope with no configured
 // limit must never run unlimited (reachability invariant).
 //
-// Scope: per-process. It stops a single client saturating one instance, which
-// is the pre-pilot concern; cross-instance coordination (a shared store or an
-// edge gateway) is a scale hardening tracked for production, noted honestly.
+// Scope: this Limiter is per-process — it stops a single client saturating one
+// instance. Cross-instance coordination is NO LONGER outstanding: BX-MED-006
+// added Guard (guard.go), which pairs this limiter with a shared Postgres bucket
+// so the per-telco quota is authoritative across replicas. This limiter is kept
+// in front of it as defence in depth, so a replica that loses the shared store
+// still caps itself. The IP-keyed surfaces (login, channel_ip) remain per-process
+// BY DESIGN — see migrations/0083 for why aggregating them would create a
+// targeted, fleet-wide lockout that does not exist today.
 package ratelimit
 
 import (

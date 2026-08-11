@@ -59,7 +59,7 @@ type RechargeWebhook struct {
 	Auth              rechargewebhook.InboundAuthAdapter
 	Mapper            rechargewebhook.Mapper
 	Audit             repo.Audit
-	Limiter           *ratelimit.Limiter
+	Guard             *ratelimit.Guard
 	TrustedProxyCount int
 	Log               *slog.Logger
 }
@@ -86,13 +86,11 @@ type feedCfg struct {
 
 // Mount wires the webhook route through the standard onion.
 func (h *RechargeWebhook) Mount(mux *http.ServeMux) {
-	if h.Limiter == nil {
-		panic("recharge webhook: rate limiter is required (fail-closed)")
-	}
+	mustGuard("recharge webhook", h.Guard, "channel")
 	ipKey := func(r *http.Request) string { return clientIP(r, h.TrustedProxyCount) }
-	inner := perTelcoRateLimit(h.Limiter, Correlation(http.HandlerFunc(h.ingest)))
+	inner := perTelcoRateLimit(h.Guard, Correlation(http.HandlerFunc(h.ingest)))
 	mux.Handle("POST /v1/telcos/{telco}/recharge-webhook",
-		rateLimited(h.Limiter, "channel_ip", ipKey, h.webhookAuth(inner)))
+		rateLimited(h.Guard, "channel_ip", ipKey, h.webhookAuth(inner)))
 }
 
 type verifiedKey struct{}

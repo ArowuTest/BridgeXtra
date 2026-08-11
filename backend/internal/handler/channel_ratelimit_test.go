@@ -30,11 +30,11 @@ func TestRP08F1_RotatingInvalidKeys_StillThrottledByIP(t *testing.T) {
 	// httptest requests share 127.0.0.1, exactly one attacker IP).
 	ch := &handler.Channel{
 		Origination: nil, Recovery: nil, TrustedProxyCount: 0, Log: slog.Default(),
-		Limiter: ratelimit.New(map[string]ratelimit.Limit{
+		Guard: ratelimit.NewGuard(ratelimit.New(map[string]ratelimit.Limit{
 			"login":      {RatePerMinute: 0.001, Burst: 5},
 			"channel":    {RatePerMinute: 1e9, Burst: 1e9},
 			"channel_ip": {RatePerMinute: 0.001, Burst: 5},
-		}),
+		}), &grantAllStore{}, testAgg(), 0, nil),
 	}
 	ch.Mount(mux, auth)
 	srv := httptest.NewServer(mux)

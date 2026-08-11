@@ -98,10 +98,16 @@ func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeout
 	telcos := &repo.Telcos{Pool: db.App}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: db.App, Log: slog.Default()}
 	mux := http.NewServeMux()
-	(&handler.Channel{Origination: orig, Recovery: rec, Limiter: ratelimit.New(map[string]ratelimit.Limit{
-		"channel":    {RatePerMinute: 1e9, Burst: 1e9},
-		"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
-	}), Log: slog.Default()}).Mount(mux, auth)
+	// BX-MED-006: the real Postgres-backed aggregate store, generous so the skeleton never 429s —
+	// but exercising the same shared-bucket code path cmd/api mounts.
+	e2eGuard := func() *ratelimit.Guard {
+		return ratelimit.NewGuard(ratelimit.New(map[string]ratelimit.Limit{
+			"channel":    {RatePerMinute: 1e9, Burst: 1e9},
+			"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
+		}), repo.RateLimitBuckets{Pool: db.App},
+			map[string]ratelimit.AggLimit{"channel": {BurstMilli: 1e12, RefillMilliPerSec: 1e9, QuotaFrom: time.Unix(1, 0).UTC()}}, 0, nil)
+	}
+	(&handler.Channel{Origination: orig, Recovery: rec, Guard: e2eGuard(), Log: slog.Default()}).Mount(mux, auth)
 
 	// BX-P0-002: recovery has exactly ONE external ingress — the HMAC-signed
 	// recharge webhook. Mount it on the SAME surface, arm the recon-live gate and
@@ -124,10 +130,7 @@ func newStack(t *testing.T, suffix string, simHold time.Duration, adapterTimeout
 		Recovery: rec, Config: appCfg,
 		Creds: &repo.WebhookCredentials{Pool: db.App}, Recon: &repo.ReconArming{Pool: db.App},
 		Pool: db.App, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
-		Limiter: ratelimit.New(map[string]ratelimit.Limit{
-			"channel":    {RatePerMinute: 1e9, Burst: 1e9},
-			"channel_ip": {RatePerMinute: 1e9, Burst: 1e9},
-		}), Log: slog.Default(),
+		Guard: e2eGuard(), Log: slog.Default(),
 	}).Mount(mux)
 	api := httptest.NewServer(mux)
 	t.Cleanup(api.Close)

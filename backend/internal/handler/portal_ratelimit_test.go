@@ -25,11 +25,13 @@ func TestRP08_Login_RateLimited(t *testing.T) {
 		Admins:   &repo.Admins{Pool: db.App},
 		Sessions: &repo.PortalSessions{Pool: db.App},
 		Config:   configsvc.New(db.Worker),
-		// Tight: 3-request burst so the 4th is refused deterministically.
-		Limiter: ratelimit.New(map[string]ratelimit.Limit{
+		// Tight: 3-request burst so the 4th is refused deterministically. `login` is deliberately
+		// NOT aggregated across replicas (see migrations/0083), so this Guard carries no aggregate
+		// and no store — which is exactly the production shape for the portal door.
+		Guard: ratelimit.NewGuard(ratelimit.New(map[string]ratelimit.Limit{
 			"login":   {RatePerMinute: 0.001, Burst: 3},
 			"channel": {RatePerMinute: 0.001, Burst: 3},
-		}),
+		}), nil, nil, 0, nil),
 		Log: slog.Default(),
 	}
 	mux := http.NewServeMux()

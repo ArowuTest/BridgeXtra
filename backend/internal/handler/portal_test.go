@@ -83,7 +83,7 @@ func newPortalFixture(t *testing.T, suffix string) *portalFixture {
 		Pool:        db.App, // B.2a reveal audit (platform-scope row on the app pool)
 		Operators:   operatormgmt.New(db.App, slog.Default()),
 		Held:        rechargehold.New(db.App, recovery.New(db.App, appCfg, led, slog.Default()), slog.Default()),
-		Limiter:     testLimiter(),
+		Guard:       testGuard(),
 		Log:         slog.Default(),
 	}
 	// Governed money formatting: load the display scale from the migrated `currencies`

@@ -24,6 +24,15 @@ func validateRateLimit(_ context.Context, _ pgx.Tx, content json.RawMessage) err
 		Surfaces          map[string]struct {
 			RequestsPerMinute *float64 `json:"requests_per_minute"`
 			Burst             *float64 `json:"burst"`
+			// BX-MED-006: the OPTIONAL cross-replica aggregate quota. Optional in SHAPE so the owner
+			// can add or remove one on any surface without a code change; the CONSUMER
+			// (handler.LoadGuard) is what requires it on the surfaces that must have one, and
+			// refuses to boot otherwise. Modelling it here is also what lets it exist at all —
+			// strictUnmarshal sets DisallowUnknownFields, so an unmodelled key is a hard rejection.
+			Aggregate *struct {
+				RequestsPerMinute *float64 `json:"requests_per_minute"`
+				Burst             *float64 `json:"burst"`
+			} `json:"aggregate"`
 		} `json:"surfaces"`
 	}
 	if err := strictUnmarshal(content, &v); err != nil {
@@ -44,6 +53,21 @@ func validateRateLimit(_ context.Context, _ pgx.Tx, content json.RawMessage) err
 		}
 		if s.Burst == nil || *s.Burst < 1 {
 			return fmt.Errorf("surface %q: burst must be >= 1", name)
+		}
+		if s.Aggregate != nil {
+			if s.Aggregate.RequestsPerMinute == nil || *s.Aggregate.RequestsPerMinute <= 0 {
+				return fmt.Errorf("surface %q: aggregate.requests_per_minute must be > 0", name)
+			}
+			if s.Aggregate.Burst == nil || *s.Aggregate.Burst < 1 {
+				return fmt.Errorf("surface %q: aggregate.burst must be >= 1", name)
+			}
+			// The shared bucket counts MILLI-tokens and refills by whole milli-tokens per second.
+			// Below ~0.06 req/min the per-second refill floors to zero, so the bucket would never
+			// refill and the partner would be locked out permanently once drained. Refuse the
+			// config rather than ship a limiter that is structurally incapable of recovering.
+			if *s.Aggregate.RequestsPerMinute*1000/60 < 1 {
+				return fmt.Errorf("surface %q: aggregate.requests_per_minute is too small to resolve a whole milli-token per second (minimum 0.06)", name)
+			}
 		}
 	}
 	// The inbound edges this control exists for: login (IP), the channel

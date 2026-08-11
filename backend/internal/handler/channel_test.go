@@ -69,7 +69,7 @@ func newChannelFixture(t *testing.T, suffix string, simHold time.Duration, adapt
 	telcos := &repo.Telcos{Pool: db.App}
 	auth := &handler.TenantAuth{Telcos: telcos, Pool: db.App, Log: slog.Default()}
 	mux := http.NewServeMux()
-	(&handler.Channel{Origination: orig, Recovery: rec, Limiter: testLimiter(), Log: slog.Default()}).Mount(mux, auth)
+	(&handler.Channel{Origination: orig, Recovery: rec, Guard: testGuard(), Log: slog.Default()}).Mount(mux, auth)
 
 	// BX-P0-002: the wire contract's recovery step goes through the ONLY external
 	// recovery ingress — the HMAC-signed recharge webhook. Mount it alongside the
@@ -91,7 +91,7 @@ func newChannelFixture(t *testing.T, suffix string, simHold time.Duration, adapt
 		Recovery: rec, Config: appCfg,
 		Creds: &repo.WebhookCredentials{Pool: db.App}, Recon: &repo.ReconArming{Pool: db.App},
 		Pool: db.App, Auth: rechargewebhook.NewHMACSHA256Adapter(), Mapper: rechargewebhook.NewJSONMapper(),
-		Limiter: testLimiter(), Log: slog.Default(),
+		Guard: testGuard(), Log: slog.Default(),
 	}).Mount(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

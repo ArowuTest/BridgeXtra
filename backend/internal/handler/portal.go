@@ -64,7 +64,7 @@ type Portal struct {
 	Pool              *pgxpool.Pool         // B.2a: app-role pool for the reveal audit write (platform-scope row)
 	Operators         *operatormgmt.Service // governed operator provisioning (v1: four-eyes create + revoke)
 	Held              *rechargehold.Service // S2.3b HELD-recharge review queue (four-eyes release)
-	Limiter           *ratelimit.Limiter    // R-P0-8 inbound rate limit (login)
+	Guard             *ratelimit.Guard      // R-P0-8 inbound rate limit (login; replica-local by design — see migrations/0083)
 	TrustedProxyCount int                   // R-P2-7 client-IP derivation
 	Log               *slog.Logger
 }
@@ -204,12 +204,10 @@ func RBACRoutes() map[string][]string {
 // is mounted through mountRBAC so the mux pattern, the RBAC key, and the role
 // list are ONE fact (M4A-F2).
 func (p *Portal) Mount(mux *http.ServeMux) {
-	if p.Limiter == nil {
-		panic("portal: rate limiter is required (R-P0-8 fail-closed)")
-	}
+	mustGuard("portal", p.Guard)
 	// R-P0-8: /login is rate-limited by client IP (credential-stuffing).
 	loginKey := func(r *http.Request) string { return clientIP(r, p.TrustedProxyCount) }
-	mux.Handle("POST /v1/portal/login", rateLimited(p.Limiter, "login", loginKey, http.HandlerFunc(p.login)))
+	mux.Handle("POST /v1/portal/login", rateLimited(p.Guard, "login", loginKey, http.HandlerFunc(p.login)))
 	mux.Handle("POST /v1/portal/logout", p.withSession(http.HandlerFunc(p.logout)))
 
 	p.mountRBAC(mux, "GET /v1/portal/me", http.HandlerFunc(p.me))

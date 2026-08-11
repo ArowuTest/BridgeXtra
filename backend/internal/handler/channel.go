@@ -63,8 +63,8 @@ func validCorrelationID(s string) bool {
 type Channel struct {
 	Origination       *origination.Service
 	Recovery          *recovery.Service
-	Limiter           *ratelimit.Limiter // R-P0-8 inbound rate limit (channel API)
-	TrustedProxyCount int                // R-P2-7 client-IP derivation
+	Guard             *ratelimit.Guard // R-P0-8 inbound rate limit + BX-MED-006 cross-replica aggregate
+	TrustedProxyCount int              // R-P2-7 client-IP derivation
 	Log               *slog.Logger
 }
 
@@ -74,13 +74,11 @@ type Channel struct {
 // stopped by its shared IP bucket; the per-telco fairness throttle then runs
 // POST-auth on the validated telco.
 func (h *Channel) Mount(mux *http.ServeMux, auth *TenantAuth) {
-	if h.Limiter == nil {
-		panic("channel: rate limiter is required (R-P0-8 fail-closed)")
-	}
+	mustGuard("channel", h.Guard, "channel")
 	ipKey := func(r *http.Request) string { return clientIP(r, h.TrustedProxyCount) }
 	wrap := func(fn http.HandlerFunc) http.Handler {
-		return rateLimited(h.Limiter, "channel_ip", ipKey,
-			auth.Wrap(perTelcoRateLimit(h.Limiter, Correlation(fn))))
+		return rateLimited(h.Guard, "channel_ip", ipKey,
+			auth.Wrap(perTelcoRateLimit(h.Guard, Correlation(fn))))
 	}
 	// BX-MED-007: offers is a read, but it is keyed by the subscriber msisdn_token — a sensitive
 	// identifier that must never ride in a URL (query strings leak into browser history, access
