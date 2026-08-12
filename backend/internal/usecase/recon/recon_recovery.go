@@ -234,43 +234,73 @@ func dayConfirmed(sum Summary, minConfirmationRatio float64) bool {
 	return sum.MatchedControlTotalMinor >= floor
 }
 
-// RunRecovery reconciles the recent settled Lagos business days for an ARMED telco
-// and advances freshness ONLY when the NEWEST settled day's booked recovery money
-// is confirmed by the feed. An unconfirmed newest day (empty / truncated /
-// mostly-mismatching feed) advances nothing — the gate ages out and the webhook
-// fails closed. Older days in the re-sweep window are re-reconciled only when their
-// feed OR platform side changed (a backdated/forged event landing in an already-
+// RecoveryEvidence is the durable, independently-verifiable proof that ONE
+// RECOVERY reconciliation run positively confirmed the booked recovery money —
+// the only thing MED-004-A2's fenced publisher may act on. RunID and EvidenceAt
+// are read back from the persisted recon_runs row (never caller-derived: see
+// recoveryRunCreatedAt), and ArmFreshnessMaxSeconds is the EXACT governed window
+// that governed this confirmation (never re-loaded — a second config load could
+// race a change to the governed value between the confirmation and publication).
+type RecoveryEvidence struct {
+	RunID                  string
+	EvidenceAt             time.Time
+	ArmFreshnessMaxSeconds int
+}
+
+// RecoveryControlResult is RunRecoveryControl's output. QualifiedEvidence is nil
+// unless the newest settled day's RECOVERY reconciliation positively confirmed
+// the booked recovery money (dayConfirmed) — nil means the control completed but
+// produced no evidence eligible to advance the money gate.
+type RecoveryControlResult struct {
+	Summaries         []Summary
+	QualifiedEvidence *RecoveryEvidence
+}
+
+// RunRecoveryControl reconciles the recent settled Lagos business days for an
+// ARMED telco, exactly as RunRecovery always has, and reports whether the
+// NEWEST settled day's booked recovery money was positively confirmed. Older
+// days in the re-sweep window are re-reconciled only when their feed OR
+// platform side changed (a backdated/forged event landing in an already-
 // reconciled day changes the platform fingerprint -> re-run -> the phantom
 // surfaces); unchanged days are skipped (no churn). The newest day is ALWAYS
 // reconciled (its fresh Summary drives the confirmation gate).
-func (s *Service) RunRecovery(ctx context.Context, telcoID string) ([]Summary, error) {
+//
+// BX-MED-004-A1 core invariant: executing this control can create
+// reconciliation evidence (recon_runs rows) and the other existing
+// reconciliation effects (hold-clearing), but it can NEVER change
+// recon_layer_arming.last_recon_at — that authority stays with the caller
+// (today: LegacyRecoveryPublisher via RunRecovery's wrapper; from MED-004-A2:
+// the fenced publisher). See recon_recovery_fence_med004a1_test.go for the
+// structural proof.
+func (s *Service) RunRecoveryControl(ctx context.Context, telcoID string) (RecoveryControlResult, error) {
 	cfg, adapter, err := s.loadForRecovery(ctx, telcoID)
 	if err != nil {
-		return nil, err
+		return RecoveryControlResult{}, err
 	}
 	// Never reconcile-then-arm: only an already-armed telco is reconciled (the
 	// webhook is dead-closed until the four-eyes arm path creates the row).
 	armed, err := s.Arming.IsLayerArmed(ctx, telcoID, repo.ReconLayerRecovery)
 	if err != nil {
-		return nil, err
+		return RecoveryControlResult{}, err
 	}
 	if !armed {
-		return nil, nil
+		return RecoveryControlResult{}, nil
 	}
 	nowLag := time.Now().UTC().Add(-time.Duration(cfg.ReconLagSeconds) * time.Second)
 	dLast, ok := lastSettledBusinessDay(cfg.loc, nowLag)
 	if !ok {
-		return nil, nil // nothing fully settled yet
+		return RecoveryControlResult{}, nil // nothing fully settled yet
 	}
 	from := nowLag.Add(-time.Duration(cfg.RereconcileLookbackSeconds) * time.Second)
 	days := businessDayStrings(cfg.loc, from, dLast)
 	out := make([]Summary, 0, len(days))
+	var qualified *RecoveryEvidence
 	for i, d := range days {
 		isLast := i == len(days)-1
 		if !isLast {
 			unchanged, err := s.recoveryDayUnchanged(ctx, cfg, adapter, telcoID, d)
 			if err != nil {
-				return out, err
+				return RecoveryControlResult{Summaries: out}, err
 			}
 			if unchanged {
 				out = append(out, Summary{Unchanged: true, PeriodEnd: time.Time{}})
@@ -279,16 +309,22 @@ func (s *Service) RunRecovery(ctx context.Context, telcoID string) ([]Summary, e
 		}
 		sum, err := s.reconcileRecoveryDayWith(ctx, cfg, adapter, telcoID, d)
 		if err != nil {
-			return out, err
+			return RecoveryControlResult{Summaries: out}, err
 		}
 		out = append(out, sum)
 		if isLast {
 			if dayConfirmed(sum, cfg.MinConfirmationRatio) {
-				if _, err := s.Arming.AdvanceFreshness(ctx, telcoID, repo.ReconLayerRecovery, cfg.ArmFreshnessMaxSeconds); err != nil {
-					return out, err
+				createdAt, err := s.recoveryRunCreatedAt(ctx, telcoID, sum.RunID)
+				if err != nil {
+					return RecoveryControlResult{Summaries: out}, err
+				}
+				qualified = &RecoveryEvidence{
+					RunID:                  sum.RunID,
+					EvidenceAt:             createdAt,
+					ArmFreshnessMaxSeconds: cfg.ArmFreshnessMaxSeconds,
 				}
 			} else {
-				s.Log.Error("RECOVERY feed confirmation shortfall — freshness NOT advanced; the webhook fails closed as the gate ages out",
+				s.Log.Error("RECOVERY feed confirmation shortfall — no qualifying evidence produced; freshness NOT advanced; the webhook fails closed as the gate ages out",
 					"telco", telcoID, "day", d,
 					"matched_total_minor", sum.MatchedControlTotalMinor,
 					"platform_total_minor", sum.PlatformControlTotalMinor,
@@ -296,7 +332,54 @@ func (s *Service) RunRecovery(ctx context.Context, telcoID string) ([]Summary, e
 			}
 		}
 	}
-	return out, nil
+	return RecoveryControlResult{Summaries: out, QualifiedEvidence: qualified}, nil
+}
+
+// recoveryRunCreatedAt reads back the DB-generated created_at of a just-persisted
+// recon_runs row — RecoveryEvidence.EvidenceAt, never a caller-side time.Now().
+// Tenant-scoped (recon_runs is RLS-enabled); run_id is the table's primary key, so
+// telco_id/layer here are defense-in-depth, not the selectivity.
+func (s *Service) recoveryRunCreatedAt(ctx context.Context, telcoID, runID string) (time.Time, error) {
+	var createdAt time.Time
+	tctx := platform.WithTenant(ctx, telcoID)
+	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `
+			SELECT created_at FROM recon_runs
+			WHERE run_id=$1 AND telco_id=$2 AND layer=$3`,
+			runID, telcoID, layerRecovery).Scan(&createdAt)
+	})
+	return createdAt, err
+}
+
+// RunRecovery is the production entrypoint the scheduler/worker calls. It is a
+// thin wrapper (MED-004-A1): all reconciliation logic and the positive-
+// confirmation gate live in RunRecoveryControl; this function's only remaining
+// job is to publish any qualifying evidence to the freshness gate, preserving
+// the exact behaviour this function had before the extraction.
+func (s *Service) RunRecovery(ctx context.Context, telcoID string) ([]Summary, error) {
+	res, err := s.RunRecoveryControl(ctx, telcoID)
+	if err != nil {
+		return res.Summaries, err
+	}
+	if res.QualifiedEvidence != nil {
+		if err := s.LegacyRecoveryPublisher(ctx, telcoID, res.QualifiedEvidence); err != nil {
+			return res.Summaries, err
+		}
+	}
+	return res.Summaries, nil
+}
+
+// LegacyRecoveryPublisher is the MED-004-A1 temporary compatibility publisher:
+// it does exactly what RunRecovery's freshness-advance did before this
+// extraction — AdvanceFreshness with the evidence's own governed window — kept
+// as a named, isolated function so it is unmistakably marked for deletion.
+//
+// DELETE AT MED-004-A2 CUTOVER, when FencedControlPublisher becomes the sole,
+// atomically-fenced authority+mutation writer. Do not call this from the new
+// scheduler; do not add new callers.
+func (s *Service) LegacyRecoveryPublisher(ctx context.Context, telcoID string, evidence *RecoveryEvidence) error {
+	_, err := s.Arming.AdvanceFreshness(ctx, telcoID, repo.ReconLayerRecovery, evidence.ArmFreshnessMaxSeconds)
+	return err
 }
 
 // recoveryDayUnchanged reports whether a day already has an ACTIVE run whose feed
