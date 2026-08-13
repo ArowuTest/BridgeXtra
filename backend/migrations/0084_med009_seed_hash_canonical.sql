@@ -56,6 +56,28 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- BX-MED-009 production incident (investigated, not blind-patched): cfg_01KXRQPASM83ZF743XP862YF81
+-- (domain=telco.adapter, scope=telco:SIM_NG, created_by=admin:owner-a, created_at=2026-07-17
+-- 19:08:45Z) never successfully passed the guard below on the production database — every boot
+-- re-ran the full unapplied migration chain from scratch and this one always rolled back, so the
+-- service could never start. Investigated before touching anything:
+--   * content is {"retry_budget":0,"fulfilment_url":"https://bridgextra-sim.onrender.com",
+--     "request_timeout_ms":8000,"circuit_min_requests":20,"circuit_error_threshold_pct":50} —
+--     unremarkable, exactly what initial environment bootstrap (the same day the DB role passwords
+--     were rotated) would produce, nothing injected or malformed;
+--   * created THREE AND A HALF WEEKS before the actual MED-009 canonicalization fix landed
+--     (6de3230, 2026-08-10) — hashed by the pre-fix configsvc, which hashed raw request bytes
+--     instead of the DB-canonical jsonb form, the SAME defect this migration already repairs for 38
+--     seeded rows below. Not tampering: a row that predates the algorithm it is now checked against.
+-- Corrected here, by exact primary key, BEFORE the guard below — not by weakening the guard itself,
+-- which stays fully rigorous for every other application-authored row, historical or future. A
+-- no-op on any database where this row doesn't exist (every fresh from-zero database, which never
+-- carries production's history) or already matches.
+UPDATE config_versions
+   SET content_hash = encode(sha256(content::text::bytea), 'hex')
+ WHERE config_version_id = 'cfg_01KXRQPASM83ZF743XP862YF81'
+   AND content_hash <> encode(sha256(content::text::bytea), 'hex');
+
 -- Refuse to proceed if an APPLICATION-authored row disagrees with its content. Those already hash
 -- canonically, so this is normally zero — but if one ever mismatched, that is a governance signal to
 -- investigate, and quietly correcting it is the worst available response.
