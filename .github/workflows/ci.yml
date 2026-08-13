@@ -146,17 +146,26 @@ jobs:
             --lockfile=go.mod \
             --lockfile=portal/package-lock.json
 
-  # BX-MED-015: dependency review — additionally flags advisories in what a PR ADDS, with GitHub's
-  # own diff view. Retained alongside the scan above; it only runs on pull_request events.
+  # BX-MED-015: dependency review — flags advisories from GitHub's OWN Advisory Database, a
+  # genuinely different source than OSV-Scanner above (OSV mirrors most GitHub advisories, but not
+  # on identical timing/scope — the same "layer independent scanners" reasoning that put govulncheck
+  # and OSV-Scanner side by side already applies here).
+  #
+  # dependency-review-action auto-detects base/head from the PR object on pull_request events, but a
+  # push event has no PR context at all — left unconfigured it silently skipped every push (this
+  # repo is developed via direct push to main, so it had NEVER actually run here before this). Fixed
+  # by supplying explicit base-ref/head-ref: on push, diff against the commit immediately before it
+  # (github.event.before); on pull_request, keep the action's own PR-object auto-detection untouched.
   dependency-review:
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Dependency review (merge-blocking on PRs)
+      - name: Dependency review (merge-blocking on pushes and PRs)
         uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
         with:
           fail-on-severity: moderate
+          base-ref: ${{ github.event_name == 'push' && github.event.before || '' }}
+          head-ref: ${{ github.event_name == 'push' && github.sha || '' }}
 
   backend:
     runs-on: ubuntu-latest
