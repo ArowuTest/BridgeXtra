@@ -2,11 +2,16 @@ package recon
 
 // BX-MED-004 "before A2" prerequisite #1 (design_MED-004_v11_FINAL.md's own follow-on, per the
 // reviewer): measure legacy-publication-timestamp minus RecoveryEvidence.EvidenceAt across
-// representative scenarios, to decide whether recon_runs.created_at is precise enough to keep as
-// the durable evidence timestamp, or whether A2 needs a dedicated, later DB-generated boundary.
+// representative scenarios, to decide whether the durable evidence timestamp is precise enough to
+// keep as-is, or whether a later revision needs a dedicated, later DB-generated boundary.
 //
-// Both sides of the delta are DB-SERVER-GENERATED timestamps (recon_runs.created_at and
-// recon_layer_arming.last_recon_at, both `now()`), so this is never polluted by Go-side/DB clock
+// BX-MED-004-A2 UPDATE: the durable evidence boundary landed as
+// recon_recovery_qualifications.created_at, NOT recon_runs.created_at (a REJECTED run gets a
+// recon_runs.created_at too, so it could never be the qualifying-evidence boundary — see
+// recon_recovery.go's writeQualification). This diagnostic reads the qualification row accordingly.
+//
+// Both sides of the delta are DB-SERVER-GENERATED timestamps (recon_recovery_qualifications.created_at
+// and recon_layer_arming.last_recon_at, both `now()`), so this is never polluted by Go-side/DB clock
 // skew — only genuine elapsed server-side work between the two writes.
 //
 // Diagnostic, not a correctness gate: timing numbers are environment-dependent, so this is NOT run
@@ -66,8 +71,8 @@ func TestMED004_MeasureWindowShrink(t *testing.T) {
 
 			var evidenceAt time.Time
 			if err := f.db.Admin.QueryRow(ctx,
-				`SELECT created_at FROM recon_runs WHERE run_id=$1`, newest.RunID).Scan(&evidenceAt); err != nil {
-				t.Fatalf("read created_at: %v", err)
+				`SELECT created_at FROM recon_recovery_qualifications WHERE run_id=$1`, newest.RunID).Scan(&evidenceAt); err != nil {
+				t.Fatalf("read qualification created_at: %v", err)
 			}
 			var lastReconAt time.Time
 			if err := f.db.Admin.QueryRow(ctx,

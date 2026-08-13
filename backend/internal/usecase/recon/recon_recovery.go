@@ -254,17 +254,24 @@ func confirmationHolds(platformRecordCount, sourceRecordCount, matchedTotalMinor
 // RecoveryEvidence is the durable, independently-verifiable proof that ONE
 // RECOVERY reconciliation run positively confirmed the booked recovery money.
 // QualificationID names the durable recon_recovery_qualifications row (BX-MED-004-A2);
-// RunID is the recon_runs row it points at; EvidenceAt is the qualification
-// row's OWN created_at (the durable evidence-time boundary — never a caller
-// clock, never recon_runs.created_at, which a REJECTED run also gets).
+// RunID is the recon_runs row it points at. QualificationID+RunID are the only
+// fields FencedControlPublisher.Publish trusts — they are a lookup KEY, nothing more.
+//
+// EvidenceAt is the qualification row's OWN created_at at the moment RunRecoveryControl
+// captured it — informational (tests and callers read it to independently verify what was
+// captured), never authoritative. BX-MED-004-A2 finding F1: FencedControlPublisher.Publish
+// MUST NEVER read this field as an input to its own decision — even a genuine caller value can
+// go stale between capture and publish, and a forged/miscalculated one must have zero effect.
+// Publish always re-reads recon_recovery_qualifications.created_at fresh, inside its own
+// transaction, as the sole authoritative evidence timestamp.
 //
 // ArmFreshnessMaxSeconds is a MED-004-A1 COMPATIBILITY FIELD ONLY: it exists
 // solely so LegacyRecoveryPublisher (still the live Phase-1 production path)
 // can reproduce its pre-A2 behaviour with zero semantic change.
-// FencedControlPublisher (MED-004-A2) MUST NEVER read this field — it always
+// FencedControlPublisher (MED-004-A2) MUST NEVER read this field either — it always
 // independently re-resolves the CURRENTLY effective governed window itself
-// (see FencedControlPublisher.currentRecoveryCfg). DELETE this field at
-// Phase-2 cutover, when LegacyRecoveryPublisher is deleted alongside it.
+// (see FencedControlPublisher.currentRecoveryCfg). DELETE both compatibility-only
+// fields at Phase-2 cutover, when LegacyRecoveryPublisher is deleted alongside them.
 type RecoveryEvidence struct {
 	QualificationID        string
 	RunID                  string

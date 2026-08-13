@@ -110,9 +110,17 @@ func TestMED004A2_Publish_HappyPathAdvancesFreshnessToEvidenceValues(t *testing.
 		t.Fatalf("Publish: %v", err)
 	}
 
+	// Independent read-back of the qualification's OWN created_at — the value Publish must have
+	// re-derived itself (BX-MED-004-A2 finding F1), not merely echoed from the evidence struct.
+	var trueEvidenceAt time.Time
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT created_at FROM recon_recovery_qualifications WHERE qualification_id=$1`,
+		res.QualifiedEvidence.QualificationID).Scan(&trueEvidenceAt); err != nil {
+		t.Fatalf("independent SELECT: %v", err)
+	}
 	got := lastReconAt(t, f, "SIM_NG", repo.ReconLayerRecovery)
-	if got == nil || !got.Equal(res.QualifiedEvidence.EvidenceAt) {
-		t.Fatalf("last_recon_at = %v, want evidence.EvidenceAt = %v", got, res.QualifiedEvidence.EvidenceAt)
+	if got == nil || !got.Equal(trueEvidenceAt) {
+		t.Fatalf("last_recon_at = %v, want the qualification's own created_at = %v", got, trueEvidenceAt)
 	}
 	var freshWin int
 	if err := f.db.Admin.QueryRow(ctx,
@@ -282,11 +290,19 @@ func TestMED004A2_Publish_ExactReplayIsNoOpSuccess(t *testing.T) {
 	}
 }
 
-// Case 6: evidence for the SAME still-ACTIVE run claiming an EARLIER EvidenceAt than what is
-// already stamped (a delayed publisher) must be a no-op SUCCESS and must never regress the gate.
-func TestMED004A2_Publish_StaleEvidenceIsNoOpSuccess(t *testing.T) {
-	f := newRecoveryFixture(t, "a2_pub_stale")
+// Case 6 (BX-MED-004-A2 reviewer finding F1, required mutation proof): Publish must NEVER act on
+// evidence.EvidenceAt — it always re-reads recon_recovery_qualifications.created_at fresh, inside
+// its own transaction. A prior version of this test ("stale evidence claiming an earlier timestamp
+// is a no-op") tested a caller-supplied field that, after the F1 fix, Publish no longer reads at
+// all — that framing became vacuous (the "staleness" was in a field with zero effect), so it was
+// rewritten to what the reviewer actually asked for: forge EvidenceAt to several adversarial values
+// on an otherwise-VALID qualification/run pair, and prove the ACTUAL stamped last_recon_at is always
+// the qualification's TRUE created_at regardless — callers must not be able to manufacture evidence
+// age, in either direction.
+func TestMED004A2_Publish_EvidenceAtIsAlwaysReReadNeverCallerSupplied(t *testing.T) {
+	f := newRecoveryFixture(t, "a2_pub_evat_forge")
 	ctx := context.Background()
+	arm := &repo.ReconArming{Pool: f.db.Admin}
 	armLayer(t, f, "SIM_NG", repo.ReconLayerRecovery)
 
 	res, err := f.svc.RunRecoveryControl(ctx, "SIM_NG")
@@ -296,23 +312,56 @@ func TestMED004A2_Publish_StaleEvidenceIsNoOpSuccess(t *testing.T) {
 	if res.QualifiedEvidence == nil {
 		t.Fatalf("expected evidence, got summaries=%+v", res.Summaries)
 	}
-	pub := &FencedControlPublisher{Pool: f.db.Freshness}
-	if err := pub.Publish(ctx, "SIM_NG", *res.QualifiedEvidence); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-	current := lastReconAt(t, f, "SIM_NG", repo.ReconLayerRecovery)
-	if current == nil {
-		t.Fatal("precondition: Publish must have advanced the gate")
+
+	// Independently read the TRUE qualification created_at — the only value Publish may ever stamp,
+	// no matter what evidence.EvidenceAt claims.
+	var trueEvidenceAt time.Time
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT created_at FROM recon_recovery_qualifications WHERE qualification_id=$1`,
+		res.QualifiedEvidence.QualificationID).Scan(&trueEvidenceAt); err != nil {
+		t.Fatalf("independent SELECT: %v", err)
 	}
 
-	stale := *res.QualifiedEvidence
-	stale.EvidenceAt = current.Add(-time.Hour)
-	if err := pub.Publish(ctx, "SIM_NG", stale); err != nil {
-		t.Fatalf("stale-evidence Publish must be a no-op SUCCESS, not an error: %v", err)
+	forged := []struct {
+		name string
+		at   time.Time
+	}{
+		{"future_plus_7d", trueEvidenceAt.Add(7 * 24 * time.Hour)},
+		{"zero_value", time.Time{}},
+		{"ancient_past", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)},
 	}
-	after := lastReconAt(t, f, "SIM_NG", repo.ReconLayerRecovery)
-	if after == nil || !after.Equal(*current) {
-		t.Fatalf("last_recon_at regressed: before=%v after=%v (stale evidence claimed %v)", current, after, stale.EvidenceAt)
+
+	pub := &FencedControlPublisher{Pool: f.db.Freshness}
+	for _, fc := range forged {
+		t.Run(fc.name, func(t *testing.T) {
+			// Reset the gate to NULL before each case so a successful Publish's write is directly
+			// observable, not swallowed by the monotonicity no-op from a prior sub-test.
+			if err := arm.SetDown(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
+				t.Fatalf("disarm: %v", err)
+			}
+			if err := arm.SetLive(ctx, "SIM_NG", repo.ReconLayerRecovery); err != nil {
+				t.Fatalf("re-arm: %v", err)
+			}
+
+			forgedEvidence := *res.QualifiedEvidence
+			forgedEvidence.EvidenceAt = fc.at
+			if err := pub.Publish(ctx, "SIM_NG", forgedEvidence); err != nil {
+				t.Fatalf("Publish with forged EvidenceAt=%v must still succeed (the field must be "+
+					"ignored, not rejected): %v", fc.at, err)
+			}
+
+			var got *time.Time
+			if err := f.db.Admin.QueryRow(ctx,
+				`SELECT last_recon_at FROM recon_layer_arming WHERE telco_id=$1 AND layer=$2`,
+				"SIM_NG", repo.ReconLayerRecovery).Scan(&got); err != nil {
+				t.Fatalf("read last_recon_at: %v", err)
+			}
+			if got == nil || !got.Equal(trueEvidenceAt) {
+				t.Fatalf("last_recon_at = %v, want the qualification's TRUE created_at %v — Publish "+
+					"must NEVER act on a caller-supplied EvidenceAt (forged value was %v)",
+					got, trueEvidenceAt, fc.at)
+			}
+		})
 	}
 }
 

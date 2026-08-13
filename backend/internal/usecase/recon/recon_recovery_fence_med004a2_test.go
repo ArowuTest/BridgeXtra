@@ -191,3 +191,119 @@ func fakeCaller(s *Service) {
 		t.Fatal("synthetic source's own writeQualification call was not located — test setup is broken")
 	}
 }
+
+// BX-MED-004-A2 structural fence #2 (finding F2) — the money-gate publisher's config resolution
+// must never depend on the Go process clock. currentRecoveryCfg and recoveryConfigContentAt (the
+// two functions that decide which recon.recovery config version is "currently effective" at publish
+// time) must contain NO call to time.Now() anywhere in their bodies — the only clock they may
+// consult is Postgres's own now(), embedded directly in the SQL text. A skewed worker process clock
+// must never be able to select an older/looser governed config than the one the database itself
+// considers effective right now.
+//
+// Whole-package scan (not a single hardcoded filename) so this survives a future file reorganization
+// — matches the pattern above. Anti-vacuity: the two named functions must both actually be found
+// (funcsChecked == 2), or this fence is silently checking nothing.
+
+func TestMED004A2_ConfigResolutionNeverCallsProcessClock(t *testing.T) {
+	root := "."
+	filesScanned := 0
+	funcsChecked := 0
+	var violations []string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		filesScanned++
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			if fn.Name.Name != "currentRecoveryCfg" && fn.Name.Name != "recoveryConfigContentAt" {
+				continue
+			}
+			funcsChecked++
+			ast.Inspect(fn, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if ok && pkg.Name == "time" && sel.Sel.Name == "Now" {
+					pos := fset.Position(call.Pos())
+					violations = append(violations, fmt.Sprintf(
+						"%s:%d: %s calls time.Now() — config resolution must use ONLY Postgres's own "+
+							"now(), never the process clock", path, pos.Line, fn.Name.Name))
+				}
+				return true
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+
+	if filesScanned < 3 {
+		t.Fatalf("fence scanned only %d non-test .go files in %s — the walk root is wrong and this "+
+			"test proves nothing", filesScanned, root)
+	}
+	if funcsChecked != 2 {
+		t.Fatalf("fence checked %d functions, want exactly 2 (currentRecoveryCfg, recoveryConfigContentAt) "+
+			"— one of them was renamed/removed/duplicated and this fence no longer matches what it claims to",
+			funcsChecked)
+	}
+	if len(violations) > 0 {
+		t.Fatalf("money-gate config resolution must never call time.Now():\n  %s",
+			strings.Join(violations, "\n  "))
+	}
+}
+
+// Mutation-grade control: the SAME matcher, run against a synthetic function that DOES call
+// time.Now(), must catch it. Without this, a typo in the "time"/"Now" comparison would make the
+// primary test vacuously pass forever.
+func TestMED004A2_ProcessClockMatcherDetectsKnownCaller(t *testing.T) {
+	src := `package recon
+import "time"
+func currentRecoveryCfg() time.Time {
+	return time.Now()
+}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "fake.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse synthetic source: %v", err)
+	}
+	found := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if ok && pkg.Name == "time" && sel.Sel.Name == "Now" {
+			found = true
+		}
+		return true
+	})
+	if !found {
+		t.Fatal("matcher failed to detect a known time.Now() call in synthetic source — the primary test is vacuous")
+	}
+}

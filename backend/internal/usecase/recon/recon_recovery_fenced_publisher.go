@@ -41,7 +41,13 @@ type FencedControlPublisher struct {
 // row, recomputes the confirmation decision from that row's own persisted numbers against the
 // CURRENTLY effective governed threshold (never the qualification row's audit-only copy, never
 // evidence.ArmFreshnessMaxSeconds), and — only if it still holds — atomically advances freshness
-// with the evidence's own EvidenceAt and the freshly-resolved governed window.
+// with the qualification row's OWN created_at and the freshly-resolved governed window.
+//
+// evidence.EvidenceAt is NEVER read here (BX-MED-004-A2 finding F1): a caller-supplied timestamp is
+// exactly the kind of unverified input this whole design exists to refuse. The sole authoritative
+// evidence timestamp is recon_recovery_qualifications.created_at, re-read fresh in Step 1 below —
+// even a caller that has forged evidence.EvidenceAt (a stray Go bug, a bad retry, a malicious value)
+// cannot influence what gets stamped, only which qualification/run pair is looked up.
 //
 // Monotonic: a delayed or reclaimed publisher replaying evidence older than (or identical to) what
 // is already stamped is a no-op success, never an error — the gate is already at least as fresh as
@@ -49,21 +55,27 @@ type FencedControlPublisher struct {
 // fresher evidence than it actually has.
 func (p *FencedControlPublisher) Publish(ctx context.Context, telcoID string, evidence RecoveryEvidence) error {
 	return repo.WithTenantTx(platform.WithTenant(ctx, telcoID), p.Pool, func(tx pgx.Tx) error {
-		// Step 1: independently verify the evidence binding. Proves run exists, scope matches,
-		// layer==RECOVERY, state==ACTIVE, and the qualification genuinely names this run — reading
-		// recon_runs' OWN persisted totals, never the qualification row's claims (it carries none).
+		// Step 1: independently verify the evidence binding AND read the qualification's OWN
+		// created_at — the only evidence timestamp this function will ever act on. Proves run exists,
+		// scope matches, layer==RECOVERY, state==ACTIVE, and the qualification genuinely names this
+		// run — reading recon_runs' OWN persisted totals, never the qualification row's claims (it
+		// carries none). evidence.QualificationID/evidence.RunID are the lookup KEY; nothing else on
+		// the caller-supplied struct is trusted.
 		var runTelcoID, layer, state string
 		var platformRecordCount, sourceRecordCount int64
 		var matchedTotal, platformTotal *int64
+		var qualificationCreatedAt time.Time
 		err := tx.QueryRow(ctx, `
 			SELECT rr.telco_id, rr.layer, rr.state,
 			       rr.platform_record_count, rr.source_record_count,
-			       rr.matched_control_total_minor, rr.platform_control_total_minor
+			       rr.matched_control_total_minor, rr.platform_control_total_minor,
+			       q.created_at
 			FROM recon_recovery_qualifications q
 			JOIN recon_runs rr ON rr.run_id = q.run_id
 			WHERE q.qualification_id = $1 AND q.run_id = $2`,
 			evidence.QualificationID, evidence.RunID).
-			Scan(&runTelcoID, &layer, &state, &platformRecordCount, &sourceRecordCount, &matchedTotal, &platformTotal)
+			Scan(&runTelcoID, &layer, &state, &platformRecordCount, &sourceRecordCount, &matchedTotal, &platformTotal,
+				&qualificationCreatedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("evidence binding failed: no qualification/run pair for qualification_id=%s run_id=%s",
 				evidence.QualificationID, evidence.RunID)
@@ -114,16 +126,17 @@ func (p *FencedControlPublisher) Publish(ctx context.Context, telcoID string, ev
 		if err != nil {
 			return err
 		}
-		if currentLastReconAt != nil && !evidence.EvidenceAt.After(*currentLastReconAt) {
+		if currentLastReconAt != nil && !qualificationCreatedAt.After(*currentLastReconAt) {
 			// Superseded by newer evidence already published, or an exact-replay retry of this same
-			// evidence (crash/reclaim resubmission) — both are success-but-no-op.
+			// evidence (crash/reclaim resubmission) — both are success-but-no-op. Compared against the
+			// freshly re-read qualificationCreatedAt, never a caller-supplied value.
 			return nil
 		}
 
 		ct, err := tx.Exec(ctx, `
 			UPDATE recon_layer_arming SET last_recon_at = $3, arm_freshness_max_seconds = $4
 			WHERE telco_id = $1 AND layer = $2`,
-			telcoID, layerRecovery, evidence.EvidenceAt, armFreshnessMaxSeconds)
+			telcoID, layerRecovery, qualificationCreatedAt, armFreshnessMaxSeconds)
 		if err != nil {
 			return err
 		}
@@ -152,11 +165,17 @@ func (p *FencedControlPublisher) Publish(ctx context.Context, telcoID string, ev
 // state IN ('ACTIVE','SUPERSEDED') with effective_from/effective_to windowing and newest-effective-
 // from-wins, NOT a naive state='ACTIVE' filter, which is NOT what the real config-resolution path
 // uses (verified against backend/internal/repo/config.go's actual GetActiveAt before writing this).
+//
+// "Currently effective" is resolved by POSTGRES'S OWN now() inside the query below (BX-MED-004-A2
+// finding F2), never a Go-side time.Now(). The publisher's process clock and the database's clock are
+// two different clocks; a skewed worker could otherwise select an older/looser config than the one
+// the database itself considers effective right now — exactly the kind of gap this whole design
+// exists to close. No time.Time value is threaded into this call chain at all, so there is nothing a
+// caller (or a future refactor) could pass to influence which config version resolves.
 func (p *FencedControlPublisher) currentRecoveryCfg(ctx context.Context, tx pgx.Tx, telcoID string) (minConfirmationRatio float64, armFreshnessMaxSeconds int, err error) {
-	now := time.Now().UTC()
-	raw, err := recoveryConfigContentAt(ctx, tx, "telco:"+telcoID, now)
+	raw, err := recoveryConfigContentAt(ctx, tx, "telco:"+telcoID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		raw, err = recoveryConfigContentAt(ctx, tx, "global", now)
+		raw, err = recoveryConfigContentAt(ctx, tx, "global")
 	}
 	if err != nil {
 		return 0, 0, fmt.Errorf("recon.recovery config (tcp_freshness): %w", err)
@@ -179,13 +198,17 @@ func (p *FencedControlPublisher) currentRecoveryCfg(ctx context.Context, tx pgx.
 	return parsed.MinConfirmationRatio, parsed.ArmFreshnessMaxSeconds, nil
 }
 
-func recoveryConfigContentAt(ctx context.Context, tx pgx.Tx, scope string, t time.Time) ([]byte, error) {
+// recoveryConfigContentAt resolves scope's currently-effective recon.recovery content using
+// POSTGRES'S OWN now() — never a bound parameter — so the instant a config becomes/stops being
+// effective is always judged by the same clock that stamps effective_from/effective_to in the first
+// place (BX-MED-004-A2 finding F2).
+func recoveryConfigContentAt(ctx context.Context, tx pgx.Tx, scope string) ([]byte, error) {
 	var content []byte
 	err := tx.QueryRow(ctx, `
 		SELECT content FROM config_versions_recon_recovery
 		WHERE scope=$1 AND state IN ('ACTIVE','SUPERSEDED')
-		  AND effective_from <= $2 AND (effective_to IS NULL OR effective_to > $2)
+		  AND effective_from <= now() AND (effective_to IS NULL OR effective_to > now())
 		ORDER BY effective_from DESC
-		LIMIT 1`, scope, t).Scan(&content)
+		LIMIT 1`, scope).Scan(&content)
 	return content, err
 }
