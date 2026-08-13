@@ -166,12 +166,31 @@ func (p *FencedControlPublisher) Publish(ctx context.Context, telcoID string, ev
 // from-wins, NOT a naive state='ACTIVE' filter, which is NOT what the real config-resolution path
 // uses (verified against backend/internal/repo/config.go's actual GetActiveAt before writing this).
 //
-// "Currently effective" is resolved by POSTGRES'S OWN now() inside the query below (BX-MED-004-A2
+// "Currently effective" is resolved by POSTGRES'S OWN clock inside the query below (BX-MED-004-A2
 // finding F2), never a Go-side time.Now(). The publisher's process clock and the database's clock are
 // two different clocks; a skewed worker could otherwise select an older/looser config than the one
 // the database itself considers effective right now — exactly the kind of gap this whole design
 // exists to close. No time.Time value is threaded into this call chain at all, so there is nothing a
 // caller (or a future refactor) could pass to influence which config version resolves.
+//
+// BX-MED-004-A2 finding F3: within THIS function's own SQL, the clock is statement_timestamp(), not
+// now() (== transaction_timestamp(), pinned to when Publish's transaction opened). Publish's
+// transaction begins, sets the tenant context, and runs Step 1's evidence-binding join BEFORE this
+// call — an open-ended window (ordinary query latency, lock contention, load) during which a
+// governed threshold could tighten and commit elsewhere. With now(), this SELECT would keep judging
+// "currently effective" against the instant the transaction began, silently missing a tightening
+// that landed a moment ago — the exact kind of stale-governance gap A2 exists to close, just at one
+// query deeper than F2 fixed. statement_timestamp() is STABLE (safe/idiomatic in a WHERE clause,
+// unlike the VOLATILE clock_timestamp()) and reflects the instant THIS SELECT started — the minimal
+// correct exposure window for a single read, the same "take it as late as possible" discipline
+// Publish's Step 4 already applies to the arming row's FOR UPDATE lock.
+//
+// This does NOT touch evidence-timestamp semantics: the value stamped into last_recon_at is still
+// exclusively qualificationCreatedAt (q.created_at, re-read fresh in Step 1 — BX-MED-004-A2 finding
+// F1), never any live clock. A late-processed qualification is still timestamped with its own true,
+// old creation time — delayed publication can shrink the arming window it grants, never rejuvenate
+// stale evidence into looking fresher than it is. F3 only changes which governed CONFIG version
+// resolves as "current" for computing the threshold/window to apply to that evidence.
 func (p *FencedControlPublisher) currentRecoveryCfg(ctx context.Context, tx pgx.Tx, telcoID string) (minConfirmationRatio float64, armFreshnessMaxSeconds int, err error) {
 	raw, err := recoveryConfigContentAt(ctx, tx, "telco:"+telcoID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -199,15 +218,19 @@ func (p *FencedControlPublisher) currentRecoveryCfg(ctx context.Context, tx pgx.
 }
 
 // recoveryConfigContentAt resolves scope's currently-effective recon.recovery content using
-// POSTGRES'S OWN now() — never a bound parameter — so the instant a config becomes/stops being
+// POSTGRES'S OWN clock — never a bound parameter — so the instant a config becomes/stops being
 // effective is always judged by the same clock that stamps effective_from/effective_to in the first
-// place (BX-MED-004-A2 finding F2).
+// place (BX-MED-004-A2 finding F2). The clock is statement_timestamp(), not now() (BX-MED-004-A2
+// finding F3 — see currentRecoveryCfg's doc comment for the full rationale): now() is pinned to
+// Publish's transaction START, which can predate this specific SELECT by however long Step 1 took,
+// silently missing a threshold tightening that committed in between.
 func recoveryConfigContentAt(ctx context.Context, tx pgx.Tx, scope string) ([]byte, error) {
 	var content []byte
 	err := tx.QueryRow(ctx, `
 		SELECT content FROM config_versions_recon_recovery
 		WHERE scope=$1 AND state IN ('ACTIVE','SUPERSEDED')
-		  AND effective_from <= now() AND (effective_to IS NULL OR effective_to > now())
+		  AND effective_from <= statement_timestamp()
+		  AND (effective_to IS NULL OR effective_to > statement_timestamp())
 		ORDER BY effective_from DESC
 		LIMIT 1`, scope).Scan(&content)
 	return content, err
