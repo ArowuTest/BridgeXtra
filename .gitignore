@@ -20,3 +20,5 @@ Thumbs.db
 # local scratch
 /tmp/
 coverage.out
+# local adversarial review council output
+/.review-council/
