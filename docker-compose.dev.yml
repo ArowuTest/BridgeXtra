@@ -101,6 +101,7 @@ services:
     environment:
       TCP_SEED_ALLOW: "1"
       TCP_ADMIN_DSN: postgres://postgres:devlocal@postgres:5432/telco_credit
+      TCP_SIMSEED_DSN: postgres://tcp_app:devlocal_app@postgres:5432/telco_credit
       TCP_SEED_API_URL: http://api:8090
       TCP_DEV_WH_SECRET: dev-webhook-hmac-secret-not-a-real-secret
     command: ["go", "run", "-tags", "simseed_loop", "./backend/cmd/seed-dev", "-held-recharges"]

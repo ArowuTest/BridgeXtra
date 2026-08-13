@@ -770,12 +770,12 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 						INSERT INTO recon_runs (run_id, telco_id, programme_id, layer,
 						  period_start, period_end,
 						  source_record_count, source_control_total_minor, source_hash,
-						  platform_record_count, platform_control_total_minor,
+						  platform_record_count, platform_control_total_minor, matched_control_total_minor,
 						  matched_count, break_count, state, created_by)
 						VALUES ($1,$2,$3,$4, $5,$6,
-						  $7,$8,$9, $10,$11, 0,0, 'REJECTED', 'worker:recon')`,
+						  $7,$8,$9, $10,$11,$12, 0,0, 'REJECTED', 'worker:recon')`,
 						runID, telcoID, programmeID, spec.name, periodStart, periodEnd,
-						srcCount, srcTotal, srcHash, int64(len(plat)), platTotal); err != nil {
+						srcCount, srcTotal, srcHash, int64(len(plat)), platTotal, matchedTotal); err != nil {
 						return err
 					}
 					// REJECTED: no items, no supersession — the prior run stays live.
@@ -803,13 +803,13 @@ func (s *Service) reconcileLayer(ctx context.Context, spec layerSpec, telcoID, p
 			INSERT INTO recon_runs (run_id, telco_id, programme_id, layer,
 			  period_start, period_end,
 			  source_record_count, source_control_total_minor, source_hash,
-			  platform_record_count, platform_control_total_minor,
+			  platform_record_count, platform_control_total_minor, matched_control_total_minor,
 			  matched_count, break_count, created_by)
 			VALUES ($1,$2,$3,$4, $5,$6,
-			  $7,$8,$9, $10,$11, $12,$13, 'worker:recon')`,
+			  $7,$8,$9, $10,$11,$12, $13,$14, 'worker:recon')`,
 			runID, telcoID, programmeID, spec.name, periodStart, periodEnd,
 			srcCount, srcTotal, srcHash,
-			int64(len(plat)), platTotal,
+			int64(len(plat)), platTotal, matchedTotal,
 			int64(sum.Matched), int64(breaks)); err != nil {
 			return err
 		}

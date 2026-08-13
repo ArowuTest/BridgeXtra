@@ -5,8 +5,8 @@ package main
 // treasury guardrail holds back — never a direct held-row INSERT. Steps:
 //   1. register a webhook credential (key_id -> telco -> the NAME of the secret env var),
 //   2. activate telco.recharge_feed at global + telco scope with a tiny per-event clamp,
-//   3. arm the RECOVERY layer LIVE (SetLive AND AdvanceFreshness — armed alone is not
-//      live, so the webhook would 403 before the hold path),
+//   3. arm the RECOVERY layer LIVE (SetLive, then drive the layer to freshness through
+//      the REAL production entrypoint — see the step-3 comment below for why),
 //   4. post signed webhooks whose amount exceeds the clamp -> HTTP 202 {"status":"HELD"}.
 //
 // A running api is required: the handler verifies the HMAC against os.Getenv(secret_env)
@@ -31,6 +31,7 @@ import (
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/repo"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/simseed"
 	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/configsvc"
+	"github.com/ArowuTest/telco-credit-platform/backend/internal/usecase/recon"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -42,10 +43,9 @@ const (
 	devSecretEnvDefault = "TCP_DEV_WH_SECRET"
 	devPerEventMax      = int64(100)    // tiny clamp: any normal amount trips PER_EVENT_CLAMP
 	devHeldAmountMinor  = int64(500000) // 5,000.00 NGN in minor units — well over the clamp
-	devFreshnessSecs    = 172800        // 48h, matches the S3 arm-freshness window
 )
 
-func runHeldRecharges(ctx context.Context, adminPool *pgxpool.Pool) error {
+func runHeldRecharges(ctx context.Context, adminPool, appPool *pgxpool.Pool) error {
 	telco := simseed.SyntheticTelco // "SIM_NG"
 	secretEnvName := envOr("TCP_SEED_WH_SECRET_ENV", devSecretEnvDefault)
 	secret := os.Getenv(secretEnvName)
@@ -75,13 +75,33 @@ func runHeldRecharges(ctx context.Context, adminPool *pgxpool.Pool) error {
 	}
 
 	// 3. Arm RECOVERY LIVE — SetLive alone is not enough (IsLayerLive also requires a
-	// fresh last_recon_at), so advance freshness too, or the webhook 403s before the hold.
+	// fresh last_recon_at), or the webhook 403s before the hold path.
+	//
+	// BX-MED-004-A2: AdvanceFreshness is no longer called directly here. It is fenced to
+	// its Phase-1 allowlist of exactly one caller, recon.LegacyRecoveryPublisher (see
+	// backend/internal/repo/reconarming_fence_med004a2_test.go) — a second, unreviewed
+	// direct call here was exactly the mistake that fence exists to catch (found and fixed
+	// during this same tranche's implementation). Instead this drives the REAL production
+	// entrypoint the scheduler calls, exactly as a genuinely armed-but-never-reconciled
+	// telco earns its first freshness stamp: at this point in the dev-stack sequence
+	// (seed-held runs before seed-feed populates any recovery data) the newest settled
+	// day is genuinely quiet — nothing booked, nothing in the feed — which positively
+	// confirms (dayConfirmed's quiet-day branch) and the legacy publisher advances the
+	// gate with the governed window, precisely mirroring what a first RunRecovery tick
+	// against a freshly armed telco does in production.
 	arm := &repo.ReconArming{Pool: adminPool}
 	if err := arm.SetLive(ctx, telco, repo.ReconLayerRecovery); err != nil {
 		return fmt.Errorf("arm recovery live: %w", err)
 	}
-	if _, err := arm.AdvanceFreshness(ctx, telco, repo.ReconLayerRecovery, devFreshnessSecs); err != nil {
-		return fmt.Errorf("advance recovery freshness: %w", err)
+	svc := recon.New(appPool, configsvc.New(appPool), seedLogger())
+	if _, err := svc.RunRecovery(ctx, telco); err != nil {
+		return fmt.Errorf("run recovery (advance freshness via the real gate): %w", err)
+	}
+	if live, err := arm.IsLayerLive(ctx, telco, repo.ReconLayerRecovery); err != nil {
+		return fmt.Errorf("verify recovery layer live: %w", err)
+	} else if !live {
+		return fmt.Errorf("recovery layer still not LIVE after RunRecovery — the newest settled day did " +
+			"not positively confirm (unexpected for an empty/quiet dev DB at this point in the seed sequence)")
 	}
 
 	// 4. Post signed webhooks over the clamp -> HELD rows.

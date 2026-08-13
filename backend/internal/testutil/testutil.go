@@ -50,12 +50,13 @@ const (
 var dbNameRe = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 type DB struct {
-	Name     string
-	Admin    *pgxpool.Pool // owner: migrations, seeds, cross-tenant assertions
-	App      *pgxpool.Pool // tcp_app: RLS enforced — the pool business code uses
-	Worker   *pgxpool.Pool // tcp_worker: BYPASSRLS dispatcher
-	Operator *pgxpool.Pool // tcp_operator: RLS-enforced read-only operator (Gate B #1)
-	Config   *pgxpool.Pool // tcp_config: NON-BYPASSRLS config/resolver role (BX-HIGH-012)
+	Name      string
+	Admin     *pgxpool.Pool // owner: migrations, seeds, cross-tenant assertions
+	App       *pgxpool.Pool // tcp_app: RLS enforced — the pool business code uses
+	Worker    *pgxpool.Pool // tcp_worker: BYPASSRLS dispatcher
+	Operator  *pgxpool.Pool // tcp_operator: RLS-enforced read-only operator (Gate B #1)
+	Config    *pgxpool.Pool // tcp_config: NON-BYPASSRLS config/resolver role (BX-HIGH-012)
+	Freshness *pgxpool.Pool // tcp_freshness: NON-BYPASSRLS, minimal-grant fenced publisher role (BX-MED-004-A2)
 }
 
 func hostPort() string {
@@ -134,13 +135,23 @@ func MustSetup(t *testing.T, suffix string) *DB {
 		operator.Close()
 		t.Fatalf("config pool: %v", err)
 	}
+	freshness, err := platform.NewPool(ctx, dsn("tcp_freshness", "devlocal_freshness", name))
+	if err != nil {
+		admin.Close()
+		app.Close()
+		worker.Close()
+		operator.Close()
+		config.Close()
+		t.Fatalf("freshness pool: %v", err)
+	}
 
-	db := &DB{Name: name, Admin: admin, App: app, Worker: worker, Operator: operator, Config: config}
+	db := &DB{Name: name, Admin: admin, App: app, Worker: worker, Operator: operator, Config: config, Freshness: freshness}
 	t.Cleanup(func() {
 		app.Close()
 		worker.Close()
 		operator.Close()
 		config.Close()
+		freshness.Close()
 		admin.Close()
 		// Drop the test database on teardown so runs don't accumulate hundreds of
 		// stale telco_credit_test_* DBs — that bloat balloons the server's cold-start

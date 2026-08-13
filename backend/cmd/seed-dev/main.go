@@ -86,7 +86,12 @@ func main() {
 	}
 
 	if *heldMode {
-		if err := runHeldRecharges(ctx, adminPool); err != nil {
+		appPool, err := platform.NewPool(ctx, mustEnv("TCP_SIMSEED_DSN")) // tcp_app for the RLS recon drive (BX-MED-004-A2)
+		if err != nil {
+			log.Fatalf("seed-dev: app connect: %v", err)
+		}
+		defer appPool.Close()
+		if err := runHeldRecharges(ctx, adminPool, appPool); err != nil {
 			log.Fatalf("seed-dev: held recharges: %v", err)
 		}
 		return

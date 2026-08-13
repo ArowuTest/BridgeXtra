@@ -48,6 +48,10 @@ type recoveryCfg struct {
 	ArmFreshnessMaxSeconds int     // S3-B
 	BusinessTimezone       string
 	loc                    *time.Location
+	// ConfigVersionID is the exact recon.recovery config_versions row this cfg was loaded from —
+	// BX-MED-004-A2: recorded on the qualification for audit (never trusted by the fenced
+	// publisher's own decision, which independently re-resolves the CURRENT governed values).
+	ConfigVersionID string
 }
 
 // recoverySpec is the RECOVERY layer: the platform side is the reversal-aware NET
@@ -227,21 +231,42 @@ func dayConfirmed(sum Summary, minConfirmationRatio float64) bool {
 	if sum.Rejected || sum.NothingToReconcile {
 		return false
 	}
-	if sum.PlatformRecords == 0 {
-		return sum.SourceRecordCount == 0
+	return confirmationHolds(int64(sum.PlatformRecords), int64(sum.SourceRecordCount),
+		sum.MatchedControlTotalMinor, sum.PlatformControlTotalMinor, minConfirmationRatio)
+}
+
+// confirmationHolds is the money-confirmation arithmetic itself, factored out of dayConfirmed so
+// BX-MED-004-A2's fenced publisher can independently re-derive the SAME verdict from recon_runs'
+// own persisted columns at publish time, with no second hand-copy to drift out of sync. It does
+// NOT know about Rejected/NothingToReconcile — those are state exclusions the CALLER is
+// responsible for applying first (dayConfirmed applies them via the Summary fields before ever
+// reaching here; FencedControlPublisher applies them via recon_runs.state == 'ACTIVE', a
+// structurally different but equivalent check — see design_MED-004-A2_v3.md Fix 5's own residual-
+// gap note on why this split is documented explicitly rather than silently assumed identical).
+func confirmationHolds(platformRecordCount, sourceRecordCount, matchedTotalMinor, platformTotalMinor int64, minConfirmationRatio float64) bool {
+	if platformRecordCount == 0 {
+		return sourceRecordCount == 0
 	}
-	floor := int64(math.Ceil(minConfirmationRatio * float64(sum.PlatformControlTotalMinor)))
-	return sum.MatchedControlTotalMinor >= floor
+	floor := int64(math.Ceil(minConfirmationRatio * float64(platformTotalMinor)))
+	return matchedTotalMinor >= floor
 }
 
 // RecoveryEvidence is the durable, independently-verifiable proof that ONE
-// RECOVERY reconciliation run positively confirmed the booked recovery money —
-// the only thing MED-004-A2's fenced publisher may act on. RunID and EvidenceAt
-// are read back from the persisted recon_runs row (never caller-derived: see
-// recoveryRunCreatedAt), and ArmFreshnessMaxSeconds is the EXACT governed window
-// that governed this confirmation (never re-loaded — a second config load could
-// race a change to the governed value between the confirmation and publication).
+// RECOVERY reconciliation run positively confirmed the booked recovery money.
+// QualificationID names the durable recon_recovery_qualifications row (BX-MED-004-A2);
+// RunID is the recon_runs row it points at; EvidenceAt is the qualification
+// row's OWN created_at (the durable evidence-time boundary — never a caller
+// clock, never recon_runs.created_at, which a REJECTED run also gets).
+//
+// ArmFreshnessMaxSeconds is a MED-004-A1 COMPATIBILITY FIELD ONLY: it exists
+// solely so LegacyRecoveryPublisher (still the live Phase-1 production path)
+// can reproduce its pre-A2 behaviour with zero semantic change.
+// FencedControlPublisher (MED-004-A2) MUST NEVER read this field — it always
+// independently re-resolves the CURRENTLY effective governed window itself
+// (see FencedControlPublisher.currentRecoveryCfg). DELETE this field at
+// Phase-2 cutover, when LegacyRecoveryPublisher is deleted alongside it.
 type RecoveryEvidence struct {
+	QualificationID        string
 	RunID                  string
 	EvidenceAt             time.Time
 	ArmFreshnessMaxSeconds int
@@ -314,13 +339,14 @@ func (s *Service) RunRecoveryControl(ctx context.Context, telcoID string) (Recov
 		out = append(out, sum)
 		if isLast {
 			if dayConfirmed(sum, cfg.MinConfirmationRatio) {
-				createdAt, err := s.recoveryRunCreatedAt(ctx, telcoID, sum.RunID)
+				qualID, evidenceAt, err := s.writeQualification(ctx, telcoID, sum.RunID, cfg)
 				if err != nil {
 					return RecoveryControlResult{Summaries: out}, err
 				}
 				qualified = &RecoveryEvidence{
+					QualificationID:        qualID,
 					RunID:                  sum.RunID,
-					EvidenceAt:             createdAt,
+					EvidenceAt:             evidenceAt,
 					ArmFreshnessMaxSeconds: cfg.ArmFreshnessMaxSeconds,
 				}
 			} else {
@@ -335,20 +361,31 @@ func (s *Service) RunRecoveryControl(ctx context.Context, telcoID string) (Recov
 	return RecoveryControlResult{Summaries: out, QualifiedEvidence: qualified}, nil
 }
 
-// recoveryRunCreatedAt reads back the DB-generated created_at of a just-persisted
-// recon_runs row — RecoveryEvidence.EvidenceAt, never a caller-side time.Now().
-// Tenant-scoped (recon_runs is RLS-enabled); run_id is the table's primary key, so
-// telco_id/layer here are defense-in-depth, not the selectivity.
-func (s *Service) recoveryRunCreatedAt(ctx context.Context, telcoID, runID string) (time.Time, error) {
-	var createdAt time.Time
+// writeQualification persists the durable BX-MED-004-A2 qualification pointer for a positively-
+// confirmed RECOVERY run. UNEXPORTED — Go's own visibility rules make it impossible for any
+// package other than this one to reference it, let alone call it, at all. Its ONE legitimate call
+// site (above, RunRecoveryControl's post-dayConfirmed-true branch) is structurally proven by
+// TestMED004A2_WriteQualificationOnlyFromPostConfirmBranch. It carries NO money figures — the
+// fenced publisher reads matched/platform totals from recon_runs itself, never a copy here (see
+// design_MED-004-A2_v3.md §1's forgery-risk rationale). The audit-only threshold/window/config-
+// version columns record what was ACTUALLY used at qualification time; the publisher's own
+// decision never trusts them, always re-resolving the CURRENT governed config independently.
+// Returns the row's own DB-generated created_at — the durable EvidenceAt, distinct from
+// recon_runs.created_at (which a REJECTED run also gets).
+func (s *Service) writeQualification(ctx context.Context, telcoID, runID string, cfg recoveryCfg) (qualificationID string, evidenceAt time.Time, err error) {
+	qualificationID = platform.NewID("qual")
 	tctx := platform.WithTenant(ctx, telcoID)
-	err := repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
+	err = repo.WithTenantTx(tctx, s.Pool, func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx, `
-			SELECT created_at FROM recon_runs
-			WHERE run_id=$1 AND telco_id=$2 AND layer=$3`,
-			runID, telcoID, layerRecovery).Scan(&createdAt)
+			INSERT INTO recon_recovery_qualifications
+			  (qualification_id, run_id, telco_id, layer,
+			   min_confirmation_ratio_used, arm_freshness_max_seconds_used, recon_recovery_config_version_id)
+			VALUES ($1,$2,$3,$4, $5,$6,$7)
+			RETURNING created_at`,
+			qualificationID, runID, telcoID, layerRecovery,
+			cfg.MinConfirmationRatio, cfg.ArmFreshnessMaxSeconds, cfg.ConfigVersionID).Scan(&evidenceAt)
 	})
-	return createdAt, err
+	return qualificationID, evidenceAt, err
 }
 
 // RunRecovery is the production entrypoint the scheduler/worker calls. It is a
@@ -540,6 +577,7 @@ func (s *Service) loadForRecovery(ctx context.Context, telcoID string) (recovery
 		ArmFreshnessMaxSeconds: raw.ArmFreshnessMaxSeconds,
 		BusinessTimezone:       raw.BusinessTimezone,
 		loc:                    loc,
+		ConfigVersionID:        cv.ConfigVersionID,
 	}
 	adapter, err := s.buildFeedAdapter(ctx, telcoID)
 	if err != nil {

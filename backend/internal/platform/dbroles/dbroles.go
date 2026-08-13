@@ -20,10 +20,11 @@ import (
 
 // envPasswords maps role name -> environment variable carrying its password.
 var envPasswords = map[string]string{
-	"tcp_app":      "TCP_APP_PASSWORD",
-	"tcp_worker":   "TCP_WORKER_PASSWORD",
-	"tcp_operator": "TCP_OPERATOR_PASSWORD",
-	"tcp_config":   "TCP_CONFIG_PASSWORD", // BX-HIGH-012: least-privilege config/resolver role
+	"tcp_app":       "TCP_APP_PASSWORD",
+	"tcp_worker":    "TCP_WORKER_PASSWORD",
+	"tcp_operator":  "TCP_OPERATOR_PASSWORD",
+	"tcp_config":    "TCP_CONFIG_PASSWORD",    // BX-HIGH-012: least-privilege config/resolver role
+	"tcp_freshness": "TCP_FRESHNESS_PASSWORD", // BX-MED-004-A2: fenced recovery-freshness publisher
 }
 
 // ApplyPasswords sets each role's password from its env var when present.

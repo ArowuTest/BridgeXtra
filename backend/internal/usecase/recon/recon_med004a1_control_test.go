@@ -68,24 +68,42 @@ func TestMED004A1_QuietDayProducesEvidenceMatchingThePersistedRun(t *testing.T) 
 		t.Fatalf("QualifiedEvidence.RunID (%s) must be the newest day's own run_id (%s)",
 			res.QualifiedEvidence.RunID, newest.RunID)
 	}
+	if res.QualifiedEvidence.QualificationID == "" {
+		t.Fatal("QualifiedEvidence.QualificationID must be set (BX-MED-004-A2)")
+	}
 
 	// Independent read-back — NOT the code under test's own query — proving the
 	// evidence names a run that actually exists, in the state the money gate must
-	// be able to trust, with a created_at the DB itself generated.
+	// be able to trust.
 	var telcoID, layer, state string
-	var dbCreatedAt time.Time
 	if err := f.db.Admin.QueryRow(ctx,
-		`SELECT telco_id, layer, state, created_at FROM recon_runs WHERE run_id=$1`,
-		res.QualifiedEvidence.RunID).Scan(&telcoID, &layer, &state, &dbCreatedAt); err != nil {
+		`SELECT telco_id, layer, state FROM recon_runs WHERE run_id=$1`,
+		res.QualifiedEvidence.RunID).Scan(&telcoID, &layer, &state); err != nil {
 		t.Fatalf("independent SELECT for run_id=%s: %v", res.QualifiedEvidence.RunID, err)
 	}
 	if telcoID != "SIM_NG" || layer != layerRecovery || state != "ACTIVE" {
 		t.Fatalf("persisted run mismatch: telco_id=%s layer=%s state=%s (want SIM_NG/%s/ACTIVE)",
 			telcoID, layer, state, layerRecovery)
 	}
-	if !dbCreatedAt.Equal(res.QualifiedEvidence.EvidenceAt) {
-		t.Fatalf("EvidenceAt (%v) must equal the persisted run's own created_at (%v), not a caller-side clock",
-			res.QualifiedEvidence.EvidenceAt, dbCreatedAt)
+
+	// BX-MED-004-A2: EvidenceAt is the QUALIFICATION row's own created_at — the moment
+	// qualification was PROVEN — not recon_runs.created_at (which a REJECTED run also gets, and
+	// which is a genuinely different transaction/statement now). Independently verify both: the
+	// qualification row exists, points at this exact run, and its created_at is EvidenceAt.
+	var qualRunID string
+	var qualCreatedAt time.Time
+	if err := f.db.Admin.QueryRow(ctx,
+		`SELECT run_id, telco_id, layer, created_at FROM recon_recovery_qualifications WHERE qualification_id=$1`,
+		res.QualifiedEvidence.QualificationID).Scan(&qualRunID, &telcoID, &layer, &qualCreatedAt); err != nil {
+		t.Fatalf("independent SELECT for qualification_id=%s: %v", res.QualifiedEvidence.QualificationID, err)
+	}
+	if qualRunID != res.QualifiedEvidence.RunID || telcoID != "SIM_NG" || layer != layerRecovery {
+		t.Fatalf("qualification row mismatch: run_id=%s telco_id=%s layer=%s (want %s/SIM_NG/%s)",
+			qualRunID, telcoID, layer, res.QualifiedEvidence.RunID, layerRecovery)
+	}
+	if !qualCreatedAt.Equal(res.QualifiedEvidence.EvidenceAt) {
+		t.Fatalf("EvidenceAt (%v) must equal the qualification row's own created_at (%v), not a caller-side clock",
+			res.QualifiedEvidence.EvidenceAt, qualCreatedAt)
 	}
 
 	// The control itself must never have touched the gate.
