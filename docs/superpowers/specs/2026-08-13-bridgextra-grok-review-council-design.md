@@ -53,8 +53,16 @@ review-council/
   ADJUDICATION.md
 
 tools/review-council/
-  main.go
-  main_test.go
+  main.go                 # flag parsing + orchestration only
+  types.go                # shared data structures and role registry
+  git.go                  # git provenance + migration-head capture
+  bundle.go               # deterministic source collection/line numbering/budgets
+  openrouter.go           # OpenRouter HTTP client, retries, concurrent reviewer calls
+  output.go               # provenance validation, manifests, adjudication packet
+  git_test.go
+  bundle_test.go
+  openrouter_test.go
+  output_test.go
 
 docs/review-council/
   README.md
