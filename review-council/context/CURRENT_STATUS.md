@@ -33,7 +33,7 @@ Disposition: **DORMANT / ACTIVATION BLOCKER**, severity MEDIUM if activated unfi
 - MED-006: CLOSED.
 - MED-007: CLOSED.
 - MED-008: CLOSED.
-- MED-009 canonical config hashing: CLOSED as an engineering invariant, but a separate historical production-row incident hardening follow-up remains bounded and must not be conflated with MED-004.
+- MED-009 canonical config hashing: **CLOSED**. The historical production-row incident hardening is also **CLOSED** at `c329f77e60d62a40095089b5975eb4fb4f92c76d`: migration 0084's exception is pinned to the exact investigated snapshot and targeted regression tests prove altered/unrelated application-authored mismatches still fail closed. Keep this incident separate from MED-004.
 - MED-010: CLOSED.
 - MED-015 supply-chain/CI engineering phase: CLOSED; dependency-review now runs on direct pushes as well as PRs.
 - MED-003 bounded-memory staged/streamed feature ingestion: **OPEN**, sequenced after MED-004.
