@@ -56,11 +56,10 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- BX-MED-009 production incident (investigated, not blind-patched): cfg_01KXRQPASM83ZF743XP862YF81
--- (domain=telco.adapter, scope=telco:SIM_NG, created_by=admin:owner-a, created_at=2026-07-17
--- 19:08:45Z) never successfully passed the guard below on the production database — every boot
--- re-ran the full unapplied migration chain from scratch and this one always rolled back, so the
--- service could never start. Investigated before touching anything:
+-- BX-MED-009 production incident (investigated, not blind-patched; reviewer-hardened): a single
+-- application-authored row never successfully passed the guard below on the production database —
+-- every boot re-ran the full unapplied migration chain from scratch and this one always rolled back,
+-- so the service could never start. Investigated before touching anything:
 --   * content is {"retry_budget":0,"fulfilment_url":"https://bridgextra-sim.onrender.com",
 --     "request_timeout_ms":8000,"circuit_min_requests":20,"circuit_error_threshold_pct":50} —
 --     unremarkable, exactly what initial environment bootstrap (the same day the DB role passwords
@@ -68,14 +67,33 @@ $$ LANGUAGE plpgsql;
 --   * created THREE AND A HALF WEEKS before the actual MED-009 canonicalization fix landed
 --     (6de3230, 2026-08-10) — hashed by the pre-fix configsvc, which hashed raw request bytes
 --     instead of the DB-canonical jsonb form, the SAME defect this migration already repairs for 38
---     seeded rows below. Not tampering: a row that predates the algorithm it is now checked against.
--- Corrected here, by exact primary key, BEFORE the guard below — not by weakening the guard itself,
--- which stays fully rigorous for every other application-authored row, historical or future. A
--- no-op on any database where this row doesn't exist (every fresh from-zero database, which never
--- carries production's history) or already matches.
+--     seeded rows below.
+-- CORRECTED CLAIM (reviewer catch): the pre-canonicalization-hashing explanation is compelling but,
+-- on its own, does NOT prove this row's content was never altered — 0019 (EXT-3, the trigger that
+-- makes content/content_hash immutable) committed 2026-07-18, ONE DAY AFTER this row's created_at
+-- (2026-07-17), so there was a real historical interval during which no repository control would
+-- have stopped a content change even if one had occurred. No evidence of tampering exists either —
+-- only that the repository alone cannot rule it out for that interval, which is a narrower claim
+-- than "not tampering" and the one this migration actually needs to be safe.
+--
+-- So the repair does NOT trust "this ID had a bad hash" alone. It is pinned to the ENTIRE
+-- investigated snapshot — identity, content, and the exact pre-repair hash captured during the
+-- investigation — so it can only ever re-derive the hash of a row byte-for-byte identical to the one
+-- actually looked at. If ANY predicate below differs from what is currently stored (a different
+-- domain/scope/creator/timestamp/content, or a hash that has already changed since the incident),
+-- this UPDATE matches zero rows, and the generic guard immediately below aborts the migration exactly
+-- as it was designed to — an unexplained application-authored mismatch remains a hard-refused
+-- investigation signal, never silently laundered. A no-op on any fresh from-zero database (this row
+-- is production-only history) or once already repaired.
 UPDATE config_versions
    SET content_hash = encode(sha256(content::text::bytea), 'hex')
  WHERE config_version_id = 'cfg_01KXRQPASM83ZF743XP862YF81'
+   AND domain = 'telco.adapter'
+   AND scope = 'telco:SIM_NG'
+   AND created_by = 'admin:owner-a'
+   AND created_at = '2026-07-17 19:08:45.237223+00'::timestamptz
+   AND content = '{"retry_budget": 0, "fulfilment_url": "https://bridgextra-sim.onrender.com", "request_timeout_ms": 8000, "circuit_min_requests": 20, "circuit_error_threshold_pct": 50}'::jsonb
+   AND content_hash = '7c4b640364177b56872292c0f3adf93f3d1323979192ad9e03b777d0b082ee6f'
    AND content_hash <> encode(sha256(content::text::bytea), 'hex');
 
 -- Refuse to proceed if an APPLICATION-authored row disagrees with its content. Those already hash
