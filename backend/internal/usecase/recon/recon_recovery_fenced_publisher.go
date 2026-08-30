@@ -15,10 +15,8 @@ package recon
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,37 +43,45 @@ type FencedControlPublisher struct {
 //
 // evidence.EvidenceAt is NEVER read here (BX-MED-004-A2 finding F1): a caller-supplied timestamp is
 // exactly the kind of unverified input this whole design exists to refuse. The sole authoritative
-// evidence timestamp is recon_recovery_qualifications.created_at, re-read fresh in Step 1 below —
-// even a caller that has forged evidence.EvidenceAt (a stray Go bug, a bad retry, a malicious value)
-// cannot influence what gets stamped, only which qualification/run pair is looked up.
+// evidence timestamp is recon_recovery_qualifications.created_at, re-read fresh in Step 3's own
+// publication statement — even a caller that has forged evidence.EvidenceAt (a stray Go bug, a bad
+// retry, a malicious value) cannot influence what gets stamped, only which qualification/run pair is
+// looked up.
 //
 // Monotonic: a delayed or reclaimed publisher replaying evidence older than (or identical to) what
 // is already stamped is a no-op success, never an error — the gate is already at least as fresh as
 // this evidence would make it, and evidence-time freshness means a late publisher must never claim
 // fresher evidence than it actually has.
+//
+// BX-MED-004-A2 finding F3b — the governed config is resolved, the confirmation re-verified, and the
+// freshness advanced ALL INSIDE ONE FINAL PUBLICATION STATEMENT (Step 3), at a single
+// statement_timestamp() taken AFTER the arming-row lock (Step 2). F3a already moved config
+// resolution onto Postgres's per-statement clock; F3b closes the residual gap F3a leaves under lock
+// contention. Previously the config was resolved (and the confirmation evaluated) in earlier,
+// separate statements — BEFORE the FOR UPDATE lock. A publisher that then blocked on that lock
+// behind a concurrent writer would carry a now-stale threshold/window across the block: a governed
+// tightening that committed while it was blocked would be missed and the money gate advanced anyway.
+// Resolving+confirming+writing in one post-lock statement means any governed policy committed before
+// that statement begins is honoured, and the confirmation and the window written can never disagree.
 func (p *FencedControlPublisher) Publish(ctx context.Context, telcoID string, evidence RecoveryEvidence) error {
 	return repo.WithTenantTx(platform.WithTenant(ctx, telcoID), p.Pool, func(tx pgx.Tx) error {
-		// Step 1: independently verify the evidence binding AND read the qualification's OWN
-		// created_at — the only evidence timestamp this function will ever act on. Proves run exists,
-		// scope matches, layer==RECOVERY, state==ACTIVE, and the qualification genuinely names this
-		// run — reading recon_runs' OWN persisted totals, never the qualification row's claims (it
-		// carries none). evidence.QualificationID/evidence.RunID are the lookup KEY; nothing else on
-		// the caller-supplied struct is trusted.
+		// Step 1: a binding PRE-CHECK for precise, early errors — proves the qualification/run pair
+		// exists, scope matches, layer==RECOVERY, and the run carries persisted control totals (a
+		// pre-A2 row does not). This is not the authority: it reads at this transaction's snapshot,
+		// so a run it sees ACTIVE could still be superseded before Step 3 runs — which is exactly why
+		// Step 3 re-binds independently. Step 1 only ever ADDS refusals (a strictly more conservative
+		// gate), never causes an accept. evidence.QualificationID/evidence.RunID are the lookup KEY;
+		// nothing else on the caller-supplied struct is trusted.
 		var runTelcoID, layer, state string
-		var platformRecordCount, sourceRecordCount int64
 		var matchedTotal, platformTotal *int64
-		var qualificationCreatedAt time.Time
 		err := tx.QueryRow(ctx, `
 			SELECT rr.telco_id, rr.layer, rr.state,
-			       rr.platform_record_count, rr.source_record_count,
-			       rr.matched_control_total_minor, rr.platform_control_total_minor,
-			       q.created_at
+			       rr.matched_control_total_minor, rr.platform_control_total_minor
 			FROM recon_recovery_qualifications q
 			JOIN recon_runs rr ON rr.run_id = q.run_id
 			WHERE q.qualification_id = $1 AND q.run_id = $2`,
 			evidence.QualificationID, evidence.RunID).
-			Scan(&runTelcoID, &layer, &state, &platformRecordCount, &sourceRecordCount, &matchedTotal, &platformTotal,
-				&qualificationCreatedAt)
+			Scan(&runTelcoID, &layer, &state, &matchedTotal, &platformTotal)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("evidence binding failed: no qualification/run pair for qualification_id=%s run_id=%s",
 				evidence.QualificationID, evidence.RunID)
@@ -91,147 +97,108 @@ func (p *FencedControlPublisher) Publish(ctx context.Context, telcoID string, ev
 			return fmt.Errorf("evidence binding failed: run %s has no persisted control totals (pre-A2 row?)", evidence.RunID)
 		}
 
-		// Step 2: independently resolve the CURRENTLY effective governed threshold — never trust
-		// anything the caller supplied. Not yet holding any lock: this and step 1 read only
-		// immutable/append-only data (recon_runs only ever transitions ACTIVE->SUPERSEDED;
-		// qualifications are insert-once), so there is nothing to serialize against here.
-		minConfirmationRatio, armFreshnessMaxSeconds, err := p.currentRecoveryCfg(ctx, tx, telcoID)
-		if err != nil {
-			return err
-		}
-
-		// Step 3: recompute the confirmation decision from TRUSTED numbers (recon_runs' own) against
-		// the CURRENT threshold — HIGH-016's guard, independently re-derived, not inherited from
-		// RunRecoveryControl's in-process decision. If a threshold tightened between qualification
-		// and publish, this can correctly refuse evidence that qualified under an older, looser
-		// threshold (design_MED-004-A2_v3.md §6 item 3).
-		if !confirmationHolds(platformRecordCount, sourceRecordCount, *matchedTotal, *platformTotal, minConfirmationRatio) {
-			return fmt.Errorf("re-verification failed: run %s no longer confirms at the current threshold %v "+
-				"(matched=%d platform=%d platform_records=%d source_records=%d)",
-				evidence.RunID, minConfirmationRatio, *matchedTotal, *platformTotal, platformRecordCount, sourceRecordCount)
-		}
-
-		// Step 4: only now, immediately before the write, take the row lock — minimizing how long
-		// any concurrent Publish() for the same telco/layer is blocked. FOR UPDATE serializes
-		// concurrent publishers: the second one to reach here blocks until the first commits, then
-		// re-reads the just-committed last_recon_at under READ COMMITTED, so the monotonicity check
-		// below always compares against genuinely current state, never a stale read.
-		var currentLastReconAt *time.Time
+		// Step 2: take the arming-row lock as its OWN statement, BEFORE the final publication
+		// statement. This ordering is the F3b fix: the final statement (Step 3) is issued only after
+		// this lock is acquired, so its statement_timestamp() falls AFTER any concurrent publisher's
+		// contention has drained — letting it honour a governed policy that committed while this
+		// publisher was blocked here. FOR UPDATE serializes concurrent publishers for the same
+		// telco/layer; the loser blocks until the winner commits, then Step 3 re-reads just-committed
+		// state under READ COMMITTED. A missing row is disarmed mid-publish — a distinct, more
+		// alarming condition than "not yet fresh enough", so it is an error, never a silent no-op.
+		var locked bool
 		err = tx.QueryRow(ctx,
-			`SELECT last_recon_at FROM recon_layer_arming WHERE telco_id=$1 AND layer=$2 FOR UPDATE`,
-			telcoID, layerRecovery).Scan(&currentLastReconAt)
+			`SELECT true FROM recon_layer_arming WHERE telco_id=$1 AND layer=$2 FOR UPDATE`,
+			telcoID, layerRecovery).Scan(&locked)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("disarmed mid-publish, refusing: no recon_layer_arming row for %s/%s", telcoID, layerRecovery)
 		}
 		if err != nil {
 			return err
 		}
-		if currentLastReconAt != nil && !qualificationCreatedAt.After(*currentLastReconAt) {
-			// Superseded by newer evidence already published, or an exact-replay retry of this same
-			// evidence (crash/reclaim resubmission) — both are success-but-no-op. Compared against the
-			// freshly re-read qualificationCreatedAt, never a caller-supplied value.
-			return nil
-		}
 
-		ct, err := tx.Exec(ctx, `
-			UPDATE recon_layer_arming SET last_recon_at = $3, arm_freshness_max_seconds = $4
-			WHERE telco_id = $1 AND layer = $2`,
-			telcoID, layerRecovery, qualificationCreatedAt, armFreshnessMaxSeconds)
+		// Step 3: the single final publication statement (BX-MED-004-A2 finding F3b). At ONE snapshot,
+		// taken after the lock above, it:
+		//   - re-binds the qualification to a STILL-ACTIVE run and reads recon_runs' OWN persisted
+		//     totals (bind) — catching a supersession that committed while Step 2 was blocked;
+		//   - resolves the CURRENTLY effective governed config by Postgres's own statement_timestamp()
+		//     (cfg), telco scope winning over global, ACTIVE|SUPERSEDED with effective_from/to
+		//     windowing — the exact shape configsvc.ActiveAt / repo.GetActiveAt use;
+		//   - re-verifies confirmation from those trusted totals against that freshly-resolved
+		//     threshold, with the same fail-closed floors loadForRecovery re-asserts (a raw seed
+		//     bypasses the validator, so the floor lives here too);
+		//   - and, only if all of that still holds, advances BOTH freshness columns — but ONLY on
+		//     strictly-newer evidence (the CASE), stamping the qualification's OWN created_at (never a
+		//     live clock — finding F1) and the freshly-resolved governed window.
+		// The ADVANCED classification (is_newer) is computed from the PRE-update arming value (armnow,
+		// read under the lock this tx already holds). A matched row means authorized: RETURNING true =
+		// advanced, false = equal/older replay that changed neither column but still succeeds. Zero
+		// rows (ErrNoRows) means the run is no longer ACTIVE, no longer confirms at the CURRENT
+		// governed policy, or that policy is unavailable — refuse.
+		var advanced bool
+		err = tx.QueryRow(ctx, `
+			WITH
+			armnow AS (
+				SELECT last_recon_at AS prev_last
+				FROM recon_layer_arming
+				WHERE telco_id = $1 AND layer = $2
+			),
+			bind AS (
+				SELECT rr.state,
+				       rr.platform_record_count        AS prc,
+				       rr.source_record_count          AS src,
+				       rr.matched_control_total_minor  AS matched,
+				       rr.platform_control_total_minor AS platform,
+				       q.created_at                    AS qual_created_at
+				FROM recon_recovery_qualifications q
+				JOIN recon_runs rr ON rr.run_id = q.run_id
+				WHERE q.qualification_id = $3 AND q.run_id = $4
+				  AND rr.telco_id = $1 AND rr.layer = $2
+			),
+			cfg AS (
+				SELECT (content->>'min_confirmation_ratio')::float8 AS min_ratio,
+				       (content->>'arm_freshness_max_seconds')::int  AS window_s
+				FROM config_versions_recon_recovery
+				WHERE scope IN ('telco:'||$1, 'global')
+				  AND state IN ('ACTIVE','SUPERSEDED')
+				  AND effective_from <= statement_timestamp()
+				  AND (effective_to IS NULL OR effective_to > statement_timestamp())
+				ORDER BY (scope = 'telco:'||$1) DESC, effective_from DESC
+				LIMIT 1
+			),
+			decision AS (
+				SELECT b.qual_created_at,
+				       c.window_s,
+				       (an.prev_last IS NULL OR b.qual_created_at > an.prev_last) AS is_newer
+				FROM armnow an, bind b, cfg c
+				WHERE b.state = 'ACTIVE'
+				  AND b.matched IS NOT NULL AND b.platform IS NOT NULL
+				  AND c.min_ratio > 0 AND c.min_ratio <= 1
+				  AND c.window_s BETWEEN 3600 AND 604800
+				  AND (CASE WHEN b.prc = 0
+				            THEN b.src = 0
+				            ELSE b.matched >= ceil(c.min_ratio * b.platform)::bigint
+				       END)
+			)
+			UPDATE recon_layer_arming a
+			SET last_recon_at =
+			      CASE WHEN d.is_newer THEN d.qual_created_at ELSE a.last_recon_at END,
+			    arm_freshness_max_seconds =
+			      CASE WHEN d.is_newer THEN d.window_s ELSE a.arm_freshness_max_seconds END
+			FROM decision d
+			WHERE a.telco_id = $1 AND a.layer = $2
+			RETURNING d.is_newer`,
+			telcoID, layerRecovery, evidence.QualificationID, evidence.RunID).Scan(&advanced)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("re-verification failed: run %s is no longer ACTIVE, no longer confirms at the "+
+				"CURRENT governed threshold, or its governed config is unavailable — refusing", evidence.RunID)
+		}
 		if err != nil {
 			return err
 		}
-		if ct.RowsAffected() != 1 {
-			// Invariant assertion, not a live race: the FOR UPDATE lock taken above is held for the
-			// remainder of this transaction, so no concurrent writer can delete or alter this exact
-			// row between the lock and this UPDATE. Reachable only if that locking invariant is ever
-			// violated (e.g. a future refactor drops the FOR UPDATE) — fail loudly rather than
-			// silently proceed on an assumption that no longer holds.
-			return fmt.Errorf("recon_layer_arming row for %s/%s changed unexpectedly under lock — refusing", telcoID, layerRecovery)
-		}
+		// advanced==true stamped newer evidence; advanced==false was an equal/older replay left
+		// unchanged. Both are success — the classification is derived in-SQL from the pre-update
+		// arming value, never a caller-supplied one.
+		_ = advanced
 		return nil
 	})
-}
-
-// currentRecoveryCfg independently resolves the CURRENTLY effective governed recon.recovery
-// threshold and freshness window, inside the CALLER's own transaction (tx — never a second pool
-// connection; tcp_freshness has no grant that would let a second connection do anything useful, and
-// holding one connection locked while blocked acquiring another from the same pool is a self-
-// inflicted starvation risk under concurrent Publish() calls). Reads config_versions_recon_recovery
-// (the security-barrier view scoped to domain='recon.recovery'), since tcp_freshness has no grant on
-// the base config_versions table.
-//
-// Mirrors configsvc.Service.ActiveAt's exact two-tier scope resolution (telco-specific, falling back
-// to global) and repo.ConfigVersions.GetActiveAt's exact query shape — including matching
-// state IN ('ACTIVE','SUPERSEDED') with effective_from/effective_to windowing and newest-effective-
-// from-wins, NOT a naive state='ACTIVE' filter, which is NOT what the real config-resolution path
-// uses (verified against backend/internal/repo/config.go's actual GetActiveAt before writing this).
-//
-// "Currently effective" is resolved by POSTGRES'S OWN clock inside the query below (BX-MED-004-A2
-// finding F2), never a Go-side time.Now(). The publisher's process clock and the database's clock are
-// two different clocks; a skewed worker could otherwise select an older/looser config than the one
-// the database itself considers effective right now — exactly the kind of gap this whole design
-// exists to close. No time.Time value is threaded into this call chain at all, so there is nothing a
-// caller (or a future refactor) could pass to influence which config version resolves.
-//
-// BX-MED-004-A2 finding F3: within THIS function's own SQL, the clock is statement_timestamp(), not
-// now() (== transaction_timestamp(), pinned to when Publish's transaction opened). Publish's
-// transaction begins, sets the tenant context, and runs Step 1's evidence-binding join BEFORE this
-// call — an open-ended window (ordinary query latency, lock contention, load) during which a
-// governed threshold could tighten and commit elsewhere. With now(), this SELECT would keep judging
-// "currently effective" against the instant the transaction began, silently missing a tightening
-// that landed a moment ago — the exact kind of stale-governance gap A2 exists to close, just at one
-// query deeper than F2 fixed. statement_timestamp() is STABLE (safe/idiomatic in a WHERE clause,
-// unlike the VOLATILE clock_timestamp()) and reflects the instant THIS SELECT started — the minimal
-// correct exposure window for a single read, the same "take it as late as possible" discipline
-// Publish's Step 4 already applies to the arming row's FOR UPDATE lock.
-//
-// This does NOT touch evidence-timestamp semantics: the value stamped into last_recon_at is still
-// exclusively qualificationCreatedAt (q.created_at, re-read fresh in Step 1 — BX-MED-004-A2 finding
-// F1), never any live clock. A late-processed qualification is still timestamped with its own true,
-// old creation time — delayed publication can shrink the arming window it grants, never rejuvenate
-// stale evidence into looking fresher than it is. F3 only changes which governed CONFIG version
-// resolves as "current" for computing the threshold/window to apply to that evidence.
-func (p *FencedControlPublisher) currentRecoveryCfg(ctx context.Context, tx pgx.Tx, telcoID string) (minConfirmationRatio float64, armFreshnessMaxSeconds int, err error) {
-	raw, err := recoveryConfigContentAt(ctx, tx, "telco:"+telcoID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		raw, err = recoveryConfigContentAt(ctx, tx, "global")
-	}
-	if err != nil {
-		return 0, 0, fmt.Errorf("recon.recovery config (tcp_freshness): %w", err)
-	}
-	var parsed struct {
-		MinConfirmationRatio   float64 `json:"min_confirmation_ratio"`
-		ArmFreshnessMaxSeconds int     `json:"arm_freshness_max_seconds"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return 0, 0, err
-	}
-	// Same fail-closed floors loadForRecovery re-asserts at load — a raw seed bypasses the
-	// validator, so the floor lives here too, independently, matching A1's own established doctrine.
-	if parsed.MinConfirmationRatio <= 0 || parsed.MinConfirmationRatio > 1 {
-		return 0, 0, fmt.Errorf("recon.recovery min_confirmation_ratio out of range — refusing")
-	}
-	if parsed.ArmFreshnessMaxSeconds < 3600 || parsed.ArmFreshnessMaxSeconds > 604_800 {
-		return 0, 0, fmt.Errorf("recon.recovery arm_freshness_max_seconds out of range — refusing")
-	}
-	return parsed.MinConfirmationRatio, parsed.ArmFreshnessMaxSeconds, nil
-}
-
-// recoveryConfigContentAt resolves scope's currently-effective recon.recovery content using
-// POSTGRES'S OWN clock — never a bound parameter — so the instant a config becomes/stops being
-// effective is always judged by the same clock that stamps effective_from/effective_to in the first
-// place (BX-MED-004-A2 finding F2). The clock is statement_timestamp(), not now() (BX-MED-004-A2
-// finding F3 — see currentRecoveryCfg's doc comment for the full rationale): now() is pinned to
-// Publish's transaction START, which can predate this specific SELECT by however long Step 1 took,
-// silently missing a threshold tightening that committed in between.
-func recoveryConfigContentAt(ctx context.Context, tx pgx.Tx, scope string) ([]byte, error) {
-	var content []byte
-	err := tx.QueryRow(ctx, `
-		SELECT content FROM config_versions_recon_recovery
-		WHERE scope=$1 AND state IN ('ACTIVE','SUPERSEDED')
-		  AND effective_from <= statement_timestamp()
-		  AND (effective_to IS NULL OR effective_to > statement_timestamp())
-		ORDER BY effective_from DESC
-		LIMIT 1`, scope).Scan(&content)
-	return content, err
 }

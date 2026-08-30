@@ -269,8 +269,8 @@ func confirmationHolds(platformRecordCount, sourceRecordCount, matchedTotalMinor
 // solely so LegacyRecoveryPublisher (still the live Phase-1 production path)
 // can reproduce its pre-A2 behaviour with zero semantic change.
 // FencedControlPublisher (MED-004-A2) MUST NEVER read this field either — it always
-// independently re-resolves the CURRENTLY effective governed window itself
-// (see FencedControlPublisher.currentRecoveryCfg). DELETE both compatibility-only
+// independently re-resolves the CURRENTLY effective governed window itself, inline in
+// FencedControlPublisher.Publish's final publication statement. DELETE both compatibility-only
 // fields at Phase-2 cutover, when LegacyRecoveryPublisher is deleted alongside them.
 type RecoveryEvidence struct {
 	QualificationID        string

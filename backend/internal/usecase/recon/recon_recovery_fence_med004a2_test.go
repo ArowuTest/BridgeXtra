@@ -192,17 +192,20 @@ func fakeCaller(s *Service) {
 	}
 }
 
-// BX-MED-004-A2 structural fence #2 (finding F2) — the money-gate publisher's config resolution
-// must never depend on the Go process clock. currentRecoveryCfg and recoveryConfigContentAt (the
-// two functions that decide which recon.recovery config version is "currently effective" at publish
-// time) must contain NO call to time.Now() anywhere in their bodies — the only clock they may
-// consult is Postgres's own now(), embedded directly in the SQL text. A skewed worker process clock
-// must never be able to select an older/looser governed config than the one the database itself
-// considers effective right now.
+// BX-MED-004-A2 structural fence #2 (findings F2 / F3 / F3b) — the money-gate publisher's config
+// resolution must never depend on the Go process clock. Publish is the sole function that resolves
+// which recon.recovery config version is "currently effective" at publish time; since finding F3b
+// that resolution lives INLINE in Publish's final publication statement, using Postgres's own
+// statement_timestamp() (the earlier currentRecoveryCfg/recoveryConfigContentAt helpers were folded
+// into that single statement and removed). Publish must therefore contain NO call to time.Now()
+// anywhere in its body — the only clock it may consult is Postgres's, embedded directly in the SQL
+// text. A skewed worker process clock must never be able to select an older/looser governed config
+// than the one the database itself considers effective right now, and must never stamp the money
+// gate from a process-side timestamp.
 //
 // Whole-package scan (not a single hardcoded filename) so this survives a future file reorganization
-// — matches the pattern above. Anti-vacuity: the two named functions must both actually be found
-// (funcsChecked == 2), or this fence is silently checking nothing.
+// — matches the pattern above. Anti-vacuity: the named function must actually be found
+// (funcsChecked == 1), or this fence is silently checking nothing.
 
 func TestMED004A2_ConfigResolutionNeverCallsProcessClock(t *testing.T) {
 	root := "."
@@ -228,7 +231,7 @@ func TestMED004A2_ConfigResolutionNeverCallsProcessClock(t *testing.T) {
 			if !ok {
 				continue
 			}
-			if fn.Name.Name != "currentRecoveryCfg" && fn.Name.Name != "recoveryConfigContentAt" {
+			if fn.Name.Name != "Publish" {
 				continue
 			}
 			funcsChecked++
@@ -261,10 +264,9 @@ func TestMED004A2_ConfigResolutionNeverCallsProcessClock(t *testing.T) {
 		t.Fatalf("fence scanned only %d non-test .go files in %s — the walk root is wrong and this "+
 			"test proves nothing", filesScanned, root)
 	}
-	if funcsChecked != 2 {
-		t.Fatalf("fence checked %d functions, want exactly 2 (currentRecoveryCfg, recoveryConfigContentAt) "+
-			"— one of them was renamed/removed/duplicated and this fence no longer matches what it claims to",
-			funcsChecked)
+	if funcsChecked != 1 {
+		t.Fatalf("fence checked %d functions, want exactly 1 (Publish) — it was renamed/removed/duplicated "+
+			"and this fence no longer matches what it claims to", funcsChecked)
 	}
 	if len(violations) > 0 {
 		t.Fatalf("money-gate config resolution must never call time.Now():\n  %s",
@@ -278,7 +280,7 @@ func TestMED004A2_ConfigResolutionNeverCallsProcessClock(t *testing.T) {
 func TestMED004A2_ProcessClockMatcherDetectsKnownCaller(t *testing.T) {
 	src := `package recon
 import "time"
-func currentRecoveryCfg() time.Time {
+func Publish() time.Time {
 	return time.Now()
 }
 `
